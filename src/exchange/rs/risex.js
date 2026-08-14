@@ -326,17 +326,22 @@ export class RisexExchange extends EventEmitter {
   }
 
   async _refreshAccount() {
-    // 余额接口返回原始 18 位小数单位（如 "1000000000000006062000" = 1000 USDC），
-    // 必须除以 1e18 换算为人/币单位，否则保证金预检会看到天文数字而形同虚设。
+    // 余额单位：接口返回的 balance 字段单位不稳定——有的账户返回原始 18 位小数单位
+    // （如 "1000000000000006062000" = 1000 USDC），有的直接返回人/币单位（如 "1000"）。
+    // 无法从响应中区分，用阈值启发式归一化（>1e12 视为原始单位），并记录原始值便于排查。
     try {
       const b = await this._info.getBalance(this.account);
       if (b != null) {
-        const n = Number(b) / 1e18;
+        const raw = String(b);
+        const wasRaw = Number(raw) >= 1e12;
+        let n = Number(b);
+        if (wasRaw) n = n / 1e18; // 原始 18 位单位 → USDC
         if (Number.isFinite(n) && n >= 0) {
           this.balance = n;
           this.lastOkAt = Date.now();
+          if (wasRaw) logger.debug('rs', '余额原始单位归一化: ' + raw + ' → ' + n);
         } else {
-          logger.warn('rs', '余额解析异常（非数字）: ' + JSON.stringify(b));
+          logger.warn('rs', '余额解析异常（非数字）: ' + raw);
         }
       }
     } catch (e) {
