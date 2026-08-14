@@ -326,7 +326,24 @@ export class RisexExchange extends EventEmitter {
   }
 
   async _refreshAccount() {
-    try { const b = await this._info.getBalance(this.account); if (b != null) { this.balance = Number(b); this.lastOkAt = Date.now(); } } catch { /* keep */ }
+    // 余额接口返回原始 18 位小数单位（如 "1000000000000006062000" = 1000 USDC），
+    // 必须除以 1e18 换算为人/币单位，否则保证金预检会看到天文数字而形同虚设。
+    try {
+      const b = await this._info.getBalance(this.account);
+      if (b != null) {
+        const n = Number(b) / 1e18;
+        if (Number.isFinite(n) && n >= 0) {
+          this.balance = n;
+          this.lastOkAt = Date.now();
+        } else {
+          logger.warn('rs', '余额解析异常（非数字）: ' + JSON.stringify(b));
+        }
+      }
+    } catch (e) {
+      // 余额接口对无余额记录/异常账户返回 500：保持 balance=null，由上层
+      // 保证金预检拦截，不静默吞掉（记录日志便于排查）
+      logger.warn('rs', '读取余额失败: ' + (e?.message || e));
+    }
     try { const r = await this._info.getRealizedPnl(this.account); if (r?.total_realized_pnl != null) this.realizedPnl = Number(r.total_realized_pnl); } catch { /* keep */ }
   }
 }

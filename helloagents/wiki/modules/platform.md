@@ -36,3 +36,7 @@
 
 ## 变更历史
 - [202608141349_vps-hardening](../../history/2026-08/202608141349_vps-hardening/) - 新增 log.js 结构化日志模块
+
+## VPS 部署
+- systemd 服务模板: `deploy/grid-bot.service`（安装步骤见文件头注释）
+- 部署要求: 项目在 /root/grid-bot-wg，`npm install --omit=dev`，.env 配置 `HOST=0.0.0.0` + `DASHBOARD_TOKEN` + `PUBLIC_ORIGIN` + HTTPS 反代

@@ -17,6 +17,9 @@
 
 ### 总览
 
+#### GET /api/version
+**描述:** 应用版本号（package.json 来源，前端 header 展示）
+
 #### GET /api/overview
 **描述:** 三所总览（余额/权益/盈亏/状态）
 

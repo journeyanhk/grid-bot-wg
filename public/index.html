@@ -312,6 +312,7 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
   <div class="header-right">
     <span id="hdr-proxy" class="conn" title="全局代理状态"><span class="cdot"></span><span id="hdr-proxy-txt">代理检测中…</span></span>
     <span id="hdr-conn" class="conn warn" title="后端连接状态"><span class="cdot"></span><span id="hdr-conn-txt">连接中…</span></span>
+    <span class="muted" id="hdr-ver" title="应用版本号"></span>
     <span class="muted" id="hdr-time"></span>
   </div>
 </div>
@@ -1043,6 +1044,11 @@ function switchTab(name) {
 
 // ── 时钟 ────────────────────────────────────────────────────────────────────
 setInterval(() => { $('hdr-time').textContent = new Date().toLocaleTimeString('zh-CN'); }, 1000);
+
+// ── 版本号展示（来自后端 package.json，随 /api/version 返回）──────────────────
+apiFetch('/api/version').then((r) => r.json()).then((j) => {
+  if (j && j.version) $('hdr-ver').textContent = 'v' + j.version;
+}).catch(() => {});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 各交易所控制逻辑（工厂函数）

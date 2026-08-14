@@ -27,4 +27,5 @@
 ## 测试与流程
 - **测试:** `npm test` 必须全绿；bot.js 交易逻辑必须通过 MockExchange 覆盖（铺单/补单/风控/对账/恢复）
 - **提交:** 变更必须同步更新 helloagents 知识库（CHANGELOG.md + wiki + history）
+- **版本:** 每次代码改动必须升级 package.json 版本号（修复=Patch+1，新功能=Minor+1，破坏性=Major+1）并登记 CHANGELOG.md；前端通过 /api/version 自动展示
 - **冒烟:** 启动 `npm start` 确认三所初始化与仪表盘可访问

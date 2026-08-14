@@ -22,6 +22,13 @@ import { logger } from './log.js';
 // ── 启动配置 ─────────────────────────────────────────────────────────────────
 const cfg = getConfig();
 
+// ── 应用版本号（package.json 为唯一来源）─────────────────────────────────────
+let APP_VERSION = '0.0.0';
+try {
+  APP_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || APP_VERSION;
+} catch { /* 读不到版本不影响启动 */ }
+logger.info('server', `启动 v${APP_VERSION}`);
+
 // ── 实盘凭据预检查：缺什么直接列出来，不甩堆栈吓人 ─────────────────────────────
 {
   const missing = [];
@@ -317,6 +324,11 @@ const server = http.createServer(async (request, res) => {
         || url.searchParams.get('token') || '';
       if (!tokenValid(token)) return rejectAuth(res, 401, '未授权：缺少或错误的有效令牌');
     }
+    // ── 版本号（前端展示用）────────────────────────────────────────────────
+    if (p === '/api/version') {
+      return send(res, 200, { name: 'grid-bot-all', version: APP_VERSION });
+    }
+
     // ── 总览 API ──────────────────────────────────────────────────────────
     if (p === '/api/overview') {
       return send(res, 200, {
