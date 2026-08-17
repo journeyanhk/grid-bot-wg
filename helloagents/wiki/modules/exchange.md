@@ -51,7 +51,11 @@
 - RISEx 余额接口对无余额记录账户返回 500（"failed to get cross margin balance"）：适配器记录 warn 日志并保持 balance=null，由保证金预检拦截
 - RISEx 余额 `balance` 字段单位账户间不一致（原始 18 位 vs 人/币单位）：适配器用阈值启发式归一化（>1e12 ÷1e18）
 
+## 已知问题（已规避）
+- risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
+
 ## 变更历史
+- [202608171533_risex-leverage](../../history/2026-08/202608171533_risex-leverage/) - 修复杠杆设置（permit_params + WAD）
 - [202608141916_risex-balance-unit](../../history/2026-08/202608141916_risex-balance-unit/) - 余额单位启发式归一化
 - [202608141857_risex-balance-fix](../../history/2026-08/202608141857_risex-balance-fix/) - 修复 RISEx 余额 1e18 单位换算 + 读取失败日志化
 - [202608141349_vps-hardening](../../history/2026-08/202608141349_vps-hardening/) - 依赖漏洞修复（undici 6.28.0 / ws 8.21.3 override，npm audit 归零）、结构化日志接入

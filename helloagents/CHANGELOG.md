@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-08-14
+
+### 修复
+- RISEx 杠杆设置失效：risex-client SDK 的 `updateLeverage` 请求体键名与服务端协议不匹配（发 `permit`，服务端要求 `permit_params`，实测 400），且杠杆值需 WAD 放大（×1e18）。已绕开 SDK 该方法，用其签名原语自组装请求
+
 ## [1.1.2] - 2026-08-14
 
 ### 修复

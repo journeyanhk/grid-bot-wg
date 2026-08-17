@@ -56,7 +56,10 @@ export class RisexExchange extends EventEmitter {
     let SDK;
     try { SDK = await import('risex-client'); }
     catch (e) { throw new Error('未安装 risex-client，请先 npm install。原始错误：' + e.message, { cause: e }); }
-    const { InfoClient, ExchangeClient } = SDK;
+    const { InfoClient, ExchangeClient, encodeLeverage } = SDK;
+    // SDK 的 updateLeverage 请求体键名与服务端协议不匹配（发 permit，服务端要
+    // permit_params），此处保存 encodeLeverage 供 setLeverage 自组装请求使用
+    this._encodeLeverage = encodeLeverage;
     const opts = {};
     if (this.baseUrl) opts.baseUrl = this.baseUrl;
     if (this.wsUrl) opts.wsUrl = this.wsUrl;
@@ -146,8 +149,27 @@ export class RisexExchange extends EventEmitter {
   }
 
   async setLeverage(marketId, x) {
-    try { return await this._client.updateLeverage(Number(marketId), BigInt(Math.round(x))); }
-    catch (e) { this.emit('error', e); return false; }
+    // 绕开 SDK 的 updateLeverage（其请求体用 permit 键，服务端实测要求
+    // permit_params，且 leverage 需 WAD 放大），用 SDK 签名原语自行组装请求：
+    //   lev = x * 1e18（README: parseWad("10") = 10x）
+    //   哈希 = encodeLeverage(marketId, lev)；签名 = client.createPermit(hash)
+    //   请求体 = { market_id, leverage: String(lev), permit_params: permit }
+    try {
+      const lev = BigInt(Math.round(x)) * 10n ** 18n;
+      const hash = this._encodeLeverage(BigInt(marketId), lev);
+      const permit = await this._client.createPermit(hash);
+      const res = await fetch(this.baseUrl + '/v1/account/leverage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ market_id: Number(marketId), leverage: String(lev), permit_params: permit }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        throw new Error(`杠杆设置失败 HTTP ${res.status}: ${j?.error?.message || j?.message || res.statusText}`);
+      }
+      return true;
+    } catch (e) { this.emit('error', e); return false; }
   }
 
   _steps(marketId, base) { return Math.max(1, Math.round(base / this.markets.get(Number(marketId)).stepSize)); }
