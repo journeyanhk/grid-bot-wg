@@ -28,6 +28,8 @@ export class RisexExchange extends EventEmitter {
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
     this.lastError = null;
+    // 适配器支持真实挂单查询（fetchOpenOrders），GridBot 可用两次权威快照安全重试开仓单
+    this.supportsSafeOpeningRetry = true;
     this.markets = new Map();
     this.balance = null;
     this.realizedPnl = null;
@@ -203,7 +205,8 @@ export class RisexExchange extends EventEmitter {
   }
 
   async cancelOrder(marketId, orderId) {
-    this._tracked.delete(String(orderId));
+    // 不在撤单请求前清跟踪：撤单失败时订单仍在交易所，保留跟踪才能继续
+    // 处理成交/对账；确认消失后由 GridBot 调用 forgetOrder 清理。
     return this._serial(() => this._client.cancelOrder({ market_id: Number(marketId), order_id: String(orderId) }));
   }
 
@@ -222,7 +225,8 @@ export class RisexExchange extends EventEmitter {
   async fetchOpenOrders(marketId) {
     const mId = Number(marketId);
     const open = await this._info.getOpenOrders(this.account, mId);
-    return (Array.isArray(open) ? open : []).map((o) => {
+    if (!Array.isArray(open)) return null; // malformed payload is not a trustworthy empty snapshot
+    return open.map((o) => {
       const px = Number(o.price ?? (o.price_ticks != null ? o.price_ticks * this.markets.get(mId)?.stepPrice : 0));
       const side = (typeof o.side === 'number') ? (o.side === 0 ? 'buy' : 'sell')
         : (/^(0|buy|long)$/i.test(String(o.side)) ? 'buy' : 'sell');
@@ -238,6 +242,13 @@ export class RisexExchange extends EventEmitter {
       marketId: mId, levelIndex, side, price: Number(price), sizeBase: Number(sizeBase),
       seen: false, placedAt: Date.now(),
     });
+  }
+
+  /** 撤单确认后清理本地跟踪（由 GridBot 在确认订单消失后调用） */
+  forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
+
+  forgetOrders(marketId) {
+    for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id);
   }
 
   getPosition(marketId) {
@@ -337,7 +348,8 @@ export class RisexExchange extends EventEmitter {
             let uPnl = num(p.unrealized_pnl);
             if (!Number.isFinite(uPnl)) uPnl = (entry > 0 && mark > 0) ? size * (mark - entry) : 0;
             const lev = num(p.leverage) || null;
-            this._pos.set(mId, { sizeBase: size, entryPrice: entry, unrealizedPnl: uPnl, leverage: lev });
+            const liquidationPrice = num(p.liquidation_price) || num(p.liquidationPrice) || null;
+            this._pos.set(mId, { sizeBase: size, entryPrice: entry, unrealizedPnl: uPnl, leverage: lev, liquidationPrice });
           } else { this._pos.delete(mId); }
         } catch { /* keep last */ }
       }

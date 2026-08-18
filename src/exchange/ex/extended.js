@@ -43,6 +43,8 @@ export class ExtendedExchange extends EventEmitter {
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
     this.lastError = null;
+    // 适配器支持真实挂单查询（fetchOpenOrders），GridBot 可用两次权威快照安全重试开仓单
+    this.supportsSafeOpeningRetry = true;
     this.domain = DOMAINS[this.network] || DOMAINS.mainnet;
     this.markets = new Map();   // marketId -> market
     this.balance = null;
@@ -270,7 +272,8 @@ export class ExtendedExchange extends EventEmitter {
   }
 
   async cancelOrder(marketId, orderId) {
-    this._tracked.delete(String(orderId));
+    // 不在撤单请求前清跟踪：撤单失败时订单仍在交易所，保留跟踪才能继续
+    // 处理成交/对账；确认消失后由 GridBot 调用 forgetOrder 清理。
     return this._req('DELETE', `/api/v1/user/order/${orderId}`);
   }
 
@@ -307,6 +310,13 @@ export class ExtendedExchange extends EventEmitter {
       marketId: mId, levelIndex, side, price: Number(price), sizeBase: Number(sizeBase),
       seen: false, placedAt: Date.now(), goneAttempts: 0, resolving: false,
     });
+  }
+
+  /** 撤单确认后清理本地跟踪（由 GridBot 在确认订单消失后调用） */
+  forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
+
+  forgetOrders(marketId) {
+    for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id);
   }
 
   getPosition(marketId) {
@@ -385,6 +395,7 @@ export class ExtendedExchange extends EventEmitter {
               sizeBase: size, entryPrice: Number(p.openPrice),
               unrealizedPnl: Number(p.unrealisedPnl ?? 0),
               leverage: p.leverage != null ? Number(p.leverage) : null,
+              liquidationPrice: firstFinite(p.liquidationPrice, p.estimatedLiquidationPrice, p.liquidation_price),
             });
           } else { this._pos.delete(mId); }
         } catch { /* keep last */ }
@@ -471,4 +482,12 @@ export class ExtendedExchange extends EventEmitter {
       /* otherwise keep last known balance */
     }
   }
+}
+
+function firstFinite(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }

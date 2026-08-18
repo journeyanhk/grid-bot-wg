@@ -535,6 +535,7 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
       <button class="btn btn-stop" id="de-stop-btn" disabled>停止 + 撤单 + 平仓</button>
       <button class="btn btn-ghost" id="de-adjust-btn" disabled style="margin-top:8px">调整区间（不停止网格）</button>
       <button class="btn btn-ghost" id="de-cancel-orders-btn" style="margin-top:8px;border-color:var(--yel);color:var(--yel)">撤销所有挂单（保留持仓）</button>
+      <button class="btn btn-ghost" id="de-refill-btn" style="margin-top:8px">补齐网格挂单（一键补格）</button>
     </div>
   </div>
 
@@ -557,11 +558,13 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <div class="kv"><span class="lbl">权益</span><span class="val" id="de-st-eq">—</span></div></div>
         <div><div class="kv"><span class="lbl">持仓</span><span class="val" id="de-st-pos">—</span></div>
           <div class="kv"><span class="lbl">持仓均价</span><span class="val" id="de-st-entry">—</span></div>
+          <div class="kv"><span class="lbl">强平价</span><span class="val" id="de-st-liq">—</span></div>
           <div class="kv"><span class="lbl">已实现盈亏</span><span class="val" id="de-st-rpnl">—</span></div>
           <div class="kv"><span class="lbl">未实现盈亏</span><span class="val" id="de-st-upnl">—</span></div></div>
       </div>
       <div class="kv"><span class="lbl">总盈亏 / 收益率</span><span class="val" id="de-st-total">—</span></div>
       <div class="kv"><span class="lbl">挂单数 / 完成格</span><span class="val" id="de-st-orders">—</span></div>
+      <div class="kv" id="de-st-issue" style="display:none"></div>
       <button class="btn btn-ghost" id="de-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
       <button class="btn btn-ghost" id="de-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
     </div>
@@ -659,6 +662,7 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
       <button class="btn btn-stop" id="ex-stop-btn" disabled>停止 + 撤单 + 平仓</button>
       <button class="btn btn-ghost" id="ex-adjust-btn" disabled style="margin-top:8px">调整区间（不停止网格）</button>
       <button class="btn btn-ghost" id="ex-cancel-orders-btn" style="margin-top:8px;border-color:var(--yel);color:var(--yel)">撤销所有挂单（保留持仓）</button>
+      <button class="btn btn-ghost" id="ex-refill-btn" style="margin-top:8px">补齐网格挂单（一键补格）</button>
     </div>
   </div>
 
@@ -680,11 +684,13 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <div class="kv"><span class="lbl">权益</span><span class="val" id="ex-st-eq">—</span></div></div>
         <div><div class="kv"><span class="lbl">持仓</span><span class="val" id="ex-st-pos">—</span></div>
           <div class="kv"><span class="lbl">持仓均价</span><span class="val" id="ex-st-entry">—</span></div>
+          <div class="kv"><span class="lbl">强平价</span><span class="val" id="ex-st-liq">—</span></div>
           <div class="kv"><span class="lbl">已实现盈亏</span><span class="val" id="ex-st-rpnl">—</span></div>
           <div class="kv"><span class="lbl">未实现盈亏</span><span class="val" id="ex-st-upnl">—</span></div></div>
       </div>
       <div class="kv"><span class="lbl">总盈亏 / 收益率</span><span class="val" id="ex-st-total">—</span></div>
       <div class="kv"><span class="lbl">挂单数 / 完成格</span><span class="val" id="ex-st-orders">—</span></div>
+      <div class="kv" id="ex-st-issue" style="display:none"></div>
       <button class="btn btn-ghost" id="ex-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
       <button class="btn btn-ghost" id="ex-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
     </div>
@@ -782,6 +788,7 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
       <button class="btn btn-stop" id="rs-stop-btn" disabled>停止 + 撤单 + 平仓</button>
       <button class="btn btn-ghost" id="rs-adjust-btn" disabled style="margin-top:8px">调整区间（不停止网格）</button>
       <button class="btn btn-ghost" id="rs-cancel-orders-btn" style="margin-top:8px;border-color:var(--yel);color:var(--yel)">撤销所有挂单（保留持仓）</button>
+      <button class="btn btn-ghost" id="rs-refill-btn" style="margin-top:8px">补齐网格挂单（一键补格）</button>
     </div>
   </div>
 
@@ -803,11 +810,13 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <div class="kv"><span class="lbl">权益</span><span class="val" id="rs-st-eq">—</span></div></div>
         <div><div class="kv"><span class="lbl">持仓</span><span class="val" id="rs-st-pos">—</span></div>
           <div class="kv"><span class="lbl">持仓均价</span><span class="val" id="rs-st-entry">—</span></div>
+          <div class="kv"><span class="lbl">强平价</span><span class="val" id="rs-st-liq">—</span></div>
           <div class="kv"><span class="lbl">已实现盈亏</span><span class="val" id="rs-st-rpnl">—</span></div>
           <div class="kv"><span class="lbl">未实现盈亏</span><span class="val" id="rs-st-upnl">—</span></div></div>
       </div>
       <div class="kv"><span class="lbl">总盈亏 / 收益率</span><span class="val" id="rs-st-total">—</span></div>
       <div class="kv"><span class="lbl">挂单数 / 完成格</span><span class="val" id="rs-st-orders">—</span></div>
+      <div class="kv" id="rs-st-issue" style="display:none"></div>
       <button class="btn btn-ghost" id="rs-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
       <button class="btn btn-ghost" id="rs-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
     </div>
@@ -998,6 +1007,7 @@ const fmt = (v, d=2) => v == null ? '—' : Number(v).toLocaleString('en-US', { 
 const signed = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + fmt(v);
 const cls = (v) => v == null ? '' : (v >= 0 ? 'up' : 'down');
 const round = (x) => Math.round(x * 100) / 100;
+const fmtPrice = (v) => v == null || !Number.isFinite(Number(v)) ? '—' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 });
 const pnlHtml = (v) => v == null ? '—' : `<span class="${cls(v)}">${signed(v)}</span>`;
 
 // ── 鉴权与安全辅助（VPS 部署）───────────────────────────────────────────────
@@ -1022,6 +1032,31 @@ async function apiFetch(path, opts = {}) {
     throw new Error('未授权：缺少访问令牌');
   }
   return res;
+}
+
+// ── 展示辅助（挂单进度 / 交易所核实 / 运维异常）────────────────────────────
+function placementProgressText(state) {
+  const pr = state?.placementProgress;
+  if (!pr) return '';
+  return `挂单目标 ${pr.target} / 已确认 ${pr.confirmed} / 待重试 ${pr.pending}${pr.failed ? ` / 已停止重试 ${pr.failed}` : ''}`;
+}
+
+function verifiedOrdersText(state) {
+  const count = state?.exchangeOpenOrders;
+  if (count == null) return '交易所真实挂单数暂未确认';
+  const at = Number(state?.exchangeOpenOrdersVerifiedAt || state?.health?.exchangeOpenOrdersVerifiedAt || 0);
+  const time = at > 0 ? `（${new Date(at).toLocaleTimeString('zh-CN')} 核实）` : '';
+  return `交易所确认真实挂单 ${count} 单${time}`;
+}
+
+function issueHtml(issue, fallbackAddress) {
+  if (!issue) return '';
+  const address = issue.apiWalletAddress || fallbackAddress || '';
+  const validAddress = /^0x[0-9a-f]+$/i.test(address);
+  const addressHtml = address
+    ? `<div style="margin-top:4px">API Wallet：<code>${esc(address)}</code> <button class="btn btn-ghost" style="width:auto;margin:4px 0 0;padding:2px 8px;font-size:10px" onclick='navigator.clipboard.writeText(${JSON.stringify(address)})'>复制</button></div>`
+    : '';
+  return `<span class="warn-box" style="margin:4px 0 8px">⚠ <b>${esc(issue.title || '交易操作异常')}</b><br>${esc(issue.message || '')}${addressHtml}</span>`;
 }
 
 const sseUrl = (path) => authToken
@@ -1251,6 +1286,23 @@ function makeExchangeCtrl(prefix, chartId) {
     if (j.error) alert('撤单失败：' + j.error);
   };
 
+  if (P('refill-btn')) P('refill-btn').onclick = async () => {
+    if (!confirm('确认补齐网格挂单？\n将先与交易所对账，然后把没有挂单的格位按当前价方向补挂开仓单（低于现价补买、高于现价补卖）。\n补挂会新占用保证金，执行前有保证金预检。')) return;
+    const btn = P('refill-btn'); const oldTxt = btn.textContent;
+    btn.disabled = true; btn.textContent = '补格中…';
+    try {
+      const r = await apiFetch(`/api/${prefix}/refill`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+      const j = await r.json();
+      if (j.error) { alert('补格失败：' + j.error); return; }
+      if (lastState) render(lastState);
+      const pr = j.placementProgress;
+      alert(pr && pr.status !== 'complete'
+        ? `补格尚未全部确认；${placementProgressText(j)}。程序会先对账再安全重试。`
+        : `补格完成；${placementProgressText(j) || verifiedOrdersText(j)}。`);
+    } catch (e) { alert('补格失败：' + e.message); }
+    finally { btn.disabled = false; btn.textContent = oldTxt; }
+  };
+
   // ── 未托管持仓处置（开机扫描后手动选择）──
   P('orphan-recover').onclick = async () => {
     const aboveEntryOnly = !!(P('orphan-above-entry') && P('orphan-above-entry').checked);
@@ -1306,10 +1358,14 @@ function makeExchangeCtrl(prefix, chartId) {
       const levTxt = s.position.leverage ? ` <span class="muted">@${s.position.leverage}x</span>` : '';
       P('st-pos').innerHTML = `<span class="${long?'up':'down'}">${long?'多':'空'} ${Math.abs(s.position.sizeBase)}</span>${levTxt}`;
       P('st-entry').textContent = s.position.entryPrice || '—';
+      if (P('st-liq')) P('st-liq').textContent = s.position.liquidationPrice
+        ? fmtPrice(s.position.liquidationPrice)
+        : (s.mode === 'paper' ? '—（模拟账户无真实强平价）' : '—（交易所暂未返回）');
       P('st-upnl').innerHTML = pnlHtml(s.position.unrealizedPnl);
     } else {
       P('st-pos').textContent = '无持仓';
       P('st-entry').textContent = '—';
+      if (P('st-liq')) P('st-liq').textContent = '—';
       P('st-upnl').textContent = '—';
     }
     P('st-rpnl').innerHTML = pnlHtml(s.realizedPnl);
@@ -1323,7 +1379,14 @@ function makeExchangeCtrl(prefix, chartId) {
       }
     }
     P('st-total').innerHTML = `${pnlHtml(s.totalPnl)} <span class="muted">/ ${s.returnPct != null ? `<span class="${cls(s.returnPct)}">${s.returnPct>=0?'+':''}${s.returnPct}%</span>` : '—'}</span>`;
-    P('st-orders').textContent = `${s.openOrders ?? 0} 单 / ${s.stats?.completedRungs ?? 0} 格`;
+    const progressText = placementProgressText(s);
+    P('st-orders').textContent = `${s.openOrders ?? 0} 单 / ${s.stats?.completedRungs ?? 0} 格${progressText ? ` · ${progressText}` : ''}`;
+    const issueEl = P('st-issue');
+    if (issueEl) {
+      const issue = s.operationalIssue || s.health?.operationalIssue || null;
+      if (issue) { issueEl.style.display = ''; issueEl.innerHTML = issueHtml(issue, s.apiWalletAddress); }
+      else issueEl.style.display = 'none';
+    }
 
     P('fills').innerHTML = (s.fills||[]).map(f =>
       `<tr><td>${new Date(f.t).toLocaleTimeString()}</td><td><span class="pill ${f.side==='buy'?'pill-buy':'pill-sell'}">${f.side==='buy'?'买':'卖'}</span></td><td>${round(f.price)}</td><td>${f.size}</td></tr>`

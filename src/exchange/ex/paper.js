@@ -35,6 +35,8 @@ export class PaperExchange extends EventEmitter {
     this.realizedPnl = 0;
     this.lastOkAt = Date.now();
     this.lastError = null;
+    // 支持安全重试开仓单（有真实挂单查询）
+    this.supportsSafeOpeningRetry = true;
     this.prices = new Map();      // displayed/simulated price
     this.realTarget = new Map();  // latest real price target
     this._seq = 1;
@@ -153,6 +155,12 @@ export class PaperExchange extends EventEmitter {
 
   adoptOrder({ orderId, marketId, levelIndex, side, price, sizeBase }) {
     this.orders.set(String(orderId), { orderId: String(orderId), marketId: Number(marketId), levelIndex, side, price: Number(price), sizeBase: Number(sizeBase), reduceOnly: false });
+  }
+
+  forgetOrder(orderId) { this.orders.delete(String(orderId)); }
+
+  forgetOrders(marketId) {
+    for (const [id, o] of this.orders) if (Number(o.marketId) === Number(marketId)) this.orders.delete(id);
   }
 
   getPosition(marketId) {

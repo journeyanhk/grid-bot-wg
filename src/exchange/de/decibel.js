@@ -100,6 +100,10 @@ export class DecibelExchange extends EventEmitter {
     this._busy = false;
     this.read = null;
     this.write = null;
+    // Public metadata only: the API wallet signs Aptos transactions and must
+    // hold APT for gas. Never expose the private key through getState().
+    this.apiWalletAddress = null;
+    this.operationalIssue = null;
   }
 
   async init() {
@@ -141,6 +145,7 @@ export class DecibelExchange extends EventEmitter {
     };
 
     this.account = new Ed25519Account({ privateKey: new Ed25519PrivateKey(this.privateKey) });
+    this.apiWalletAddress = this.account.accountAddress.toString();
     if (!this.subaccount) {
       throw new Error('请在 .env 配置 DECIBEL_SUBACCOUNT（app.decibel.trade 账户页的 Trading Account 地址）。');
     }
@@ -290,6 +295,26 @@ export class DecibelExchange extends EventEmitter {
   }
 
   // ---------- trading ----------
+  _translateTxError(error) {
+    const raw = error?.message || String(error);
+    if (/INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE|insufficient[^\n]*transaction[^\n]*fee/i.test(raw)) {
+      const address = this.apiWalletAddress || '（地址暂不可用）';
+      this.operationalIssue = {
+        code: 'DECIBEL_APT_GAS_INSUFFICIENT',
+        title: 'Decibel API 签名钱包没有足够的 APT 支付链上手续费',
+        message: '交易账户中的 USDC 不能支付 Aptos Gas；请向 API Wallet 充值 APT 后再下单。',
+        apiWalletAddress: address,
+      };
+      const friendly = new Error(`${this.operationalIssue.title}。${this.operationalIssue.message} API Wallet 地址：${address}`);
+      friendly.code = this.operationalIssue.code;
+      friendly.cause = error;
+      return friendly;
+    }
+    return error instanceof Error ? error : new Error(raw);
+  }
+
+  _clearOperationalIssue() { this.operationalIssue = null; }
+
   async setLeverage(marketId, x) {
     const m = this._market(marketId);
     try {
@@ -297,22 +322,29 @@ export class DecibelExchange extends EventEmitter {
         marketAddr: m.addr, subaccountAddr: this.subaccount,
         isCross: true, userLeverage: Number(x),
       });
+      this._clearOperationalIssue();
       return true;
-    } catch (e) { this.emit('error', e); return false; }
+    } catch (e) { this.emit('error', this._translateTxError(e)); return false; }
   }
 
   async _submitOrder(m, { side, price, sizeBase, timeInForce, reduceOnly, clientOrderId }) {
     const chainPrice = toChainPrice(price, m);
     const chainSize = toChainSize(sizeBase, m);
     if (chainSize < m.minSize) throw new Error(`数量过小：${sizeBase} 低于市场最小下单量 ${m.minOrderSize}。`);
-    const r = await this.write.placeOrder({
-      marketName: m.name,
-      price: chainPrice, size: chainSize,
-      isBuy: side === 'buy',
-      timeInForce, isReduceOnly: !!reduceOnly,
-      clientOrderId: clientOrderId != null ? String(clientOrderId) : undefined,
-      subaccountAddr: this.subaccount,
-    });
+    let r;
+    try {
+      r = await this.write.placeOrder({
+        marketName: m.name,
+        price: chainPrice, size: chainSize,
+        isBuy: side === 'buy',
+        timeInForce, isReduceOnly: !!reduceOnly,
+        clientOrderId: clientOrderId != null ? String(clientOrderId) : undefined,
+        subaccountAddr: this.subaccount,
+      });
+      this._clearOperationalIssue();
+    } catch (e) {
+      throw this._translateTxError(e);
+    }
     if (r && r.success === false) {
       throw new Error('Decibel 拒单: ' + (r.reason || r.error || JSON.stringify(r)));
     }
@@ -341,29 +373,49 @@ export class DecibelExchange extends EventEmitter {
 
   async cancelOrder(marketId, orderId) {
     const m = this._market(marketId);
-    this._tracked.delete(String(orderId));
-    return this.write.cancelOrder({ orderId: String(orderId), marketName: m.name, subaccountAddr: this.subaccount });
+    try {
+      const result = await this.write.cancelOrder({ orderId: String(orderId), marketName: m.name, subaccountAddr: this.subaccount });
+      this._clearOperationalIssue();
+      return result;
+    } catch (e) {
+      throw this._translateTxError(e);
+    }
   }
 
   async cancelAll(marketId) {
     const m = this._market(marketId);
-    for (const [id, o] of this._tracked) if (o.marketId === m.marketId) this._tracked.delete(id);
     try {
       const open = await this._openOrders();
+      const failures = [];
       for (const o of open) {
         if (String(o.market) !== m.addr && String(o.market) !== m.name) continue;
         if (o.is_tpsl) continue; // leave TP/SL attached to positions alone
         try {
           await this.write.cancelOrder({ orderId: String(o.order_id), marketName: m.name, subaccountAddr: this.subaccount });
-        } catch (e) { this.emit('error', e); }
+          this._clearOperationalIssue();
+        } catch (e) {
+          const friendly = this._translateTxError(e);
+          failures.push(friendly);
+          this.emit('error', friendly);
+        }
       }
+      if (failures.length) throw new Error(`Decibel 有 ${failures.length} 笔挂单撤单失败。`);
       return true;
     } catch (e) { this.emit('error', e); return false; }
   }
 
+  /** Drop local tracking only after GridBot has independently confirmed cancellation. */
+  forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
+  forgetOrders(marketId) {
+    const mId = Number(marketId);
+    for (const [id, o] of this._tracked) if (o.marketId === mId) this._tracked.delete(id);
+  }
+
   async _openOrders() {
     const r = await this.read.userOpenOrders.getByAddr({ subAddr: this.subaccount, limit: 500, offset: 0 });
-    return Array.isArray(r) ? r : (r?.items || []);
+    if (Array.isArray(r)) return r;
+    if (Array.isArray(r?.items)) return r.items;
+    return null; // malformed/empty payload is not proof that zero orders exist
   }
 
   getOpenOrders(marketId) {
@@ -491,6 +543,7 @@ export class DecibelExchange extends EventEmitter {
             unrealizedPnl: Number(p.unrealized_pnl ?? (size * (mark - entry))),
             exUpnl,
             leverage: p.user_leverage != null ? Number(p.user_leverage) : null,
+            liquidationPrice: pickNum(p, 'estimated_liquidation_price', 'liquidation_price'),
           });
           seen.add(mkt.marketId);
         }

@@ -55,6 +55,7 @@
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
 ## 变更历史
+- [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - 撤单失败保留跟踪/forgetOrder/强平价/Decibel 错误翻译（operationalIssue）
 - [202608171533_risex-leverage](../../history/2026-08/202608171533_risex-leverage/) - 修复杠杆设置（permit_params + WAD）
 - [202608141916_risex-balance-unit](../../history/2026-08/202608141916_risex-balance-unit/) - 余额单位启发式归一化
 - [202608141857_risex-balance-fix](../../history/2026-08/202608141857_risex-balance-fix/) - 修复 RISEx 余额 1e18 单位换算 + 读取失败日志化

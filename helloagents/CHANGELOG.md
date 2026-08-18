@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-18
+
+### 新增
+- 移植原作者最新版安全机制：一键补格 refillGrid、撤单确认（_cancelAllConfirmed 轮询交易所确认消失）、开仓单安全重试 + 挂单进度跟踪（placementProgress，两次权威快照去重）
+- 适配器安全增强：撤单失败保留本地跟踪（确认后 forgetOrder 清理）、malformed 挂单快照不视为 0 单
+- Decibel 友好错误翻译（operationalIssue）：gas 不足时仪表盘直接显示中文原因 + API Wallet 地址可一键复制
+- 持仓展示增强：强平价（liquidationPrice）显示
+- 前端：三个控制台"一键补格"按钮、挂单进度/交易所核实挂单数展示
+- 测试：cancel-safety（10 例）+ safety-progress（5 例，补格/进度/安全重试/停止中止），总计 44 例
+
+### 变更
+- 保留既有安全与修复：VPS 鉴权、XSS 转义、结构化日志、ESLint、RISEx 余额/杠杆/撤单三项修复
+
 ## [1.1.3] - 2026-08-14
 
 ### 修复

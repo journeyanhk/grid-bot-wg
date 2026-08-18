@@ -209,6 +209,11 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
+    if (subPath === '/refill' && req.method === 'POST') {
+      try { return send(res, 200, await bot.refillGrid()); }
+      catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
     // 重新与交易所建立连接：重建客户端/解卡轮询/重启轮询循环。
     // 不撤单、不平仓、不动网格状态 —— 挂单照常被跟踪；重连成功后立刻对账一次。
     // 若该所启动时未连上导致续跑被跳过（快照仍为运行状态），重连成功后自动续跑接管挂单。

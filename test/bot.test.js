@@ -125,7 +125,8 @@ const CFG = { marketId: 1, mode: 'neutral', lower: 100, upper: 200, gridCount: 1
 
 async function makeBot(exOpts = {}, cfg = CFG) {
   const ex = new MockExchange(exOpts);
-  const bot = new GridBot(ex);
+  // 测试用快速撤单确认（生产默认 750ms x 2 次稳定快照）
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
   await bot.start(cfg);
   return { ex, bot };
 }
