@@ -211,6 +211,17 @@ input:focus, select:focus { outline: none; border-color: var(--pur); }
 .exhealth.eh-warn { color:#fcd34d; }
 .exhealth.eh-error { color:#fca5a5; }
 .exhealth.eh-idle { color:var(--mut); }
+.ov-position {
+  margin-top:10px; padding:9px 10px; border:1px solid var(--border2);
+  border-radius:7px; background:var(--bg2); font-size:11px;
+}
+.ov-position-title { color:var(--mut2); margin-bottom:5px; }
+.ov-position-empty { color:var(--mut); }
+.ov-position .ov-stat { padding:2px 0; }
+.operation-issue {
+  margin-top:9px; padding:9px 10px; border:1px solid #ef444480;
+  border-radius:7px; background:#ef444410; font-size:11px; color:#fca5a5;
+}
 
 /* ── AI 助手 ── */
 .ai-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; }
@@ -379,6 +390,8 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
         <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-de-price">—</span></div>
         <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-de-mkt">—</span></div>
       </div>
+      <div class="ov-position" id="ov-de-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-de-issue" style="display:none"></div>
       <div id="ov-de-gridcfg" class="gridcfg" style="display:none"></div>
       <div id="ov-de-ai" class="ai-box muted" style="display:none;margin-top:8px;font-size:12px"></div>
       <div id="ov-de-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
@@ -406,6 +419,8 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
         <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-ex-price">—</span></div>
         <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-ex-mkt">—</span></div>
       </div>
+      <div class="ov-position" id="ov-ex-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-ex-issue" style="display:none"></div>
       <div id="ov-ex-gridcfg" class="gridcfg" style="display:none"></div>
       <div id="ov-ex-ai" class="ai-box muted" style="display:none;margin-top:8px;font-size:12px"></div>
       <div id="ov-ex-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
@@ -433,6 +448,8 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
         <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-rs-price">—</span></div>
         <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-rs-mkt">—</span></div>
       </div>
+      <div class="ov-position" id="ov-rs-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-rs-issue" style="display:none"></div>
       <div id="ov-rs-gridcfg" class="gridcfg" style="display:none"></div>
       <div id="ov-rs-ai" class="ai-box muted" style="display:none;margin-top:8px;font-size:12px"></div>
       <div id="ov-rs-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
@@ -1603,6 +1620,26 @@ function setExHealth(p, h, connected) {
   }
 }
 
+function renderOverviewPosition(prefix, d) {
+  const box = $(`ov-${prefix}-position`);
+  if (!box) return;
+  const p = d.position;
+  if (!p || !Number(p.sizeBase)) {
+    box.innerHTML = '<span class="ov-position-empty">当前无持仓</span>';
+    return;
+  }
+  const long = Number(p.sizeBase) > 0;
+  const leverage = p.leverage ? ` @${esc(p.leverage)}x` : '';
+  const liq = p.liquidationPrice
+    ? fmtPrice(p.liquidationPrice)
+    : (d.mode === 'paper' ? '—（模拟账户无真实强平价）' : '—（交易所暂未返回）');
+  box.innerHTML = `<div class="ov-position-title">当前持仓 · ${esc(d.config?.displayName || '当前市场')}</div>`
+    + `<div class="ov-stat"><span class="lbl">方向 / 数量</span><span class="val ${long ? 'up' : 'down'}">${long ? '多' : '空'} ${fmt(Math.abs(Number(p.sizeBase)), 8)}${leverage}</span></div>`
+    + `<div class="ov-stat"><span class="lbl">持仓均价</span><span class="val">${fmtPrice(p.entryPrice)}</span></div>`
+    + `<div class="ov-stat"><span class="lbl">强平价格</span><span class="val down">${liq}</span></div>`
+    + `<div class="ov-stat"><span class="lbl">未实现盈亏</span><span class="val">${pnlHtml(p.unrealizedPnl)}</span></div>`;
+}
+
 function renderOverview(data) {
   lastOverview = data;
   // 三所汇总
@@ -1639,6 +1676,12 @@ function renderOverview(data) {
     $(`ov-${p}-rungs`).textContent = `${d.completedRungs || 0} 格`;
     $(`ov-${p}-price`).textContent = d.lastPrice ?? '—';
     $(`ov-${p}-mkt`).textContent = d.config?.displayName ?? '—';
+    renderOverviewPosition(p, d);
+    const issueBox = $(`ov-${p}-issue`);
+    if (issueBox) {
+      issueBox.style.display = d.operationalIssue ? '' : 'none';
+      issueBox.innerHTML = issueHtml(d.operationalIssue, d.apiWalletAddress);
+    }
 
     // 本次启动参数：启动网格后显示（下/上边界、格数、每格数量、杠杆、区间外策略），
     // 停止后自动清空；重新启动即显示新一轮参数。调整区间后同步更新。

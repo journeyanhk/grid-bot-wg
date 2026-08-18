@@ -540,6 +540,9 @@ function pick(s, mode) {
     health: s.health ?? null,
     lastPrice: s.lastPrice,
     config: s.config,
+    position: s.position ?? null,
+    operationalIssue: s.operationalIssue ?? null,
+    apiWalletAddress: s.apiWalletAddress ?? null,
   };
 }
 

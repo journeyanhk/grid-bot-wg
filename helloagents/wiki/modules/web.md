@@ -43,6 +43,7 @@ VPS/公网部署下，交易控制 API 必须受保护。
 - config（.env 加载）、bot（状态来源）、exchange（数据源）、ai（AI 接口）、persist（快照）、log（日志）
 
 ## 变更历史
+- [202608181353_overview-position](../../history/2026-08/202608181353_overview-position/) - 总览页持仓/运维异常展示
 - [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - 补格按钮/挂单进度/强平价/运维异常展示
 - [202608141857_risex-balance-fix](../../history/2026-08/202608141857_risex-balance-fix/) - 版本号机制（/api/version + 前端展示）
 - [202608141349_vps-hardening](../../history/2026-08/202608141349_vps-hardening/) - 鉴权 + XSS 转义 + 结构化日志接入
