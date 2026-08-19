@@ -53,5 +53,6 @@
 - grid（纯函数：buildGrid/seedOrders/replacementFor）、exchange 适配器（事件源）、persist（onChange 钩子）、log
 
 ## 变更历史
+- [202608191510_decibel-safety-l12](../../history/2026-08/202608191510_decibel-safety-l12/) - 回收阶梯撤单跳过幽灵单
 - [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - v1.2.0 移植：补格/撤单确认/安全重试/进度跟踪
 - [202608141349_vps-hardening](../../history/2026-08/202608141349_vps-hardening/) - 引入 MockExchange 单元测试、结构化日志

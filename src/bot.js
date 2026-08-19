@@ -1119,8 +1119,16 @@ export class GridBot {
   async _cancelRecoveryLadder() {
     const ids = [...this.active].filter(([, o]) => o.recovery).map(([id]) => id);
     if (!ids.length) return;
+    // 幽灵单防护：只对交易所真实挂单簿里仍然存在的订单发送撤单——本地跟踪中
+    // 但交易所已不存在的（链上未接受的幽灵单/已成交）直接跳过，避免对不存在
+    // 订单发链上撤单被拒绝、浪费 gas 并累积错误；这些订单由对账/成交确认流程清理。
+    let real = null;
+    try { real = await this.ex.fetchOpenOrders?.(this.config.marketId); } catch { /* 保持全部尝试 */ }
+    const realIds = Array.isArray(real) ? new Set(real.map((o) => String(o.orderId))) : null;
+    const toCancel = realIds ? ids.filter((id) => realIds.has(id)) : ids;
+    const skipped = ids.length - toCancel.length;
     let requestErrors = 0;
-    for (const id of ids) {
+    for (const id of toCancel) {
       try { await this.ex.cancelOrder?.(this.config.marketId, id); }
       catch { requestErrors++; }
     }
@@ -1129,7 +1137,7 @@ export class GridBot {
       this.active.delete(id);
       try { this.ex.forgetOrder?.(id); } catch { /* ignore local cleanup */ }
     }
-    this._alert(`已确认撤销 ${ids.length} 个回收阶梯挂单${requestErrors ? `（${requestErrors} 笔撤单请求报错，但交易所快照已确认订单消失）` : ''}。`);
+    this._alert(`已确认撤销 ${toCancel.length} 个回收阶梯挂单${skipped ? `，跳过 ${skipped} 个交易所已不存在的挂单（幽灵单）` : ''}${requestErrors ? `（${requestErrors} 笔撤单请求报错，但交易所快照已确认订单消失）` : ''}。`);
     this._changed();
   }
 

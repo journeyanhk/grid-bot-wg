@@ -83,6 +83,7 @@ export class DecibelExchange extends EventEmitter {
     this.subaccount = opts.subaccount || null; // trading account address
     this.apiUrl = opts.apiUrl || this.net.tradingHttpUrl;
     this.pollMs = opts.pollMs ?? 2000;            // 更快轮询以降低链上索引器滞后
+    this.cancelRetryMs = opts.cancelRetryMs ?? 1000; // 撤单重试基础退避（测试可调短）
     this._graceMs = this.pollMs * 2; // give a just-placed order time to be indexed before judging it "gone"
     this.lastOkAt = 0;               // 上次成功轮询时间（健康检测用）
     this.lastError = null;
@@ -374,12 +375,27 @@ export class DecibelExchange extends EventEmitter {
   async cancelOrder(marketId, orderId) {
     const m = this._market(marketId);
     try {
-      const result = await this.write.cancelOrder({ orderId: String(orderId), marketName: m.name, subaccountAddr: this.subaccount });
-      this._clearOperationalIssue();
+      const result = await this._cancelWithRetry(orderId, m.name);
       return result;
     } catch (e) {
       throw this._translateTxError(e);
     }
+  }
+
+  /** 单笔撤单带重试：链上瞬时拥堵/索引滞后常见，1s/2s 退避重试 3 次。 */
+  async _cancelWithRetry(orderId, marketName) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.write.cancelOrder({ orderId: String(orderId), marketName, subaccountAddr: this.subaccount });
+        this._clearOperationalIssue();
+        return true;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, this.cancelRetryMs * attempt));
+      }
+    }
+    throw lastErr;
   }
 
   async cancelAll(marketId) {
@@ -391,8 +407,7 @@ export class DecibelExchange extends EventEmitter {
         if (String(o.market) !== m.addr && String(o.market) !== m.name) continue;
         if (o.is_tpsl) continue; // leave TP/SL attached to positions alone
         try {
-          await this.write.cancelOrder({ orderId: String(o.order_id), marketName: m.name, subaccountAddr: this.subaccount });
-          this._clearOperationalIssue();
+          await this._cancelWithRetry(o.order_id, m.name);
         } catch (e) {
           const friendly = this._translateTxError(e);
           failures.push(friendly);
@@ -628,14 +643,18 @@ export class DecibelExchange extends EventEmitter {
 
     if (verdict === 'unknown') {
       t.goneAttempts = (t.goneAttempts || 0) + 1;
-      if (t.goneAttempts < 6) return; // re-check; a lagging indexer can briefly hide a resting order
+      // 幽灵单防护：提交后始终未被交易所确认（链上未接受/索引未收录）的订单
+      // 尽快清理——3 轮（约 6-8s）仍未在 open orders 与 history 出现即视为不存在，
+      // 避免其长期残留在本地跟踪中参与后续撤单/对账流程。
+      if (t.goneAttempts < 3) return; // re-check; a lagging indexer can briefly hide a resting order
       verdict = 'cancelled';          // never positively confirmed filled -> assume NOT filled
     }
     this._tracked.delete(id);
     if (verdict === 'filled') {
       this.emit('fill', { orderId: id, marketId: t.marketId, side: t.side, price: t.price, sizeBase: t.sizeBase, levelIndex: t.levelIndex });
     } else {
-      this.emit('error', new Error(`订单 ${id}（${t.side} @ ${t.price}）未确认成交，已停止跟踪（不补单）。`));
+      logger.warn('de', `订单 ${id}（${t.side} @ ${t.price}）提交后未被交易所确认（可能链上未接受），已停止跟踪：不视为成交、不补单、不撤单。`);
+      this.emit('error', new Error(`订单 ${id}（${t.side} @ ${t.price}）提交后未被交易所确认，已停止跟踪：不视为成交、不补单、不撤单。`));
     }
   }
 
