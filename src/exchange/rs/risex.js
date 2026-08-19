@@ -28,8 +28,6 @@ export class RisexExchange extends EventEmitter {
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
     this.lastError = null;
-    // 适配器支持真实挂单查询（fetchOpenOrders），GridBot 可用两次权威快照安全重试开仓单
-    this.supportsSafeOpeningRetry = true;
     this.markets = new Map();
     this.balance = null;
     this.realizedPnl = null;

@@ -35,8 +35,6 @@ export class PaperExchange extends EventEmitter {
     this.realizedPnl = 0;
     this.lastOkAt = Date.now();
     this.lastError = null;
-    // 支持安全重试开仓单（有真实挂单查询）
-    this.supportsSafeOpeningRetry = true;
     this.prices = new Map();      // displayed/simulated price
     this.realTarget = new Map();  // latest real price target
     this._seq = 1;

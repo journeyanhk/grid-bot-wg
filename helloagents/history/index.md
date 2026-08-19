@@ -8,6 +8,7 @@
 
 | 时间戳 | 功能名称 | 类型 | 状态 | 方案包路径 |
 |--------|----------|------|------|------------|
+| 202608191501 | disable-opening-retry | 关闭 Extended/RISEx 开仓单安全重试 | ✅已完成 | [链接](2026-08/202608191501_disable-opening-retry/) |
 | 202608181353 | overview-position | 总览页持仓/运维异常展示 | ✅已完成 | [链接](2026-08/202608181353_overview-position/) |
 | 202608181326 | vps-hardening-v12 | v1.2.0 移植原版安全机制（补格/撤单确认/安全重试/进度） | ✅已完成 | [链接](2026-08/202608181326_vps-hardening-v12/) |
 | 202608171533 | risex-leverage | RISEx 杠杆设置修复（permit_params + WAD） | ✅已完成 | [链接](2026-08/202608171533_risex-leverage/) |

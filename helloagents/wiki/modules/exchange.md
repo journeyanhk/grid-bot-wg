@@ -52,6 +52,7 @@
 - RISEx 余额 `balance` 字段单位账户间不一致（原始 18 位 vs 人/币单位）：适配器用阈值启发式归一化（>1e12 ÷1e18）
 
 ## 已知问题（已规避）
+- Extended/RISEx 不启用开仓单安全重试（supportsSafeOpeningRetry=false，对齐原版仅 Lighter 开启的保守设计）：两者 open-orders 快照存在已知抖动，与"两次快照去重"的安全重试机制冲突
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
 ## 变更历史
