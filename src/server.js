@@ -277,15 +277,18 @@ const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsCl
 // 三层防护：
 //  1. Origin 校验：带 Origin 头的请求必须来自回环来源或 PUBLIC_ORIGIN 白名单
 //     （阻断跨站请求 / CSRF）。
-//  2. Host 校验：未配置 DASHBOARD_TOKEN 时仅允许回环 Host（阻断 DNS rebinding
-//     兜底 —— 恶意域名即使解析到本机也无法通过 Host 校验）。
-//  3. Token 校验：配置了 DASHBOARD_TOKEN 后，所有 /api/* 请求必须携带有效令牌
-//     （X-Auth-Token header 或 SSE 的 ?token=），常量时间比较防时序侧信道。
+//  2. Host 校验：未配置任何鉴权时仅允许回环 Host（阻断 DNS rebinding 兜底）。
+//  3. 认证：账号密码模式（DASHBOARD_USER/PASS）→ 会话令牌；
+//     仅 DASHBOARD_TOKEN → 静态令牌；两者都不配 → 免认证（回环兜底）。
+//     令牌/会话比较均用常量时间比较防时序侧信道。
 const DASHBOARD_TOKEN = cfg.dashboardToken || '';
 const ALLOWED_ORIGINS = new Set([
   `http://localhost:${cfg.port}`, `http://127.0.0.1:${cfg.port}`, `http://[::1]:${cfg.port}`,
   ...cfg.publicOrigins,
 ]);
+const LOGIN_ENABLED = !!(cfg.dashboardUser && cfg.dashboardPass);
+const SESSION_MS = Math.max(60_000, Number(process.env.DASHBOARD_SESSION_MS || 12 * 3600 * 1000)); // 默认 12h
+const SESSIONS = new Map(); // sessionToken -> expiresAt
 
 function isLoopbackHost(host) {
   if (!host) return false;
@@ -294,17 +297,38 @@ function isLoopbackHost(host) {
 }
 
 function originAllowed(origin) {
-  if (!origin) return true; // 无 Origin（curl / 同源）→ 由 Host/token 校验兜底
+  if (!origin) return true; // 无 Origin（curl / 同源）→ 由 Host/认证校验兜底
   return ALLOWED_ORIGINS.has(String(origin).replace(/\/+$/, ''));
+}
+
+function timingEq(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
 
 function tokenValid(provided) {
   if (!DASHBOARD_TOKEN) return true; // 未配置令牌：免令牌（Host 校验兜底）
   if (!provided) return false;
-  const a = Buffer.from(DASHBOARD_TOKEN);
-  const b = Buffer.from(String(provided));
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  return timingEq(provided, DASHBOARD_TOKEN);
 }
+
+function sessionValid(token) {
+  if (!LOGIN_ENABLED) return tokenValid(token); // 无账号密码时退回静态令牌模式
+  if (!token) return false;
+  const exp = SESSIONS.get(String(token));
+  if (!exp) return false;
+  if (Date.now() > exp) { SESSIONS.delete(String(token)); return false; }
+  return true;
+}
+
+function issueSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  SESSIONS.set(token, Date.now() + SESSION_MS);
+  return token;
+}
+
+function authMode() { return LOGIN_ENABLED ? 'login' : (DASHBOARD_TOKEN ? 'token' : 'none'); }
 
 function rejectAuth(res, code, error) {
   if (res.headersSent) { try { res.end(); } catch { /* ignore */ } return;
@@ -317,21 +341,42 @@ const server = http.createServer(async (request, res) => {
   const p = url.pathname;
 
   try {
-    // ── 鉴权守卫（所有请求，含 SSE）──────────────────────────────────────
+    // ── 鉴权守卫（所有请求，含 SSE；/api/login 除外）─────────────────────
     if (!originAllowed(request.headers.origin)) {
       return rejectAuth(res, 403, '来源被拒绝');
     }
-    if (!DASHBOARD_TOKEN && !isLoopbackHost(request.headers.host || '')) {
+    if (!LOGIN_ENABLED && !DASHBOARD_TOKEN && !isLoopbackHost(request.headers.host || '')) {
       return rejectAuth(res, 403, '来源被拒绝');
     }
-    if (p.startsWith('/api/')) {
+    if (p.startsWith('/api/') && p !== '/api/login' && p !== '/api/version') {
       const token = request.headers['x-auth-token']
         || url.searchParams.get('token') || '';
-      if (!tokenValid(token)) return rejectAuth(res, 401, '未授权：缺少或错误的有效令牌');
+      if (!sessionValid(token)) return rejectAuth(res, 401, '未授权：请先登录');
     }
     // ── 版本号（前端展示用）────────────────────────────────────────────────
     if (p === '/api/version') {
-      return send(res, 200, { name: 'grid-bot-all', version: APP_VERSION });
+      return send(res, 200, { name: 'grid-bot-all', version: APP_VERSION, auth: authMode(), login: LOGIN_ENABLED });
+    }
+
+    // ── 登录 / 登出（账号密码模式）────────────────────────────────────────
+    if (p === '/api/login' && request.method === 'POST') {
+      try {
+        const b = await readBody(request);
+        if (!LOGIN_ENABLED) return send(res, 400, { error: '未配置账号密码（请在 .env 设置 DASHBOARD_USER/DASHBOARD_PASS）' });
+        const u = String(b.user || ''), pw = String(b.pass || '');
+        if (!timingEq(u, cfg.dashboardUser) || !timingEq(pw, cfg.dashboardPass)) {
+          return send(res, 401, { error: '用户名或密码错误' });
+        }
+        // 登录成功后顺手清理过期会话
+        const now = Date.now();
+        for (const [t, exp] of SESSIONS) if (exp <= now) SESSIONS.delete(t);
+        return send(res, 200, { ok: true, token: issueSession(), expiresInMs: SESSION_MS });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/logout' && request.method === 'POST') {
+      const t = request.headers['x-auth-token'] || url.searchParams.get('token') || '';
+      SESSIONS.delete(String(t));
+      return send(res, 200, { ok: true });
     }
 
     // ── 总览 API ──────────────────────────────────────────────────────────

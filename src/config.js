@@ -89,9 +89,12 @@ export function getConfig() {
   };
 
   // ── 仪表盘鉴权 ────────────────────────────────────────────────────────────
-  // DASHBOARD_TOKEN: 可选。配置后所有 /api/* 请求必须携带该令牌
-  // （REST 用 X-Auth-Token header，SSE 用 ?token= 参数），防止 VPS 公网部署
-  // 时被未授权访问。未配置时仅允许回环 Host 访问。
+  // 账号密码模式：DASHBOARD_USER + DASHBOARD_PASS 配置后，所有 /api/*（除
+  // /api/login）必须通过登录获取的会话令牌访问，VPS 公网部署推荐使用。
+  // 兼容模式：仅配置 DASHBOARD_TOKEN 时退化为静态令牌；两者都不配则仅允许
+  // 回环 Host 访问。
+  const dashboardUser = process.env.DASHBOARD_USER || '';
+  const dashboardPass = process.env.DASHBOARD_PASS || '';
   const dashboardToken = process.env.DASHBOARD_TOKEN || '';
   // PUBLIC_ORIGIN: 可选。逗号分隔的允许 Origin（VPS 用域名访问时配置，如
   // https://trade.example.com）。用于 Origin 校验，阻断跨站请求/DNS rebinding。
@@ -106,6 +109,8 @@ export function getConfig() {
     // LIVE trading and edit .env) is NOT exposed to the local network. Set
     // HOST=0.0.0.0 explicitly only if you understand the risk and add your own auth.
     host: process.env.HOST || '127.0.0.1',
+    dashboardUser,
+    dashboardPass,
     dashboardToken,
     publicOrigins,
     globalProxy,

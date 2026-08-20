@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-19
+
+### 新增
+- 账号密码鉴权（DASHBOARD_USER/DASHBOARD_PASS）：/api/login 换取会话令牌（默认 12h，DASHBOARD_SESSION_MS 可调），登录弹窗 UI + 退出按钮；DASHBOARD_TOKEN 静态令牌模式保留为兼容回退
+- 主题自动切换：跟随系统 prefers-color-scheme 白天/夜晚，header 图标按钮可手动覆盖（localStorage 记忆）
+- 极简扁平化：统一圆角变量、按钮去除渐变、弱化立体感
+- 移动端响应式（iPhone）：网格单列化、触控目标放大、iOS 聚焦防缩放、小屏隐藏次要信息
+
+### 变更
+- /api/version 豁免鉴权（仅元数据，供前端探测鉴权模式）
+
 ## [1.2.3] - 2026-08-19
 
 ### 修复

@@ -4,12 +4,15 @@
 纯 HTTP + SSE 服务，`{ex}` 为 `de` / `ex` / `rs`。默认监听 127.0.0.1:8080，VPS 部署需配置 `HOST=0.0.0.0` + HTTPS 反代。
 
 ## 认证方式
-- 配置了 `DASHBOARD_TOKEN` 后，所有 `/api/*` 请求必须携带有效令牌：
+- **账号密码模式**（配置 DASHBOARD_USER/DASHBOARD_PASS，推荐）：`POST /api/login`（body `{user, pass}`）换取会话令牌；此后所有 `/api/*` 请求携带令牌：
   - **REST:** `X-Auth-Token: <token>` header
   - **SSE:** URL query `?token=<token>`
-- 未配置令牌：仅允许回环 Host 访问（DNS rebinding 兜底）
+  - 会话默认 12 小时有效（DASHBOARD_SESSION_MS 可调）；`POST /api/logout` 注销
+- **静态令牌模式**（兼容）：仅配置 DASHBOARD_TOKEN 时同上携带令牌
+- 两者都不配置：仅允许回环 Host 访问（DNS rebinding 兜底）
+- `/api/login` 与 `/api/version` 豁免鉴权（前者本身即登录入口，后者仅元数据）
 - Origin 校验：请求带 Origin 头时必须匹配回环来源或 `PUBLIC_ORIGIN` 白名单
-- 失败语义：401 = 令牌缺失/错误；403 = 来源被拒绝
+- 失败语义：401 = 未登录/凭证错误；403 = 来源被拒绝
 
 ---
 

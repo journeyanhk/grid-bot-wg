@@ -31,6 +31,29 @@
   --de-bg: #f59e0b18;
   --ex-bg: #3b82f618;
   --rs-bg: #22c55e18;
+  --radius: 8px;
+}
+/* 极简扁平化：卡片/控件统一圆角、弱化立体感 */
+html[data-theme="dark"] { --bg:#0a0e17; --bg2:#0f1420; --panel:#141924; --panel2:#1a2235; --border:#1e2d45; --border2:#253350; --txt:#dde6f0; --mut:#6b82a0; --mut2:#8fa5c0; --radius:8px; }
+html[data-theme="light"] {
+  --bg:#f4f6fa; --bg2:#ffffff; --panel:#ffffff; --panel2:#eef1f6;
+  --border:#e2e8f0; --border2:#cbd5e1;
+  --txt:#1e293b; --mut:#64748b; --mut2:#475569;
+  --grn:#16a34a; --grn2:#15803d; --red:#dc2626; --red2:#b91c1c;
+  --blu:#2563eb; --blu2:#1d4ed8; --yel:#d97706; --pur:#7c3aed; --pur2:#6d28d9;
+  --de-bg:#f59e0b14; --ex-bg:#3b82f614; --rs-bg:#22c55e14;
+  --radius:8px;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg:#f4f6fa; --bg2:#ffffff; --panel:#ffffff; --panel2:#eef1f6;
+    --border:#e2e8f0; --border2:#cbd5e1;
+    --txt:#1e293b; --mut:#64748b; --mut2:#475569;
+    --grn:#16a34a; --grn2:#15803d; --red:#dc2626; --red2:#b91c1c;
+    --blu:#2563eb; --blu2:#1d4ed8; --yel:#d97706; --pur:#7c3aed; --pur2:#6d28d9;
+    --de-bg:#f59e0b14; --ex-bg:#3b82f614; --rs-bg:#22c55e14;
+    --radius:8px;
+  }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -38,6 +61,7 @@ body {
   color: var(--txt);
   font: 13px/1.5 -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
   min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ── Header ── */
@@ -83,7 +107,7 @@ body {
 /* ── Panel ── */
 .panel {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: 10px; padding: 16px;
+  border-radius: var(--radius); padding: 16px;
 }
 .panel-title {
   font-size: 11px; font-weight: 600; letter-spacing: .6px;
@@ -97,7 +121,7 @@ body {
 .overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px; }
 .ov-card {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: 10px; padding: 14px 16px;
+  border-radius: var(--radius); padding: 14px 16px;
   position: relative; overflow: hidden;
 }
 .ov-card::before {
@@ -162,13 +186,13 @@ input:focus, select:focus { outline: none; border-color: var(--pur); }
   color: #fff; font-size: 13px; transition: all .15s; font-family: inherit;
 }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
-.btn-start { background: linear-gradient(135deg, var(--grn2), var(--grn)); }
+.btn-start { background: var(--grn); }
 .btn-start:hover:not(:disabled) { filter: brightness(1.1); }
-.btn-stop { background: linear-gradient(135deg, var(--red2), var(--red)); }
+.btn-stop { background: var(--red); }
 .btn-stop:hover:not(:disabled) { filter: brightness(1.1); }
 .btn-ghost { background: transparent; border: 1px solid var(--border2); color: var(--txt); }
 .btn-ghost:hover:not(:disabled) { border-color: var(--mut2); }
-.btn-smart { background: linear-gradient(135deg, var(--pur2), var(--pur)); }
+.btn-smart { background: var(--pur); }
 .btn-smart:hover:not(:disabled) { filter: brightness(1.1); }
 
 /* ── Badges ── */
@@ -233,11 +257,11 @@ input:focus, select:focus { outline: none; border-color: var(--pur); }
 .ai-badge.critical { background:#dc262633; color:#fca5a5; }
 .ai-box { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:13px; line-height:1.7; white-space:pre-wrap; word-break:break-word; }
 .ai-chatlog { max-height:380px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:4px 0; }
-.ai-msg { padding:8px 12px; border-radius:10px; font-size:13px; line-height:1.6; max-width:88%; white-space:pre-wrap; word-break:break-word; }
+.ai-msg { padding:8px 12px; border-radius:var(--radius); font-size:13px; line-height:1.6; max-width:88%; white-space:pre-wrap; word-break:break-word; }
 .ai-msg.user { align-self:flex-end; background:#8b5cf629; border:1px solid #8b5cf640; }
 .ai-msg.bot { align-self:flex-start; background:var(--bg2); border:1px solid var(--border); }
 .ai-msg.sys { align-self:center; color:var(--mut); font-size:12px; background:transparent; }
-.ai-action { align-self:flex-start; border:1px solid var(--yel); border-radius:10px; padding:10px 12px; font-size:12px; max-width:88%; background:#eab30811; }
+.ai-action { align-self:flex-start; border:1px solid var(--yel); border-radius:var(--radius); padding:10px 12px; font-size:12px; max-width:88%; background:#eab30811; }
 .ai-action .btnrow { display:flex; gap:8px; margin-top:8px; }
 .ai-action button { padding:5px 14px; border-radius:6px; border:none; cursor:pointer; font-size:12px; font-weight:600; }
 
@@ -309,6 +333,60 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
   .overview-grid { grid-template-columns: 1fr; }
   .total-row { grid-template-columns: 1fr 1fr; }
 }
+/* ── 登录弹窗 ── */
+.login-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(5,8,14,.6); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+}
+.login-box {
+  width: min(340px, 88vw); background: var(--panel);
+  border: 1px solid var(--border2); border-radius: var(--radius);
+  padding: 24px 22px;
+}
+.login-title { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+.login-err { color: var(--red); font-size: 12px; min-height: 16px; margin-top: 8px; }
+.login-box input { margin-top: 4px; }
+
+/* ── 图标按钮（主题切换/退出） ── */
+.icon-btn {
+  background: transparent; border: 1px solid var(--border2); color: var(--mut2);
+  border-radius: 6px; padding: 3px 8px; font-size: 13px; cursor: pointer;
+  line-height: 1.4; transition: all .15s; font-family: inherit;
+}
+.icon-btn:hover { color: var(--txt); border-color: var(--mut2); }
+
+/* ── 移动端响应式（iPhone / 手机） ── */
+@media (max-width: 768px) {
+  .wrap { padding: 10px; }
+  .grid-2, .grid-3, .grid-left-right, .overview-grid, .ai-grid, .total-row { grid-template-columns: 1fr; }
+  .total-row { gap: 8px; }
+  .header { height: 48px; padding: 0 10px; gap: 8px; }
+  .header-logo { font-size: 14px; }
+  .header .badge { display: none; }          /* 手机上隐藏交易所状态徽标，减少拥挤 */
+  .header-sep { display: none; }
+  .header-right { gap: 6px; }
+  .conn { padding: 2px 8px; font-size: 11px; }
+  .conn .conn-txt { display: none; }          /* 仅保留状态圆点 */
+  .main-tabs { padding: 0 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab-btn { padding: 10px 12px; font-size: 12px; white-space: nowrap; }
+  .panel { padding: 12px; }
+  .ov-card { padding: 12px; }
+  .row { flex-direction: column; gap: 0; }
+  .modes { flex-wrap: nowrap; }
+  .chartbox { height: 220px; }
+  .total-card .val { font-size: 18px; }
+  .ov-pnl { font-size: 18px; }
+}
+@media (max-width: 480px) {
+  .tab-btn { padding: 9px 10px; font-size: 11px; }
+  .hdot { width: 7px; height: 7px; }
+  #hdr-time { display: none; }
+  .muted { font-size: 10px; }
+  .btn { padding: 11px; font-size: 14px; }    /* 更大的触控目标 */
+  input, select { font-size: 16px; }          /* 防止 iOS 聚焦缩放 */
+}
+
 </style>
 </head>
 <body>
@@ -321,10 +399,25 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
   <span class="hdot idle" id="hdr-ex-dot" title=""></span><span id="hdr-ex" class="badge badge-paper">EX: PAPER</span>
   <span class="hdot idle" id="hdr-rs-dot" title=""></span><span id="hdr-rs" class="badge badge-paper">RS: PAPER</span>
   <div class="header-right">
+    <button class="icon-btn" id="theme-toggle" title="切换主题（当前跟随系统）">🌓</button>
     <span id="hdr-proxy" class="conn" title="全局代理状态"><span class="cdot"></span><span id="hdr-proxy-txt">代理检测中…</span></span>
     <span id="hdr-conn" class="conn warn" title="后端连接状态"><span class="cdot"></span><span id="hdr-conn-txt">连接中…</span></span>
     <span class="muted" id="hdr-ver" title="应用版本号"></span>
     <span class="muted" id="hdr-time"></span>
+    <button class="icon-btn" id="logout-btn" title="退出登录" style="display:none">⏻</button>
+  </div>
+</div>
+
+<!-- ── 登录弹窗（账号密码模式）── -->
+<div class="login-overlay" id="login-modal" style="display:none">
+  <div class="login-box">
+    <div class="login-title">网格交易总控台 · 登录</div>
+    <label>用户名</label>
+    <input id="login-user" type="text" autocomplete="username" autocapitalize="off" autocorrect="off">
+    <label>密码</label>
+    <input id="login-pass" type="password" autocomplete="current-password">
+    <div class="login-err" id="login-err"></div>
+    <button class="btn btn-start" id="login-btn" style="margin-top:14px">登 录</button>
   </div>
 </div>
 
@@ -1028,10 +1121,12 @@ const fmtPrice = (v) => v == null || !Number.isFinite(Number(v)) ? '—' : Numbe
 const pnlHtml = (v) => v == null ? '—' : `<span class="${cls(v)}">${signed(v)}</span>`;
 
 // ── 鉴权与安全辅助（VPS 部署）───────────────────────────────────────────────
-// DASHBOARD_TOKEN 令牌：前端会话内保存（sessionStorage），所有 API 请求携带
-// X-Auth-Token header；SSE 通过 URL query 携带。401 时引导重新输入令牌。
+// 账号密码模式（DASHBOARD_USER/PASS）：/api/login 换取会话令牌，前端会话内保存
+// （sessionStorage），所有 API 请求携带 X-Auth-Token header；SSE 通过 URL query
+// 携带。401 时弹出登录框。静态令牌模式（DASHBOARD_TOKEN）保持兼容。
 // esc()：外部数据（交易所/AI/错误消息）渲染到 innerHTML 前必须转义，防 XSS。
 let authToken = sessionStorage.getItem('dash_token') || '';
+let authMode = 'none'; // 'login' | 'token' | 'none'
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 
 async function apiFetch(path, opts = {}) {
@@ -1039,6 +1134,11 @@ async function apiFetch(path, opts = {}) {
   if (authToken) headers['X-Auth-Token'] = authToken;
   const res = await fetch(path, { ...opts, headers });
   if (res.status === 401) {
+    if (authMode === 'login') {
+      showLoginModal();
+      throw new Error('未授权：请先登录');
+    }
+    // 静态令牌模式：旧 prompt 流程
     const t = window.prompt('请输入访问令牌（.env 中的 DASHBOARD_TOKEN；未配置令牌则留空）：');
     if (t && t.trim()) {
       authToken = t.trim();
@@ -1050,6 +1150,75 @@ async function apiFetch(path, opts = {}) {
   }
   return res;
 }
+
+async function doLogin(user, pass) {
+  const r = await fetch('/api/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user, pass }),
+  });
+  const j = await r.json();
+  if (r.status !== 200) throw new Error(j.error || '登录失败');
+  authToken = j.token;
+  sessionStorage.setItem('dash_token', authToken);
+  hideLoginModal();
+  location.reload(); // 重建全部 SSE 连接
+}
+
+async function doLogout() {
+  try { await fetch('/api/logout', { method: 'POST', headers: { 'X-Auth-Token': authToken || '' }, body: '{}' }); } catch {}
+  authToken = ''; sessionStorage.removeItem('dash_token');
+  location.reload();
+}
+
+function showLoginModal() {
+  const m = $('login-modal');
+  if (m) { m.style.display = 'flex'; setTimeout(() => $('login-user').focus(), 50); }
+}
+function hideLoginModal() {
+  const m = $('login-modal');
+  if (m) m.style.display = 'none';
+}
+
+// ── 主题切换（默认跟随系统，可手动覆盖，存 localStorage）────────────────────
+(function initTheme() {
+  const saved = localStorage.getItem('theme_pref');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+  const btn = $('theme-toggle');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      const next = cur === 'light' ? 'dark' : (cur === 'dark' ? '' : 'light'); // 手动切换后回到跟随系统
+      if (next) document.documentElement.setAttribute('data-theme', next);
+      else document.documentElement.removeAttribute('data-theme');
+      localStorage.setItem('theme_pref', next);
+      btn.title = next === 'light' ? '当前浅色，点击切换' : (next === 'dark' ? '当前深色，点击切换' : '跟随系统，点击切换');
+    });
+  }
+})();
+
+// ── 登录表单 / 退出按钮 ───────────────────────────────────────────────────
+$('login-btn').addEventListener('click', () => {
+  const err = $('login-err');
+  const btn = $('login-btn');
+  err.textContent = '';
+  btn.disabled = true; btn.textContent = '登录中…';
+  doLogin($('login-user').value.trim(), $('login-pass').value)
+    .catch((e) => { err.textContent = e.message || '登录失败'; btn.disabled = false; btn.textContent = '登 录'; });
+});
+$('login-pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('login-btn').click(); });
+$('logout-btn').addEventListener('click', () => doLogout());
+function maybeShowLogout() {
+  const btn = $('logout-btn');
+  if (btn && (authMode === 'login' || authMode === 'token')) btn.style.display = '';
+}
+
+// 启动时探测鉴权模式；未登录且为账号密码模式时直接弹登录框
+apiFetch('/api/version').then((r) => r.json()).then((j) => {
+  if (j.version) $('hdr-ver').textContent = 'v' + j.version;
+  authMode = j.auth || authMode;
+  maybeShowLogout();
+  if (authMode === 'login' && !authToken) showLoginModal();
+}).catch(() => { authMode = 'login'; maybeShowLogout(); if (!authToken) showLoginModal(); });
 
 // ── 展示辅助（挂单进度 / 交易所核实 / 运维异常）────────────────────────────
 function placementProgressText(state) {
@@ -1096,11 +1265,6 @@ function switchTab(name) {
 
 // ── 时钟 ────────────────────────────────────────────────────────────────────
 setInterval(() => { $('hdr-time').textContent = new Date().toLocaleTimeString('zh-CN'); }, 1000);
-
-// ── 版本号展示（来自后端 package.json，随 /api/version 返回）──────────────────
-apiFetch('/api/version').then((r) => r.json()).then((j) => {
-  if (j && j.version) $('hdr-ver').textContent = 'v' + j.version;
-}).catch(() => {});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 各交易所控制逻辑（工厂函数）
