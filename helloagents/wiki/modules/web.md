@@ -43,6 +43,7 @@ VPS/公网部署下，交易控制 API 必须受保护。
 - config（.env 加载）、bot（状态来源）、exchange（数据源）、ai（AI 接口）、persist（快照）、log（日志）
 
 ## 变更历史
+- [202608211121_fix-login-popup](../../history/2026-08/202608211121_fix-login-popup/) - 修复登录弹窗重复弹出
 - [202608201002_auth-login-theme](../../history/2026-08/202608201002_auth-login-theme/) - 账号密码鉴权 + 主题/响应式/扁平化
 - [202608181353_overview-position](../../history/2026-08/202608181353_overview-position/) - 总览页持仓/运维异常展示
 - [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - 补格按钮/挂单进度/强平价/运维异常展示

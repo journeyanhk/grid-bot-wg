@@ -1127,26 +1127,45 @@ const pnlHtml = (v) => v == null ? '—' : `<span class="${cls(v)}">${signed(v)}
 // esc()：外部数据（交易所/AI/错误消息）渲染到 innerHTML 前必须转义，防 XSS。
 let authToken = sessionStorage.getItem('dash_token') || '';
 let authMode = 'none'; // 'login' | 'token' | 'none'
+let authProbe = null;   // 鉴权模式探测 promise：401 分流前必须等它完成
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+
+/** 探测后端鉴权模式（/api/version 豁免鉴权），登录模式下未登录时弹登录框。 */
+async function detectAuth() {
+  try {
+    const r = await fetch('/api/version');
+    const j = await r.json();
+    authMode = j.auth || 'none';
+    if (j.version) $('hdr-ver').textContent = 'v' + j.version;
+    maybeShowLogout();
+    if (authMode === 'login' && !authToken) showLoginModal();
+  } catch { /* 探测失败不强制弹登录框（避免误弹） */ }
+}
+authProbe = detectAuth();
 
 async function apiFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   if (authToken) headers['X-Auth-Token'] = authToken;
   const res = await fetch(path, { ...opts, headers });
   if (res.status === 401) {
+    // 先等模式探测完成再分流，避免并发请求在探测前误走令牌 prompt 弹多次
+    if (authProbe) await authProbe;
     if (authMode === 'login') {
       showLoginModal();
       throw new Error('未授权：请先登录');
     }
-    // 静态令牌模式：旧 prompt 流程
-    const t = window.prompt('请输入访问令牌（.env 中的 DASHBOARD_TOKEN；未配置令牌则留空）：');
-    if (t && t.trim()) {
-      authToken = t.trim();
-      sessionStorage.setItem('dash_token', authToken);
-      location.reload(); // 重建全部 SSE 连接（携带新令牌）
-      throw new Error('已重新认证，页面刷新中…');
+    if (authMode === 'token') {
+      const t = window.prompt('请输入访问令牌（.env 中的 DASHBOARD_TOKEN；未配置令牌则留空）：');
+      if (t && t.trim()) {
+        authToken = t.trim();
+        sessionStorage.setItem('dash_token', authToken);
+        location.reload(); // 重建全部 SSE 连接（携带新令牌）
+        throw new Error('已重新认证，页面刷新中…');
+      }
+      throw new Error('未授权：缺少访问令牌');
     }
-    throw new Error('未授权：缺少访问令牌');
+    // 未配置任何鉴权时本不该 401，静默抛错即可（不弹任何框）
+    throw new Error('未授权');
   }
   return res;
 }
@@ -1172,7 +1191,9 @@ async function doLogout() {
 
 function showLoginModal() {
   const m = $('login-modal');
-  if (m) { m.style.display = 'flex'; setTimeout(() => $('login-user').focus(), 50); }
+  if (!m || m.style.display === 'flex') return; // 幂等：已在显示则不重复弹
+  m.style.display = 'flex';
+  setTimeout(() => $('login-user').focus(), 50);
 }
 function hideLoginModal() {
   const m = $('login-modal');
@@ -1212,13 +1233,7 @@ function maybeShowLogout() {
   if (btn && (authMode === 'login' || authMode === 'token')) btn.style.display = '';
 }
 
-// 启动时探测鉴权模式；未登录且为账号密码模式时直接弹登录框
-apiFetch('/api/version').then((r) => r.json()).then((j) => {
-  if (j.version) $('hdr-ver').textContent = 'v' + j.version;
-  authMode = j.auth || authMode;
-  maybeShowLogout();
-  if (authMode === 'login' && !authToken) showLoginModal();
-}).catch(() => { authMode = 'login'; maybeShowLogout(); if (!authToken) showLoginModal(); });
+// 鉴权模式探测已在 detectAuth()（authProbe）中完成并弹登录框，此处无需重复。
 
 // ── 展示辅助（挂单进度 / 交易所核实 / 运维异常）────────────────────────────
 function placementProgressText(state) {
