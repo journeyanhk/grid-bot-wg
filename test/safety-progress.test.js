@@ -187,3 +187,51 @@ test('停止流程：撤单确认失败时中止并保留跟踪', async () => {
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();
+
+test('破界硬止损：recover 模式未实现亏损达到 recoverMaxLossUsd 触发停止', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await bot.start({ ...CFG, outOfRangeAction: 'recover', recoverMaxLossUsd: 30 });
+  bot.recovery = true; // 进入回收模式
+  bot.outOfRange = true;
+  ex.positions.set(1, { sizeBase: 1, entryPrice: 200, unrealizedPnl: -40, leverage: 3 });
+  const origStop = bot.stop.bind(bot);
+  let stopped = false;
+  bot.stop = async (o) => { stopped = true; return origStop(o); };
+  bot._checkMaxLoss();
+  await sleep(60);
+  assert.equal(stopped, true, '亏损达到上限应触发硬止损 stop');
+});
+
+test('破界硬止损：独立回收模式（outOfRange=false）亏损达上限也应触发', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  // 模拟 startRecovery 后的状态：recovery=true、outOfRange=false、config 含 recoverMaxLossUsd
+  bot.running = true;
+  bot.recovery = true;
+  bot.outOfRange = false;
+  bot.config = { marketId: 1, displayName: 'X', mode: 'recovery', outOfRangeAction: 'recover', recoverMaxLossUsd: 20, sizeBase: 1 };
+  ex.positions.set(1, { sizeBase: -1, entryPrice: 200, unrealizedPnl: -30, leverage: 3 });
+  const origStop = bot.stop.bind(bot);
+  let stopped = false;
+  bot.stop = async (o) => { stopped = true; return origStop(o); };
+  bot._checkMaxLoss();
+  await sleep(60);
+  assert.equal(stopped, true, '独立回收模式亏损达上限应触发硬止损');
+});
+
+test('尘埃仓守卫：部分成交低于最小下单量时跳过补挂对腿', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await bot.start({ ...CFG, sizeBase: 0.0002, minOrderSize: 0.0002 });
+  // 手动补齐 minOrderSize 到 config
+  bot.config.minOrderSize = 0.0002;
+  const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.levelIndex === 4);
+  // 模拟 level 4 以低于最小量成交（0.0001 < 0.0002）
+  const fakeFill = { orderId: [...bot.active].find(([id, a]) => a === buy140)[0], marketId: 1, side: 'buy', price: 140, sizeBase: 0.0001, levelIndex: 4 };
+  const before = bot.active.size;
+  bot._handleFill(fakeFill);
+  await sleep(10);
+  assert.equal(bot.active.size + 1, before, '不补挂对腿（5 补前数量 - 1 删除 = 4）');
+  assert.ok(bot.alerts.some((a) => a.message.includes('低于最小下单量')), '应有尘埃仓提示');
+});

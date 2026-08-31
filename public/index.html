@@ -665,6 +665,8 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
             <option value="close" selected>冲破区间平仓</option>
             <option value="recover">只减仓回收阶梯</option>
           </select>
+          <label style="margin-top:8px">硬止损上限 (USDC，0=不启用，仅 recover)</label>
+          <input id="de-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
       <div class="risk-preview" id="de-risk-preview"></div>
@@ -792,6 +794,8 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
             <option value="close" selected>冲破区间平仓</option>
             <option value="recover">只减仓回收阶梯</option>
           </select>
+          <label style="margin-top:8px">硬止损上限 (USDC，0=不启用，仅 recover)</label>
+          <input id="ex-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
       <div class="risk-preview" id="ex-risk-preview"></div>
@@ -918,6 +922,8 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
             <option value="close" selected>冲破区间平仓</option>
             <option value="recover">只减仓回收阶梯</option>
           </select>
+          <label style="margin-top:8px">硬止损上限 (USDC，0=不启用，仅 recover)</label>
+          <input id="rs-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
       <div class="risk-preview" id="rs-risk-preview"></div>
@@ -1474,6 +1480,7 @@ function makeExchangeCtrl(prefix, chartId) {
       lower: +P('lower').value, upper: +P('upper').value,
       gridCount: +P('grid-count').value, sizeBase: +P('size-base').value,
       leverage: +P('leverage').value, outOfRangeAction: P('auto-stop').value,
+      recoverMaxLossUsd: +P('max-loss').value || 0,
     };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const j = await r.json();
@@ -1532,7 +1539,7 @@ function makeExchangeCtrl(prefix, chartId) {
     const modeTxt = aboveEntryOnly ? '仅在成本价以上（不亏）分批减仓' : '任何反弹都分批减仓';
     if (!confirm(`对当前持仓启用「只减仓回收阶梯」？\n${modeTxt}；挂 reduce-only 单只减不加、不自动止损，需自行控制风险。`)) return;
     const marketId = lastState?.config?.marketId;
-    const r = await apiFetch(`/api/${prefix}/start-recovery`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ marketId, aboveEntryOnly }) });
+    const r = await apiFetch(`/api/${prefix}/start-recovery`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ marketId, aboveEntryOnly, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0 }) });
     const j = await r.json();
     if (j.error) alert('启用失败：' + j.error);
   };
@@ -1544,7 +1551,7 @@ function makeExchangeCtrl(prefix, chartId) {
     const lower = +P('lower').value, upper = +P('upper').value, n = +P('grid-count').value, sz = +P('size-base').value, lev = +P('leverage').value;
     if (!(upper > lower) || !n || !sz) { alert('无法自动计算区间，请在左侧手动填写参数后点"启动"。'); return; }
     if (!confirm(`按现价重开网格：区间 [${lower}, ${upper}]，${n} 格，每格 ${sz}，${lev}x。\n现有持仓将作为网格库存保留。继续？`)) return;
-    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value };
+    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: +P('max-loss').value || 0 };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const j = await r.json();
     if (j.error) alert('启动失败：' + j.error);
@@ -1898,7 +1905,8 @@ function renderOverview(data) {
       if (d.running && c && c.mode === 'recovery') {
         gc.style.display = '';
         gc.innerHTML = `<div class="gc-title">本次启动参数</div>`
-          + `回收阶梯模式（只减仓）· 阶梯间距 <b>${c.spacing ?? '—'}</b> · 每档 <b>${c.sizeBase ?? '—'}</b>`;
+          + `回收阶梯模式（只减仓）· 阶梯间距 <b>${c.spacing ?? '—'}</b> · 每档 <b>${c.sizeBase ?? '—'}</b>`
+          + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : `<br><span class="muted">硬止损未启用</span>`);
       } else if (d.running && c && c.lower != null) {
         const sl = c.outOfRangeAction === 'recover' ? '只减仓回收阶梯' : '冲破区间平仓';
         const modeTxt = c.mode === 'long' ? '做多' : c.mode === 'short' ? '做空' : '中性';
@@ -1906,7 +1914,8 @@ function renderOverview(data) {
         gc.innerHTML = `<div class="gc-title">本次启动参数（${modeTxt}网格）</div>`
           + `下边界 <b>${c.lower}</b> · 上边界 <b>${c.upper}</b><br>`
           + `网格 <b>${c.gridCount}</b> 格 · 每格 <b>${c.sizeBase}</b><br>`
-          + `杠杆 <b>${c.leverage}x</b> · 区间外策略 <b>${sl}</b>`;
+          + `杠杆 <b>${c.leverage}x</b> · 区间外策略 <b>${sl}</b>`
+          + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : ``);
       } else {
         gc.style.display = 'none';
         gc.innerHTML = '';

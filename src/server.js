@@ -578,10 +578,12 @@ setInterval(() => {
     const deState = deBot.getState();
     const exState = exBot.getState();
     const rsState = rsBot.getState();
+    const lrState = lrBot.getState();
     const overview = {
       de: pick(deState, cfg.de.mode),
       ex: pick(exState, cfg.ex.mode),
       rs: pick(rsState, cfg.rs.mode),
+      lr: pick(lrState, cfg.lr.mode),
     };
     const data = `data: ${stringify(overview)}\n\n`;
     for (const r of server._overviewClients) { try { r.write(data); } catch { server._overviewClients.delete(r); } }

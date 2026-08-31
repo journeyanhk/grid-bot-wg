@@ -53,6 +53,7 @@
 - grid（纯函数：buildGrid/seedOrders/replacementFor）、exchange 适配器（事件源）、persist（onChange 钩子）、log
 
 ## 变更历史
+- [202608311425_review-fixes](../../history/2026-08/202608311425_review-fixes/) - review 修复：硬止损覆盖独立回收/尘埃仓守卫/总览广播 lr
 - [202608311355_lighter-port](../../history/2026-08/202608311355_lighter-port/) - 破界出口纪律 recoverMaxLossUsd 硬止损
 - [202608191510_decibel-safety-l12](../../history/2026-08/202608191510_decibel-safety-l12/) - 回收阶梯撤单跳过幽灵单
 - [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - v1.2.0 移植：补格/撤单确认/安全重试/进度跟踪

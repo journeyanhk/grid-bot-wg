@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-31
+
+### 修复（dev004 review 反馈）
+- 破界硬止损真正可用：前端新增硬止损输入框（max-loss）并注入 start / start-recovery payload；_checkMaxLoss 门条放开，覆盖独立回收模式（outOfRange=false 场景）
+- 总览 1s SSE 广播补上 lr（此前 RHC 总览卡首帧后永不刷新）
+- 尘埃仓守卫：部分成交低于最小下单量时跳过补挂对腿（避免对腿被拒 + 无意义重试 + 告警噪音）
+
+### 变更
+- start() config 增加 minOrderSize（尘埃仓守卫数据源）；独立回收模式支持 recoverMaxLossUsd
+- 测试新增 3 例：recover 硬止损 / 独立回收硬止损 / 尘埃仓守卫
+
 ## [1.4.0] - 2026-08-31
 
 ### 新增

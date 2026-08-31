@@ -354,6 +354,7 @@ export class GridBot {
       // 破界出口纪律：recover 模式下若未实现亏损达到该上限（USDC），强制撤单+市价平仓+停止
       // （recover 本身不止损，此值给单边行情一条硬退出线；0/缺省 = 不启用）
       recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
+      minOrderSize: market.minOrderSize || 0,   // 尘埃仓守卫用：部分成交低于最小下单量时跳过补挂对腿
       stepSize: market.stepSize, stepPrice: market.stepPrice,
     };
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
@@ -1030,7 +1031,14 @@ export class GridBot {
       if (repl && !this.outOfRange && this.running) {
         repl.opening = closing; // replacement is the opposite leg
         if (fillSize > 0) repl.sizeBase = fillSize; // partial fill: mirror the actually-filled qty
-        this._place(repl);
+        // 尘埃仓守卫：部分成交若低于最小下单量，交易所会拒绝补挂对腿并进入无意义
+        // 重试循环。此时跳过补挂，尘埃仓并入持仓由后续成交或手动处理。
+        const minSz = this.config.minOrderSize || 0;
+        if (minSz > 0 && repl.sizeBase < minSz) {
+          this._alert(`部分成交 ${fillSize} 低于最小下单量 ${minSz}，跳过补挂对腿；尘埃仓并入持仓，由后续成交或手动处理。`);
+        } else {
+          this._place(repl);
+        }
       }
     }
     this._changed();
@@ -1085,10 +1093,12 @@ export class GridBot {
    */
   _checkMaxLoss() {
     if (!this.running || !this.config) return;
-    if (this.config.outOfRangeAction !== 'recover') return;
+    // 独立回收模式（this.recovery=true）也应受硬止损约束——它持有被套库存，
+    // 是最需要止损线的场景；普通网格破界进入 recover 时 outOfRangeAction==='recover'。
+    if (this.config.outOfRangeAction !== 'recover' && !this.recovery) return;
     const maxLoss = this.config.recoverMaxLossUsd;
     if (!(maxLoss > 0)) return;
-    if (!this.outOfRange) return;
+    if (!this.outOfRange && !this.recovery) return;
     const pos = this.ex.getPosition?.(this.config.marketId);
     if (!pos) return;
     const upnl = Number(pos.unrealizedPnl);
@@ -1195,6 +1205,8 @@ export class GridBot {
         sizeBase, spacing, stepSize: market.stepSize, stepPrice: market.stepPrice,
         lower: null, upper: null, gridCount: null, leverage: pos.leverage ?? null,
         outOfRangeAction: 'recover',
+        // 独立回收模式的硬止损上限（同网格 recover 语义；0/缺省=不启用）
+        recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
         aboveEntryOnly: !!cfg.aboveEntryOnly, // 只在成本价上方(多)/下方(空)、即不亏的价位才挂减仓单
       };
       this.grid = null; this.risk = null;
