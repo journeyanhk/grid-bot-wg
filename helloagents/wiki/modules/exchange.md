@@ -56,6 +56,7 @@
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
 ## 变更历史
+- [202608311611_rhc-throttle-fix](../../history/2026-08/202608311611_rhc-throttle-fix/) - RHC 铺单限流自激修复（批间配速/确认多轮/轮询降载/写请求间隔）
 - [202608311355_lighter-port](../../history/2026-08/202608311355_lighter-port/) - RHC Lighter 接入 + 部分成交记账修复
 - [202608191510_decibel-safety-l12](../../history/2026-08/202608191510_decibel-safety-l12/) - Decibel 第 1+2 层防护：撤单重试/幽灵单清理/回收撤单跳过幽灵
 - [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - 撤单失败保留跟踪/forgetOrder/强平价/Decibel 错误翻译（operationalIssue）

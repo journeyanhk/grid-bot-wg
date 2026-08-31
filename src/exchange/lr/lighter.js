@@ -32,9 +32,9 @@ const MAX_BATCH = 15;
 // to submit the next batch immediately after the previous one is confirmed.
 // A fixed delay made healthy accounts wait unnecessarily; actual 429/405
 // responses now drive the retry backoff instead.
-const SAFE_GRID_BATCH = 10;
-const SAFE_GRID_BATCH_PACE_MS = 0;
-const OPENING_RETRY_BASE_MS = 1_000;
+const SAFE_GRID_BATCH = 15;            // MAX_BATCH 即 15，140 单从 14 批减到 10 批
+const SAFE_GRID_BATCH_PACE_MS = 1500;   // 批间强制 1.5s 间隔，防止启动铺单自我限流（429 自激根因）
+const OPENING_RETRY_BASE_MS = 5_000;    // 非显式 retry-after 时重试地板抬高，避免 2s tick 驱动下连续撞墙
 const OPENING_RETRY_MAX = 8;
 
 export class LighterExchange extends EventEmitter {
@@ -112,6 +112,12 @@ export class LighterExchange extends EventEmitter {
   }
 
   async _request(method, path, { form, headers = {}, retry = method === 'GET' } = {}) {
+    // 写请求最小间隔保险带：即使未来有调用路径绕过批量配速，交易写入也不会超过 ~1 次/秒
+    if (method === 'POST') {
+      const gap = 1100 - (Date.now() - (this._lastWriteAt || 0));
+      if (gap > 0) await sleep(gap);
+      this._lastWriteAt = Date.now();
+    }
     let last;
     for (let attempt = 0; attempt < (retry ? 2 : 1); attempt++) {
       try {
@@ -362,18 +368,23 @@ export class LighterExchange extends EventEmitter {
   async placeLimitOrder(order) { return (await this.placeLimitOrders([order]))[0]; }
 
   async _confirmAccepted(prepared) {
-    await sleep(350);
+    // 多轮等待：连发压力下 sequencer 落账可能慢于单次 350ms，给到 ~5.7s 总计
+    // 等待窗，已接收未确认的批次几乎必然确认成功，不再整批涌入重试队列。
     const ids = prepared.map((x) => x.clientOrderIndex), marketId = prepared[0].market.marketId;
-    const found = await this._findOrdersByClientIds(ids, marketId);
-    if (found.size === ids.length) {
-      const rejected = new Set([...found.entries()]
-        .filter(([, o]) => FINAL_REJECTED.has(String(o.status).toLowerCase()))
-        .map(([id]) => String(id)));
-      if (rejected.size) {
-        const statuses = [...found.entries()].filter(([id]) => rejected.has(String(id))).map(([, o]) => o.status);
-        this._setIssue(new Error(`RHC sequencer 拒绝 ${rejected.size} 笔订单：${statuses.join(', ')}`));
+    let found = new Map();
+    for (const wait of [350, 800, 1600, 3000]) {
+      await sleep(wait);
+      try { found = await this._findOrdersByClientIds(ids, marketId); } catch { /* 快照读失败视为未确认，继续等 */ }
+      if (found.size === ids.length) {
+        const rejected = new Set([...found.entries()]
+          .filter(([, o]) => FINAL_REJECTED.has(String(o.status).toLowerCase()))
+          .map(([id]) => String(id)));
+        if (rejected.size) {
+          const statuses = [...found.entries()].filter(([id]) => rejected.has(String(id))).map(([, o]) => o.status);
+          this._setIssue(new Error(`RHC sequencer 拒绝 ${rejected.size} 笔订单：${statuses.join(', ')}`));
+        }
+        return rejected;
       }
-      return rejected;
     }
     throw new Error('RHC API 已接收下单，但 sequencer 快照尚未确认全部订单；程序将继续自动对账，禁止重复点击启动。');
   }
@@ -483,12 +494,17 @@ export class LighterExchange extends EventEmitter {
     this._timer = setInterval(() => this._poll(), POLL_MS); this._timer.unref?.();
   }
   stop() { /* monitoring remains active after the grid stops */ }
+  /** 铺单降载开关：大规模铺单期间跳过重查询（account/pnl/orders），把请求预算让给下单。 */
+  setPollLight(v) { this._pollLight = !!v; }
+
   async _poll() {
     if (this._polling) return; this._polling = true;
     try {
-      await this._loadMarkets();
+      await this._loadMarkets(); // 价格源保留：成交/风控依赖价格 tick
       for (const [marketId, price] of this._prices) this.emit('price', { marketId, price });
-      await this._refreshAccount(); await this._refreshPnl(); await this._refreshOrders();
+      if (!this._pollLight) { // 铺单期间跳过，让出请求预算给下单
+        await this._refreshAccount(); await this._refreshPnl(); await this._refreshOrders();
+      }
       this.lastOkAt = Date.now(); this.lastError = null; this.operationalIssue = null;
     } catch (e) { this.lastError = e?.message || String(e); this._setIssue(e); }
     finally { this._polling = false; }

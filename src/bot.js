@@ -410,7 +410,9 @@ export class GridBot {
     if (typeof this.ex.start === 'function') this.ex.start();
 
     // ---- seed the ladder (every seed order is an OPENING leg) ----
-    const seeds = seedOrders({ levels: this.grid.levels, price: this.lastPrice, mode: this.config.mode, spacing: this.grid.spacing });
+    let seeds = seedOrders({ levels: this.grid.levels, price: this.lastPrice, mode: this.config.mode, spacing: this.grid.spacing });
+    // 限流/慢铺单时，离现价近的档位优先上账：首批即可让网格开始工作，远端档慢慢补齐
+    seeds.sort((a, b) => Math.abs(a.price - this.lastPrice) - Math.abs(b.price - this.lastPrice));
     const placementId = this._beginPlacementProgress('start', seeds);
     // Mark the bot as running before the RHC seed pass. A seed order can fill
     // while later batches are still being submitted; fill
@@ -429,7 +431,8 @@ export class GridBot {
       this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。`);
       this._placementProgress.completionAlerted = true;
     } else {
-      this._alert(`网格已进入运行管理，但启动挂单尚未全部确认：目标 ${progress?.target ?? seeds.length} 单 / 已确认 ${progress?.confirmed ?? this.active.size} 单 / 待安全重试 ${progress?.pending ?? 0} 单。程序会先与交易所对账再补挂。`);
+      const est = Math.ceil((progress?.target ?? seeds.length) / 15) * 4; // ~15 单/批 × ~4s（含配速）
+      this._alert(`网格已进入运行管理，但启动挂单尚未全部确认：目标 ${progress?.target ?? seeds.length} 单 / 已确认 ${progress?.confirmed ?? this.active.size} 单 / 待安全重试 ${progress?.pending ?? 0} 单。程序会先与交易所对账再补挂，预计约 ${est} 秒内铺完（限流保护配速），请勿中途停止。`);
     }
     logger.info('bot', `网格已启动 ${this.config.displayName}`, { mode: this.config.mode, gridCount: this.grid.count, lower: this.config.lower, upper: this.config.upper, leverage, orders: this.active.size });
     this._changed();
@@ -826,6 +829,7 @@ export class GridBot {
     const batchSize = Math.max(1, Math.min(15, Number(this.ex.orderBatchSize) || 15));
     const paceMs = Math.max(0, Number(this.ex.orderBatchPaceMs) || 0);
     this._placementPasses++;
+    this.ex.setPollLight?.(true); // 铺单期间让适配器跳过重查询（限流防护）
     try {
       for (let offset = 0; offset < ready.length; offset += batchSize) {
         // A fill during startup can occupy a future seed level. Recheck
@@ -890,6 +894,7 @@ export class GridBot {
     } finally {
       for (const item of ready) this._pendingLevels.delete(item.levelIndex);
       this._placementPasses--;
+      this.ex.setPollLight?.(false); // 铺单结束恢复常规轮询
     }
   }
 

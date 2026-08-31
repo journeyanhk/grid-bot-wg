@@ -140,9 +140,9 @@ function marketPayload() {
   };
   const ex = new LighterExchange({ accountIndex: 12, apiKeyIndex: 4, apiPrivateKey: 'test-only', signer });
   assert.equal(ex.supportsSafeOpeningRetry, true);
-  assert.equal(ex.orderBatchSize, 10);
-  assert.equal(ex.orderBatchPaceMs, 0);
-  assert.equal(ex.openingRetryBaseMs, 1_000);
+  assert.equal(ex.orderBatchSize, 15);
+  assert.equal(ex.orderBatchPaceMs, 1500);
+  assert.equal(ex.openingRetryBaseMs, 5_000);
   const markets = parseMarkets(marketPayload()); ex.markets = new Map(markets.map((m) => [m.marketId, m]));
   await assert.rejects(() => ex.placeLimitOrders([
     { marketId: 1, side: 'buy', price: 65000, sizeBase: 0.001, levelIndex: 0, clientOrderId: 100 },
@@ -236,7 +236,7 @@ function marketPayload() {
   try {
     await assert.rejects(
       () => ex._postForm('/api/v1/sendTx', { tx_type: 1, tx_info: '{}' }),
-      (error) => error.status === 405 && error.rateLimited === true && error.retryAfterMs === 1000,
+      (error) => error.status === 405 && error.rateLimited === true && error.retryAfterMs === 5_000,
     );
   } finally {
     globalThis.fetch = originalFetch;
