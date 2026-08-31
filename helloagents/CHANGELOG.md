@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-08-31
+
+### 修复（dev004 review2 反馈）
+- **RHC 前端面板整体缺失（阻断级）**：补齐 tab-lr 面板（克隆自 rs 面板，全部 lr-* 控件）、导航按钮、dot-lr/panel.lr/ov-card.lr CSS 与 --lr-color 变量、switchTab 数组加 lr——此前 makeExchangeCtrl('lr') 因 $('lr-modes') 为 null 抛 TypeError 导致全站脚本崩溃（总览 SSE 不刷新）
+- 防御性守卫：makeExchangeCtrl 入口缺面板时跳过初始化（不再中断后续脚本）；两处 start payload 的 max-loss 加 null 守卫
+- 图表颜色补 lr 分支（不再落到 RISEx 同色）
+
 ## [1.4.1] - 2026-08-31
 
 ### 修复（dev004 review 反馈）
