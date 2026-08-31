@@ -549,6 +549,33 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
       <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('rs', this)">🔌 重连交易所（不动挂单/持仓）</button>
       <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('rs')">进入 RISEx 控制台 →</button>
     </div>
+    <div class="ov-card lr">
+      <div class="ov-exname" style="color:var(--lr-color)">
+        <span class="run-dot" id="ov-lr-dot"></span>
+        RHC Lighter
+        <span id="ov-lr-badge" class="badge badge-paper" style="margin-left:auto">PAPER</span>
+      </div>
+      <div id="ov-lr-health" class="exhealth eh-idle">—</div>
+      <div class="ov-pnl" id="ov-lr-pnl">—</div>
+      <div class="ov-sub" id="ov-lr-ret">收益率 —</div>
+      <div style="margin-top:10px">
+        <div class="ov-stat"><span class="lbl">余额</span><span class="val" id="ov-lr-bal">—</span></div>
+        <div class="ov-stat"><span class="lbl">权益</span><span class="val" id="ov-lr-eq">—</span></div>
+        <div class="ov-stat"><span class="lbl">已实现</span><span class="val" id="ov-lr-rpnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">未实现</span><span class="val" id="ov-lr-upnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">交易量</span><span class="val" id="ov-lr-vol">—</span></div>
+        <div class="ov-stat"><span class="lbl">完成网格</span><span class="val" id="ov-lr-rungs">—</span></div>
+        <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-lr-price">—</span></div>
+        <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-lr-mkt">—</span></div>
+      </div>
+      <div class="ov-position" id="ov-lr-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-lr-issue" style="display:none"></div>
+      <div id="ov-lr-gridcfg" class="gridcfg" style="display:none"></div>
+      <div id="ov-lr-ai" class="ai-box muted" style="display:none;margin-top:8px;font-size:12px"></div>
+      <div id="ov-lr-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
+      <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('lr', this)">🔌 重连交易所（不动挂单/持仓）</button>
+      <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('lr')">进入 RHC Lighter 控制台 →</button>
+    </div>
   </div>
 
   <!-- AI 市况分析（BTC，定时报告） -->
@@ -1644,6 +1671,7 @@ function makeExchangeCtrl(prefix, chartId) {
 const deCtrl = makeExchangeCtrl('de', 'de-chart');
 const exCtrl = makeExchangeCtrl('ex', 'ex-chart');
 const rsCtrl = makeExchangeCtrl('rs', 'rs-chart');
+const lrCtrl = makeExchangeCtrl('lr', 'lr-chart');
 
 // ── 总览 SSE + 程序运行状态（后端连接心跳）─────────────────────────────────────
 // 服务器每秒推送一次总览数据。只要心跳正常即视为"正常运行"；心跳停止
@@ -1717,7 +1745,7 @@ const MODE_LABEL = { neutral: '中性', long: '做多', short: '做空' };
 const TREND_LABEL = { up: '上升', down: '下降', range: '震荡' };
 
 async function scanTrends() {
-  for (const p of ['de', 'ex', 'rs']) {
+  for (const p of ['de', 'ex', 'rs', 'lr']) {
     const box = $(`ov-${p}-trend`);
     if (!box) continue;
     const d = lastOverview[p];
@@ -1825,7 +1853,7 @@ function renderOverview(data) {
   let totEquity = 0, totBalance = 0, totPnl = 0, totRealized = 0, totUnrealized = 0, totVolume = 0, totRungs = 0;
   let running = 0;
 
-  ['de','ex','rs'].forEach(p => {
+  ['de','ex','rs','lr'].forEach(p => {
     const d = data[p];
     if (!d) return;
     if (d.balance != null) totBalance += d.balance;
@@ -2117,7 +2145,7 @@ async function aiRefreshStatus() {
       }
       if (document.activeElement !== $('ov-ai-mkt-min')) $('ov-ai-mkt-min').placeholder = s.marketMin;
       if (document.activeElement !== $('ov-ai-sent-min')) $('ov-ai-sent-min').placeholder = s.sentinelMin;
-      for (const p of ['de', 'ex', 'rs']) {
+      for (const p of ['de', 'ex', 'rs', 'lr']) {
         const el = $(`ov-${p}-ai`);
         const per = s.sentinel && s.sentinel.per ? s.sentinel.per[p] : null;
         if (el && per) {

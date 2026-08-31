@@ -1,4 +1,4 @@
-# 三交易所网格交易机器人
+# 四交易所网格交易机器人
 
 > 本文件包含项目级别的核心信息。详细的模块文档见 `modules/` 目录。
 
@@ -24,7 +24,7 @@
 |---------|------|------|------|
 | web | HTTP 服务 + SSE 推送 + 前端仪表盘 + 鉴权 | ✅稳定 | [web](modules/web.md) |
 | bot | 网格机器人核心（铺单/补单/风控/对账/恢复） | ✅稳定 | [bot](modules/bot.md) |
-| exchange | 三交易所适配器（live + paper + 签名） | ✅稳定 | [exchange](modules/exchange.md) |
+| exchange | 四交易所适配器（live + paper + 签名） | ✅稳定 | [exchange](modules/exchange.md) |
 | ai | AI 助手（provider 适配 + 哨兵/日报/对话） | ✅稳定 | [ai](modules/ai.md) |
 | platform | 基础层（配置/持久化/代理/K线分析/日志） | ✅稳定 | [platform](modules/platform.md) |
 

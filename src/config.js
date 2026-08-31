@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** 可选数值环境变量：空/未配置返回 NaN（供 Lighter 的 accountIndex 等用）。 */
+function optionalNumber(name) {
+  const raw = process.env[name];
+  return raw == null || String(raw).trim() === '' ? Number.NaN : Number(raw);
+}
+
 export function loadEnv() {
   const file = path.join(root, '.env');
   if (fs.existsSync(file)) {
@@ -103,6 +109,24 @@ export function getConfig() {
     .map((s) => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
+  // ── Robinhood Chain Lighter (RHC) ────────────────────────────────────────
+  // 固定官方主网端点/profile。从不接收 ETH 钱包私钥，无提现/转账操作。
+  const lr = {
+    mode: (process.env.LR_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    apiUrl: 'https://api.rh.lighter.xyz',
+    wsUrl: 'wss://api.rh.lighter.xyz/stream',
+    chainId: 466324,
+    accountIndex: optionalNumber('LIGHTER_ACCOUNT_INDEX'),
+    apiKeyIndex: optionalNumber('LIGHTER_API_KEY_INDEX'),
+    apiPrivateKey: process.env.LIGHTER_API_PRIVATE_KEY || '',
+    apiPrivateKeyFile: process.env.LIGHTER_API_PRIVATE_KEY_FILE || '',
+    pythonPath: process.env.LIGHTER_PYTHON || '',
+    feeRate: Number(process.env.LIGHTER_FEE_RATE || 0.0005),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.LIGHTER_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
@@ -117,6 +141,7 @@ export function getConfig() {
     de,
     ex,
     rs,
+    lr,
   };
 }
 

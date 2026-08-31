@@ -351,6 +351,9 @@ export class GridBot {
       gridCount: Number(cfg.gridCount), sizeBase, leverage,
       // 区间外止损策略：'close'=冲破区间平仓（撤单+平仓+停止）；'recover'=只减仓回收阶梯
       outOfRangeAction: cfg.outOfRangeAction === 'recover' ? 'recover' : 'close',
+      // 破界出口纪律：recover 模式下若未实现亏损达到该上限（USDC），强制撤单+市价平仓+停止
+      // （recover 本身不止损，此值给单边行情一条硬退出线；0/缺省 = 不启用）
+      recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
       stepSize: market.stepSize, stepPrice: market.stepPrice,
     };
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
@@ -1036,6 +1039,8 @@ export class GridBot {
   _handlePrice(p) {
     if (p.marketId !== this.config.marketId) return;
     this.lastPrice = p.price;
+    // 破界出口纪律：recover 模式若亏损触及上限，强制硬止损（见 _checkMaxLoss）
+    this._checkMaxLoss();
     this._drainRetryQueue().catch(() => {});
     if (this.recovery) { this._manageRecoveryStandalone(); return; }
     const out = p.price < this.config.lower || p.price > this.config.upper;
@@ -1070,6 +1075,28 @@ export class GridBot {
           this._changed();
         })
         .finally(() => { this._recoveryCancelInFlight = false; });
+    }
+  }
+
+  /**
+   * 破界出口纪律：recover 模式下若未实现亏损达到 recoverMaxLossUsd 上限，强制
+   * 撤单 + 市价平仓 + 停止。recover 本身不止损，此方法给单边行情一条硬退出线，
+   * 避免"只会只减不加、趋势单边就无限扛"的敞口失控。
+   */
+  _checkMaxLoss() {
+    if (!this.running || !this.config) return;
+    if (this.config.outOfRangeAction !== 'recover') return;
+    const maxLoss = this.config.recoverMaxLossUsd;
+    if (!(maxLoss > 0)) return;
+    if (!this.outOfRange) return;
+    const pos = this.ex.getPosition?.(this.config.marketId);
+    if (!pos) return;
+    const upnl = Number(pos.unrealizedPnl);
+    if (!Number.isFinite(upnl)) return;
+    if (upnl <= -maxLoss && !this._stopping) {
+      this._alert(`⚠️ recover 中未实现亏损 ${round2(upnl)} USDC 已达止损上限 ${round2(maxLoss)}，触发硬止损：撤单 + 市价平仓 + 停止。`);
+      this._stopping = true;
+      this.stop({ closePosition: true }).catch(() => {}).finally(() => { this._stopping = false; });
     }
   }
 

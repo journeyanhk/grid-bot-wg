@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-31
+
+### 新增
+- **RHC Lighter 交易所接入**（Robinhood Chain，第 4 所）：配置/服务端/前端接线、Python 签名器（signer_worker.py 离线签名）、测试
+- **破界出口纪律**：recover 模式新增 `recoverMaxLossUsd` 硬止损——未实现亏损达到上限自动撤单+平仓+停止（recover 本身不止损，此值为单边行情提供硬退出线）
+- 部分成交记账修复：Lighter 订单"部分成交后被撤"现补发 fill，消除库存静默漂移
+
+### 变更
+- Lighter 轮询 5s→2s，降低成交/补单延迟（完整 /stream WS 推送需 RHC 协议文档，暂以快速轮询替代，已标注）
+- 快照/对账/AI 快照扩展到 4 所；outOfRangeAction 新增 recoverMaxLossUsd 参数
+
+### 注意
+- RHC 实盘需 Python 环境 + lighter-sdk（1.1.2）；部署见 README
+
 ## [1.3.1] - 2026-08-20
 
 ### 修复
