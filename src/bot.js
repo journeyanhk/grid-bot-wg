@@ -894,7 +894,7 @@ export class GridBot {
     } finally {
       for (const item of ready) this._pendingLevels.delete(item.levelIndex);
       this._placementPasses--;
-      this.ex.setPollLight?.(false); // 铺单结束恢复常规轮询
+      this.ex.setPollLight?.(this._placementPasses > 0); // 仅当无其他铺单进程在跑时恢复常规轮询
     }
   }
 
