@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-08-31
+
+### 修复
+- RHC 市场下拉无数据：header 缺失 hdr-lr / hdr-lr-dot 徽标，loadMarkets 中 $('hdr-lr').textContent 抛 null 错误导致市场列表加载中断
+- loadMarkets 加防御守卫：header 徽标缺失时不再阻断市场加载（避免同类半接线再次中断）
+
 ## [1.4.2] - 2026-08-31
 
 ### 修复（dev004 review2 反馈）

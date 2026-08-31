@@ -403,6 +403,7 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
   <span class="hdot idle" id="hdr-de-dot" title=""></span><span id="hdr-de" class="badge badge-paper">DE: PAPER</span>
   <span class="hdot idle" id="hdr-ex-dot" title=""></span><span id="hdr-ex" class="badge badge-paper">EX: PAPER</span>
   <span class="hdot idle" id="hdr-rs-dot" title=""></span><span id="hdr-rs" class="badge badge-paper">RS: PAPER</span>
+  <span class="hdot idle" id="hdr-lr-dot" title=""></span><span id="hdr-lr" class="badge badge-paper">LR: PAPER</span>
   <div class="header-right">
     <button class="icon-btn" id="theme-toggle" title="切换主题（当前跟随系统）">🌓</button>
     <span id="hdr-proxy" class="conn" title="全局代理状态"><span class="cdot"></span><span id="hdr-proxy-txt">代理检测中…</span></span>
@@ -1491,10 +1492,12 @@ function makeExchangeCtrl(prefix, chartId) {
       const r = await apiFetch(`/api/${prefix}/markets`);
       const j = await r.json();
       markets = j.markets;
-      // Update header badge
+      // Update header badge（缺失时不阻断市场加载）
       const hdrBadge = $('hdr-' + prefix);
-      hdrBadge.textContent = prefix.toUpperCase() + ': ' + j.mode.toUpperCase();
-      hdrBadge.className = 'badge ' + (j.mode === 'live' ? 'badge-live' : 'badge-paper');
+      if (hdrBadge) {
+        hdrBadge.textContent = prefix.toUpperCase() + ': ' + j.mode.toUpperCase();
+        hdrBadge.className = 'badge ' + (j.mode === 'live' ? 'badge-live' : 'badge-paper');
+      }
 
       P('market').innerHTML = markets.map(m => `<option value="${m.marketId}">${esc(m.displayName)}</option>`).join('');
       if (markets[0]) P('size-base').value = markets[0].minOrderSize || 0.001;
