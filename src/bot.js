@@ -431,7 +431,8 @@ export class GridBot {
       this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。`);
       this._placementProgress.completionAlerted = true;
     } else {
-      const est = Math.ceil((progress?.target ?? seeds.length) / 15) * 4; // ~15 单/批 × ~4s（含配速）
+      const paceSec = (Number(this.ex.orderBatchPaceMs) || 1500) / 1000;
+      const est = Math.ceil((progress?.target ?? seeds.length) / 15) * Math.max(2, Math.round(paceSec + 2)); // 批 × (配速+确认)
       this._alert(`网格已进入运行管理，但启动挂单尚未全部确认：目标 ${progress?.target ?? seeds.length} 单 / 已确认 ${progress?.confirmed ?? this.active.size} 单 / 待安全重试 ${progress?.pending ?? 0} 单。程序会先与交易所对账再补挂，预计约 ${est} 秒内铺完（限流保护配速），请勿中途停止。`);
     }
     logger.info('bot', `网格已启动 ${this.config.displayName}`, { mode: this.config.mode, gridCount: this.grid.count, lower: this.config.lower, upper: this.config.upper, leverage, orders: this.active.size });
@@ -853,7 +854,11 @@ export class GridBot {
           if (!Array.isArray(results) || results.length !== chunk.length) throw new Error('交易所批量下单返回数量不一致。');
         } catch (e) {
           this._placeFails += chunk.length; this._lastFailAt = Date.now();
-          this._alert(`批量下单失败（${chunk.length} 笔）: ${e?.message || e}`);
+          if (e?.rateLimited || e?.status === 429) {
+            logger.info('bot', `批量下单遇限流（${chunk.length} 笔），进入安全重试；剩余 ${Math.max(0, ready.length - offset - chunk.length)} 单待铺`);
+          } else {
+            this._alert(`批量下单失败（${chunk.length} 笔）: ${e?.message || e}`);
+          }
           for (const item of chunk) this._queueRetry({ ...item.source, opening: item.opening, reduceOnly: item.reduceOnly, sizeBase: item.sizeBase }, e);
           if (e?.rateLimited || e?.status === 429) {
             waitAfterMs = Math.max(waitAfterMs, Number(e.retryAfterMs) || Number(this.ex.openingRetryBaseMs) || 30_000);
@@ -997,7 +1002,14 @@ export class GridBot {
       }
     }
     if (!this.running) return;
-    if (ready.length) await this._placeMany(ready);
+    if (ready.length) {
+      // 平仓/reduce-only 腿优先：限额紧张时止盈腿不被远端铺单饿死（迟到的
+      // 止盈可能错过一次往返，远端铺单晚 1 分钟毫无损失）
+      ready.sort((a, b) =>
+        ((a.reduceOnly || a.opening === false) ? 0 : 1) -
+        ((b.reduceOnly || b.opening === false) ? 0 : 1));
+      await this._placeMany(ready);
+    }
     this._changed();
   }
 

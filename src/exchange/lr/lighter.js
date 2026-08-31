@@ -56,7 +56,7 @@ export class LighterExchange extends EventEmitter {
     // by grid level before every retry.
     this.supportsSafeOpeningRetry = true;
     this.orderBatchSize = SAFE_GRID_BATCH;
-    this.orderBatchPaceMs = SAFE_GRID_BATCH_PACE_MS;
+    this._adaptivePaceMs = SAFE_GRID_BATCH_PACE_MS; // AIMD 起点：额度充裕时保持，撞限后指数减速
     this.openingRetryBaseMs = OPENING_RETRY_BASE_MS;
     this.openingRetryMax = OPENING_RETRY_MAX;
     this.signer = opts.signer || new LighterSignerBridge({
@@ -65,6 +65,9 @@ export class LighterExchange extends EventEmitter {
       apiPrivateKey: this.apiPrivateKey, apiPrivateKeyFile: this.apiPrivateKeyFile,
     });
   }
+
+  /** AIMD 自适应批间配速：bot 每次 _placeMany 实时读取。 */
+  get orderBatchPaceMs() { return this._adaptivePaceMs; }
 
   async init() {
     this._tradingReady = false;
@@ -140,6 +143,8 @@ export class LighterExchange extends EventEmitter {
         if (res.status === 429 || res.status === 405) {
           err.rateLimited = true;
           err.retryAfterMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? OPENING_RETRY_BASE_MS;
+          // AIMD 乘性减：撞限立刻减速一倍（封顶 40s），让配速自动贴合真实限额
+          this._adaptivePaceMs = Math.min(40_000, this._adaptivePaceMs * 2);
         }
         throw err;
       } catch (e) {
@@ -193,7 +198,7 @@ export class LighterExchange extends EventEmitter {
     for (const m of rows) { if (m.lastPrice > 0) this._prices.set(m.marketId, m.lastPrice); }
     const fees = rows.map((m) => m.makerFee).filter((x) => Number.isFinite(x) && x >= 0);
     const maxMarketFee = fees.length ? Math.max(...fees) : 0;
-    if (maxMarketFee > 0) this.feeRate = maxMarketFee;
+    if (fees.length) this.feeRate = maxMarketFee; // 零费率也覆盖：RHC 实测 maker/taker 为 0，沿用 0.0005 默认会制造虚假告警
   }
 
   _market(marketId) { const m = this.markets.get(Number(marketId)); if (!m) throw new Error(`未知 RHC 市场 marketId=${marketId}`); return m; }
@@ -353,6 +358,8 @@ export class LighterExchange extends EventEmitter {
         this._setIssue(e);
         throw e;
       }
+      // AIMD 加性增：本批成功即向基线收敛（额度充裕时回到 ~1.5s/批）
+      this._adaptivePaceMs = Math.max(SAFE_GRID_BATCH_PACE_MS, Math.round(this._adaptivePaceMs * 0.85));
       return prepared.map((x) => {
         const orderId = String(x.clientOrderIndex);
         if (rejected?.has(orderId)) return null;

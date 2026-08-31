@@ -56,6 +56,7 @@
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
 ## 变更历史
+- [202608311641_review5-optimize](../../history/2026-08/202608311641_review5-optimize/) - 零费率覆盖/AIMD 自适应配速/平仓腿优先
 - [202608311620_market-float-fix](../../history/2026-08/202608311620_market-float-fix/) - market.js 浮点缺陷修复（平台无关 stepSize/stepPrice）
 - [202608311611_rhc-throttle-fix](../../history/2026-08/202608311611_rhc-throttle-fix/) - RHC 铺单限流自激修复（批间配速/确认多轮/轮询降载/写请求间隔）
 - [202608311355_lighter-port](../../history/2026-08/202608311355_lighter-port/) - RHC Lighter 接入 + 部分成交记账修复
