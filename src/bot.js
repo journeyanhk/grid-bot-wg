@@ -19,7 +19,7 @@ export class GridBot {
     this.active = new Map();        // orderId -> {levelIndex, side, price, opening, placedAt}
     this.fills = [];                // recent fills (capped)
     this.alerts = [];               // recent alerts (capped)
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0 };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0 };
     this.startBalance = null;
     this.lastPrice = null;
     this.outOfRange = false;
@@ -118,12 +118,14 @@ export class GridBot {
   restore(snap) {
     if (!snap || !snap.config) return;
     this.config = snap.config;
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, ...(snap.stats || {}) };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
+    // P1-a: 崩溃重启后自动停机态可能待消费——监督器必须跨重启常驻，否则"跨重启自动重启"是死的
+    if (snap.config?.dynamic?.enabled) this._startDynTimer();
     try {
       this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
       this._recomputeRisk();
@@ -144,7 +146,7 @@ export class GridBot {
     if (snap.recovery || snap.config.mode === 'recovery') return this._resumeRecovery(snap);
     if (!Array.isArray(snap.active)) throw new Error('无可恢复的运行中网格快照');
     this.config = snap.config;
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, ...(snap.stats || {}) };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
@@ -187,7 +189,7 @@ export class GridBot {
   /** Resume a standalone reduce-only recovery ladder after a process restart. */
   async _resumeRecovery(snap) {
     this.config = snap.config;
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, ...(snap.stats || {}) };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this.grid = null; this.risk = null;
@@ -644,7 +646,9 @@ export class GridBot {
 
   /** Zero cumulative stats and re-baseline PnL to the current equity. */
   resetStats() {
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0 };
+    // 动作计数（recenters/autoRestarts）不是盈亏统计，重置时保留
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0,
+                   recenters: this.stats.recenters || 0, autoRestarts: this.stats.autoRestarts || 0 };
     this.fills = [];
     this._placeFails = 0;
     this._lastFailAt = 0;
@@ -1582,10 +1586,13 @@ export class GridBot {
         }
       } catch { /* 拿不到 K 线视为不平静 */ }
       calm = movePct != null && movePct <= (dyn.calmMaxMovePct ?? 3);
-      const width = cfg.grid?.spacing ? cfg.grid.spacing * cfg.gridCount : (cfg.upper - cfg.lower);
+      const width = cfg.upper - cfg.lower; // P2-b: config 无 grid 属性，宽度恒为上下边界差
 
       if (this.running) {
         // ── 分支 A：漂移重定（默认影子） ──
+        // P2-a: 破界 recover 态（outOfRange=true，回收阶梯挂着）不漂移重定——
+        // 破界统一交由 close→分支B 或 recover 自身流程处理，状态机不被搅浑。
+        if (this.outOfRange) return;
         const price = this.lastPrice;
         if (!Number.isFinite(price) || price <= 0) return;
         const mid = (cfg.lower + cfg.upper) / 2;
@@ -1595,8 +1602,8 @@ export class GridBot {
         const cooldownOk = Date.now() - this._lastDynActionAt >= (dyn.recenterCooldownMin ?? 360) * 60_000;
         if (drift && invGate && calm && cooldownOk) {
           this._lastDynActionAt = Date.now();
-          const lo = alignToStep(price - width / 2, cfg.stepPrice || 0.01, cfg.grid?.spacing);
-          const hi = alignToStep(price + width / 2, cfg.stepPrice || 0.01, cfg.grid?.spacing);
+          const lo = alignToStep(price - width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
+          const hi = alignToStep(price + width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
           if (dyn.shadow) {
             this._alert(`[动态·影子] 本应漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)} 偏心 ${round2(Math.abs(price - mid))}，库存 ${pos?.sizeBase ?? 0}）；影子模式不执行。`);
           } else {
@@ -1622,8 +1629,10 @@ export class GridBot {
         }
         const price = this.lastPrice;
         if (!Number.isFinite(price) || price <= 0) return;
-        const lo = alignToStep(price - width / 2, as.config.stepPrice || 0.01, as.config.grid?.spacing);
-        const hi = alignToStep(price + width / 2, as.config.stepPrice || 0.01, as.config.grid?.spacing);
+        // P3-②：分支B 统一读 as.config（停机时点的配置），防止停机态后再改 config 造成宽/对齐不一致
+        const widthB = as.config.upper - as.config.lower;
+        const lo = alignToStep(price - widthB / 2, as.config.stepPrice || 0.01); // buildGrid 会重算 spacing，此处仅按 stepPrice 对齐
+        const hi = alignToStep(price + widthB / 2, as.config.stepPrice || 0.01);
         if (dyn.shadow) {
           this._alert(`[动态·影子] 本应自动重启网格至 [${lo}, ${hi}]（${as.reason} 后冷静门满足）；影子模式不执行。`);
           return;

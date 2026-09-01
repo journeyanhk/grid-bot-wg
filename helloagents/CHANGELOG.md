@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-01
+
+### 修复（dev004-dy review6）
+- P1-a: restore() 现在启动动态监督器——崩溃重启后持久化恢复的自动停机态可被冷静门消费（此前监督器失联，"跨重启自动重启"失效）
+- P1-b: stats 重建基对象包含 recenters/autoRestarts，修复旧快照缺失键导致 NaN 计数静默丢失；resetStats 保留动作计数（非盈亏统计）
+- P2-a: 分支 A 漂移重定排除 outOfRange/recover 态（回收阶梯挂着时不重定，状态机不被搅浑）
+- P2-b: width 显式取 upper-lower；alignToStep 分支 A 传 this.grid.spacing、分支 B 仅按 stepPrice 对齐（buildGrid 重算 spacing）
+
+### 变更
+- P3-②: 分支 B 统一读 as.config（停机时点配置），防停机态后再改 config 造成不一致
+- 测试新增 P1-a 例（restore 后监督器工作）
+
 ## [1.5.0] - 2026-08-31
 
 ### 新增

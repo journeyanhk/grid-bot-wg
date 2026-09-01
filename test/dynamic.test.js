@@ -177,3 +177,28 @@ test('手动 stop 不记录自动停机（清空）', async () => {
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();
+test('P1-a: restore 带 autoStopped 快照后监督器仍工作（影子告警触发）', async () => {
+  const ex = new MockExchange();
+  calmCandles(ex, 1);
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  // 模拟进程重启前的快照：动态启用 + 自动停机态（restore 不置 running）
+  const snap = {
+    config: { marketId: 1, displayName: 'X', mode: 'neutral', lower: 100, upper: 300, gridCount: 10, sizeBase: 1, leverage: 3,
+              outOfRangeAction: 'recover', stepPrice: 1,
+              dynamic: { enabled: true, shadow: true, restartEnabled: true, restartCooldownMin: 0, calmWindowH: 120, calmMaxMovePct: 3 } },
+    stats: { recenters: 0, autoRestarts: 0 },
+    autoStopped: { at: Date.now() - 10_000, reason: 'breakout', config: { upper: 300, lower: 100, stepPrice: 1 } },
+  };
+  bot.restore(snap); // P1-a 修复点：restore 应启动动态监督器
+  assert.ok(bot._dynTimer, 'restore 应启动动态监督器定时器');
+  bot.lastPrice = 160;
+  bot.running = false;
+  let started = false;
+  bot.start = async () => { started = true; };
+  bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
+  await bot._dynCheck();
+  // 影子模式：不真正重启，只出影子告警
+  assert.equal(started, false, '影子模式不执行重启');
+  assert.ok(bot.alerts.some((a) => a.message.includes('[动态·影子]')), 'restore 后监督器应产生影子告警');
+  bot._stopDynTimer();
+});
