@@ -306,6 +306,14 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
 .pill-sell { background: #ef444418; color: #fca5a5; }
 .warn-box { background: #f59e0b10; border: 1px solid #f59e0b40; border-radius: 7px; padding: 8px 10px; font-size: 11px; color: #fcd34d; margin-bottom: 10px; }
 .risk-preview { font-size: 11px; color: var(--mut2); margin-top: 8px; line-height: 1.5; }
+/* ── 动态网格折叠区 ── */
+details.dyn { margin-top: 10px; border: 1px solid var(--border2); border-radius: 6px; padding: 7px 9px; background: var(--bg2); font-size: 11px; }
+details.dyn summary { cursor: pointer; font-weight: 600; color: var(--mut2); font-size: 11px; }
+details.dyn[open] summary { margin-bottom: 6px; }
+details.dyn label { display: inline-flex; align-items: center; gap: 4px; margin: 0 10px 0 0; font-size: 11px; cursor: pointer; }
+details.dyn input[type=number] { width: 100%; }
+details.dyn .row { gap: 8px; margin-top: 6px; }
+.dynstat { font-size: 11px; color: var(--mut2); margin-top: 2px; }
 
 /* ── IP Config panel ── */
 .ip-section { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg2); margin-bottom: 10px; }
@@ -676,6 +684,23 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <input id="de-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="de-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="de-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="de-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="de-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="de-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="de-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="de-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="de-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
       <div class="risk-preview" id="de-risk-preview"></div>
       <button class="btn btn-start" id="de-start-btn">启动 Decibel 网格</button>
       <button class="btn btn-stop" id="de-stop-btn" disabled>停止 + 撤单 + 平仓</button>
@@ -805,6 +830,23 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <input id="ex-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="ex-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="ex-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="ex-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="ex-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="ex-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="ex-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="ex-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="ex-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
       <div class="risk-preview" id="ex-risk-preview"></div>
       <button class="btn btn-start" id="ex-start-btn">启动 Extended 网格</button>
       <button class="btn btn-stop" id="ex-stop-btn" disabled>停止 + 撤单 + 平仓</button>
@@ -933,6 +975,23 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <input id="rs-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="rs-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="rs-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="rs-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="rs-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="rs-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="rs-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="rs-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="rs-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
       <div class="risk-preview" id="rs-risk-preview"></div>
       <button class="btn btn-start" id="rs-start-btn">启动 RISEx 网格</button>
       <button class="btn btn-stop" id="rs-stop-btn" disabled>停止 + 撤单 + 平仓</button>
@@ -1063,6 +1122,23 @@ th { color: var(--mut2); font-weight: 600; font-size: 10px; text-transform: uppe
           <input id="lr-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
         </div>
       </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="lr-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="lr-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="lr-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="lr-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="lr-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="lr-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="lr-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="lr-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
       <div class="risk-preview" id="lr-risk-preview"></div>
       <button class="btn btn-start" id="lr-start-btn">启动 RHC Lighter 网格</button>
       <button class="btn btn-stop" id="lr-stop-btn" disabled>停止 + 撤单 + 平仓</button>
@@ -1412,6 +1488,15 @@ function placementProgressText(state) {
   return `挂单目标 ${pr.target} / 已确认 ${pr.confirmed} / 待重试 ${pr.pending}${pr.failed ? ` / 已停止重试 ${pr.failed}` : ''}`;
 }
 
+/** 动态网格计数摘要（总览卡）。 */
+function renderDynSummary(s) {
+  const dyn = s.dynamic;
+  if (!dyn || !dyn.enabled) return '';
+  const restartLine = dyn.autoStopped
+    ? ` · 待冷静门重启(${dyn.autoStopped.reason})` : '';
+  return `<br><span class="dynstat">🔁 动态: 重定 ${dyn.recenters || 0} · 自动重启 ${dyn.autoRestarts || 0}${dyn.shadow ? ' · 影子' : ''}${restartLine}</span>`;
+}
+
 function verifiedOrdersText(state) {
   const count = state?.exchangeOpenOrders;
   if (count == null) return '交易所真实挂单数暂未确认';
@@ -1622,6 +1707,13 @@ function makeExchangeCtrl(prefix, chartId) {
       gridCount: +P('grid-count').value, sizeBase: +P('size-base').value,
       leverage: +P('leverage').value, outOfRangeAction: P('auto-stop').value,
       recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0,
+      dynamic: {
+        enabled: !!P('dyn-enable')?.checked, shadow: P('dyn-shadow')?.checked !== false,
+        driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120,
+        calmMaxMovePct: +P('dyn-calm')?.value || 3,
+        recenterCooldownMin: +P('dyn-rec-cd')?.value || 360,
+        restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120,
+      },
     };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const j = await r.json();
@@ -1692,7 +1784,7 @@ function makeExchangeCtrl(prefix, chartId) {
     const lower = +P('lower').value, upper = +P('upper').value, n = +P('grid-count').value, sz = +P('size-base').value, lev = +P('leverage').value;
     if (!(upper > lower) || !n || !sz) { alert('无法自动计算区间，请在左侧手动填写参数后点"启动"。'); return; }
     if (!confirm(`按现价重开网格：区间 [${lower}, ${upper}]，${n} 格，每格 ${sz}，${lev}x。\n现有持仓将作为网格库存保留。继续？`)) return;
-    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0 };
+    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0, dynamic: { enabled: !!P('dyn-enable')?.checked, shadow: P('dyn-shadow')?.checked !== false, driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120, calmMaxMovePct: +P('dyn-calm')?.value || 3, recenterCooldownMin: +P('dyn-rec-cd')?.value || 360, restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120 } };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const j = await r.json();
     if (j.error) alert('启动失败：' + j.error);
@@ -2056,7 +2148,8 @@ function renderOverview(data) {
           + `下边界 <b>${c.lower}</b> · 上边界 <b>${c.upper}</b><br>`
           + `网格 <b>${c.gridCount}</b> 格 · 每格 <b>${c.sizeBase}</b><br>`
           + `杠杆 <b>${c.leverage}x</b> · 区间外策略 <b>${sl}</b>`
-          + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : ``);
+          + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : ``)
+          + renderDynSummary(d);
       } else {
         gc.style.display = 'none';
         gc.innerHTML = '';

@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-31
+
+### 新增
+- 动态网格（基于 90 天回测：冷静门控自动重启为价值主体，漂移重定影子优先）：
+  - 分支 B：破界/止损自动停机后，冷静门（近 5 日动量 ≤3%）满足才自动重启，区间以现价居中（走完整 start()，继承保证金预检/撤单确认/AIMD 配速）
+  - 分支 A：价格漂移 + 净库存平 + 冷静门 + 冷却满足才漂移重定（默认影子模式，只告警不执行）
+  - 安全语义：动态层零新增下单路径，仅复用 start()/adjustRange()
+- 配置：dynamic { enabled/shadow/driftFrac/invGateGrids/recenterCooldownMin/restartEnabled/restartCooldownMin/calmWindowH/calmMaxMovePct }
+- 自动停机语义：手动 stop/撤单/平仓取消自动重启（永不自动重启）；自动停机状态随快照持久化跨重启保留
+- 前端：四所控制台"动态网格"折叠区 + 总览卡动态计数/自动重启待命状态
+
+### 变更
+- 配置数值解析用 Number.isFinite 尊重显式 0（原 || 兜底把 0 当未设置）
+
 ## [1.4.6] - 2026-08-31
 
 ### 修复

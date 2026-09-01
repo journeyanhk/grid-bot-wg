@@ -195,7 +195,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/stop' && req.method === 'POST') {
-      try { return send(res, 200, await bot.stop(await readBody(req))); }
+      try { bot.cancelAutoRestart?.(); return send(res, 200, await bot.stop(await readBody(req))); } // 手动停机：取消自动重启
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
@@ -210,7 +210,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/cancel-orders' && req.method === 'POST') {
-      try { return send(res, 200, await bot.cancelAllOrders()); }
+      try { bot.cancelAutoRestart?.(); return send(res, 200, await bot.cancelAllOrders()); } // 手动撤单取消自动重启
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
@@ -259,7 +259,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/close-position' && req.method === 'POST') {
-      try { const b = await readBody(req); return send(res, 200, await bot.closePositionNow(b && b.marketId)); }
+      try { bot.cancelAutoRestart?.(); const b = await readBody(req); return send(res, 200, await bot.closePositionNow(b && b.marketId)); } // 手动平仓取消自动重启
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
@@ -611,6 +611,7 @@ function pick(s, mode) {
     position: s.position ?? null,
     operationalIssue: s.operationalIssue ?? null,
     apiWalletAddress: s.apiWalletAddress ?? null,
+    dynamic: s.dynamic ?? null,   // 动态网格状态（计数/自动停机/影子）供总览渲染
   };
 }
 
