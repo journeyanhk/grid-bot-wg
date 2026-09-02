@@ -271,3 +271,16 @@ test('库存漂移审计：带基线重启不误报（已知遗留库存不算�
   await bot.reconcileOpenOrders();
   assert.ok(bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '基线之上超阈仍应告警');
 });
+
+test('审计锚点：跨重启带历史 stats 不误报（Restore 后锚定当前计数）', async () => {
+  const { ex, bot } = await makeBot({}, { ...CFG, sizeBase: 0.5 });
+  // 模拟"历史 stats 残留"：重启前 stats.buys=10（已在基线 0.0046 里），新快照不含锚点
+  bot.stats.buys = 10; bot.stats.sells = 0;
+  bot.restore({ config: bot.config, stats: { ...bot.stats }, invBase: 10, grid: bot.grid });
+  // 锚点应等于恢复时刻 stats（10, 0）——推导从 0 起算
+  assert.ok(Number.isFinite(bot._auditBuysBase) && bot._auditBuysBase === 10, '恢复后锚点=当前 stats');
+  // 基线 10 库存 + 恢复后无新成交 => net=0，不应误报
+  ex.positions.set(1, { sizeBase: 10, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  await bot.reconcileOpenOrders();
+  assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '锚点校正后不误报');
+});

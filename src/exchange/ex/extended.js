@@ -43,6 +43,7 @@ export class ExtendedExchange extends EventEmitter {
     this.pollMs = opts.pollMs ?? 2500;
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
+    this._emptyStreakStart = 0; // 空快照连击起点（>3min 升级健康事件）
     this.lastError = null;
     this.domain = DOMAINS[this.network] || DOMAINS.mainnet;
     this.markets = new Map();   // marketId -> market
@@ -373,12 +374,21 @@ export class ExtendedExchange extends EventEmitter {
         // 视为异常快照 —— 本轮不做任何 gone 判定（不启动/累积 goneFirstAt），等下轮复核，
         // 避免一次预热毛刺预支整梯 10 分钟耐心后批量判死。
         if (Array.isArray(open) && open.length === 0 && this._tracked.size >= 10) {
+          if (!this._emptyStreakStart) this._emptyStreakStart = Date.now();
+          // Review12：空快照持续 >3 分钟视为健康事件（仪表盘变红，Telegram/AI 哨兵可见）
+          if (this._emptyStreakStart && Date.now() - this._emptyStreakStart > 3 * 60_000) {
+            this.operationalIssue = { title: 'Extended 挂单快照持续为空', message: '成交检测暂停中，请检查交易所状态 / 代理出口 IP' };
+          }
           this._emptySnapshotAt = this._emptySnapshotAt || 0;
           if (Date.now() - this._emptySnapshotAt > 60_000) {
             this._emptySnapshotAt = Date.now();
-            logger.warn('ex', `快照为空但本地跟踪 ${this._tracked.size} 单，本轮跳过 gone 判定（疑似接口预热/抖动）。`);
+            logger.warn('ex', `快照为空但本地跟踪 ${this._tracked.size} 单，本轮跳过 gone 判定（已持续 ${Math.round((Date.now() - this._emptyStreakStart) / 1000)}s）。`);
           }
           open = null;
+        } else {
+          // 快照恢复：清除空快照健康事件与连击计时
+          this._emptyStreakStart = 0;
+          if (this.operationalIssue?.title === 'Extended 挂单快照持续为空') this.operationalIssue = null;
         }
         if (open) {
           const liveIds = new Set(open.map((o) => String(o.id)));

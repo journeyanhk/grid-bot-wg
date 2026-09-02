@@ -109,6 +109,8 @@ export class GridBot {
       retryQueue: this._retryQueue,
       autoStopped: this._autoStopped,   // 动态网格：自动停机→冷静门重启状态
       invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
+      auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
+      auditSellsBase: this._auditSellsBase ?? 0,
     };
   }
 
@@ -126,6 +128,8 @@ export class GridBot {
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线
+    this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0); // 审计锚点（旧快照缺省=从现在重新对账）
+    this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
     // P1-a: 崩溃重启后自动停机态可能待消费——监督器必须跨重启常驻，否则"跨重启自动重启"是死的
     if (snap.config?.dynamic?.enabled) this._startDynTimer();
     try {
@@ -156,6 +160,9 @@ export class GridBot {
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
     this._restorePendingPlacementRetries();
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线（跨重启保留）
+    // 审计锚点：旧快照缺省时取当前 stats（等效"从现在起重新对账"，跨重启不双重计数）
+    this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0);
+    this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
     this.outOfRange = !!snap.outOfRange;
     this.lastPrice = snap.lastPrice ?? null;
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
@@ -399,6 +406,11 @@ export class GridBot {
     // 库存基线：保留持仓重启时，把启用时刻的已有持仓记为基线，库存漂移审计减去它，
     // 避免"每次保留持仓重启都报假警"（用户明知的遗留库存）。
     try { this._invBase = Number(this.ex.getPosition?.(market.marketId)?.sizeBase) || 0; } catch { this._invBase = 0; }
+    // 审计锚点：与库存基线同一时刻记录成交计数起点——成交计数是跨重启累计的，
+    // 重启前的成交既算进基线持仓、又留在流水推导里会被双重计数成"假漂移"。
+    // 锚定后推导只统计"这次重启之后"的成交（Review11）。
+    this._auditBuysBase = this.stats.buys;
+    this._auditSellsBase = this.stats.sells;
     if (this.startBalance == null) {
       this.startBalance =
         typeof this.ex.equity === 'number' ? this.ex.equity
@@ -1538,7 +1550,8 @@ export class GridBot {
    */
   _auditInventoryDrift() {
     if (!this.running || !this.config || !this.config.sizeBase) return;
-    const baseOccurrences = this.stats.buys - this.stats.sells;
+    const baseOccurrences = ((this.stats.buys - (this._auditBuysBase || 0))
+                             - (this.stats.sells - (this._auditSellsBase || 0)));
     const expected = baseOccurrences * this.config.sizeBase;
     const pos = this.ex.getPosition?.(this.config.marketId);
     if (!pos) return;
@@ -1546,13 +1559,13 @@ export class GridBot {
     if (!Number.isFinite(actual)) return;
     const toleranceGrids = Math.max(2, Math.ceil((this.config.gridCount || 40) * 0.03)); // 140格→5格：部分成交/尘埃仓正常噪音 1-2 格，抓得住 21 格事故
     const base = this._invBase || 0; // 库存基线（保留持仓重启时不把已知遗留库存当漂移）
-    const net = Math.abs(Math.abs(actual) - base - Math.abs(expected));
+    const net = Math.abs(actual - base - expected); // 全带符号：顺带修掉空头基线假警/方向翻转漏报（Review11 P3）
     const tolerance = toleranceGrids * this.config.sizeBase;
     if (net <= tolerance) return;
     if (Date.now() - (this._lastDriftAlertAt || 0) < 60 * 60_000) return;
     this._lastDriftAlertAt = Date.now();
     const driftGrids = net / this.config.sizeBase;
-    this._alert(`⚠️ 库存与成交流水不符：实际持仓 ${round4(actual)} 币（基线 ${round4(base)}），成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
+    this._alert(`⚠️ [${this.config.displayName}] 库存与成交流水不符：实际持仓 ${round4(actual)} 币（基线 ${round4(base)}），成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
   }
 
   _startReconcileTimer() {
