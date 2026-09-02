@@ -368,10 +368,24 @@ export class ExtendedExchange extends EventEmitter {
         this.getPrice(mId, { touch: false }).then((px) => { if (px) this.emit('price', { marketId: mId, price: px }); }).catch(() => {});
         // open orders -> fill detection
         let open = null;
-        try { open = await this._get(`/api/v1/user/orders?market=${encodeURIComponent(m.name)}`); } catch { /* keep */ }
+        try { open = await this._get(`/api/v1/user/orders?market=${encodeURIComponent(m.name)}`); } catch { open = null; }
+        // 适配器层空快照守卫（Review10 P2）：接口预热/抖动返回空数组但本地 tracking 很多时，
+        // 视为异常快照 —— 本轮不做任何 gone 判定（不启动/累积 goneFirstAt），等下轮复核，
+        // 避免一次预热毛刺预支整梯 10 分钟耐心后批量判死。
+        if (Array.isArray(open) && open.length === 0 && this._tracked.size >= 10) {
+          this._emptySnapshotAt = this._emptySnapshotAt || 0;
+          if (Date.now() - this._emptySnapshotAt > 60_000) {
+            this._emptySnapshotAt = Date.now();
+            logger.warn('ex', `快照为空但本地跟踪 ${this._tracked.size} 单，本轮跳过 gone 判定（疑似接口预热/抖动）。`);
+          }
+          open = null;
+        }
         if (open) {
           const liveIds = new Set(open.map((o) => String(o.id)));
-          for (const o of open) { const t = this._tracked.get(String(o.id)); if (t) { t.seen = true; t.goneAttempts = 0; } }
+          for (const o of open) {
+            const t = this._tracked.get(String(o.id));
+            if (t) { t.seen = true; t.goneAttempts = 0; t.goneFirstAt = 0; t._lastProbeAt = 0; } // 订单重现：耐心计时器归零（Review10 P1）
+          }
           const now = Date.now();
           for (const [id, t] of [...this._tracked]) {
             if (t.marketId !== mId || liveIds.has(id) || t.resolving) continue;
