@@ -442,12 +442,14 @@ export class ExtendedExchange extends EventEmitter {
           if (avg > 0) fillPrice = avg;
         } else if (/CANCELLED|REJECTED|EXPIRED/i.test(st)) {
           verdict = 'cancelled';
+          t.confirmedCancel = true; // 记录"终态确认为取消"，见下方事件
         } else if (/NEW|OPEN|ACCEPTED|PENDING|UNTRIGGERED|PARTIAL/i.test(st)) {
           // History says the order is STILL LIVE: the open-orders snapshot that
           // reported it "gone" was a glitch. Revive tracking and bail out —
           // counting these toward the give-up threshold used to drop dozens of
           // perfectly live orders during an API hiccup.
           t.goneAttempts = 0;
+          t.goneFirstAt = 0; // P2-b: 复活后清零时间制耐心，二次消失重新计时（否则被上轮消耗提前判死）
           t.seen = true;
           return;
         }
@@ -461,8 +463,10 @@ export class ExtendedExchange extends EventEmitter {
       t.goneFirstAt = t.goneFirstAt || Date.now();
       const unresolvedMs = Date.now() - t.goneFirstAt;
       // 第二证据源：成交流水（尽力而为；端点/结构异常则忽略，不阻断主流程）。
-      // 订单消失 20 秒后再查，给订单历史留出结算时间。
-      if (unresolvedMs >= 20_000) {
+      // 订单消失 20 秒后再查，且每单 30s 节流——避免 20 单同时未决时每秒 8 个额外
+      // 请求，恰好给已滞后的 API 加压造成限流雪崩。
+      if (unresolvedMs >= 20_000 && Date.now() - (t._lastProbeAt || 0) >= 30_000) {
+        t._lastProbeAt = Date.now();
         try {
           const mkt = this.markets.get(Number(t.marketId))?.name || '';
           const fills = await this._get(`/api/v1/user/trades?market=${encodeURIComponent(mkt)}`).catch(() => null);
@@ -486,6 +490,10 @@ export class ExtendedExchange extends EventEmitter {
     this._tracked.delete(id);
     if (verdict === 'filled') {
       this.emit('fill', { orderId: id, marketId: t.marketId, side: t.side, price: fillPrice, sizeBase: fillSize, levelIndex: t.levelIndex });
+    } else if (verdict === 'cancelled' && t.confirmedCancel) {
+      // P2-c: 确认撤销恢复事件（措辞含"取消"以命中 _handleExError 的熔断正则，
+      // 否则 Extended 上批量撤单（如保证金不足）对撤单风暴熔断失明）
+      this.emit('error', new Error(`订单 ${id}（${t.side} @ ${t.price}）已被交易所取消（终态确认），该档位不补单。`));
     }
   }
 

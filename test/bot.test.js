@@ -17,7 +17,7 @@ class MockExchange extends EventEmitter {
     super();
     this.mode = 'paper';
     this.dataSource = 'real';
-    this.feeRate = 0;
+    this.feeRate = opts.feeRate ?? 0;
     this.balance = opts.balance ?? 100000;
     this.orders = new Map();      // orderId -> {marketId, side, price, sizeBase, reduceOnly, levelIndex, orderId}
     this.positions = new Map();   // marketId -> {sizeBase, entryPrice, unrealizedPnl, leverage}
@@ -272,7 +272,8 @@ test('保证金占用偏高告警（>80%）不阻断启动', async () => {
 });
 
 test('格距不足覆盖手续费：告警但不阻断启动', async () => {
-  const { bot } = await makeBot({}, { ...CFG, gridCount: 100, upper: 110 });
+  // MockExchange.feeRate=0（零费）不告警；用真实费率验证告警路径
+  const { bot } = await makeBot({ feeRate: 0.001 }, { ...CFG, gridCount: 100, upper: 110 });
   assert.ok(bot.alerts.some((a) => a.message.includes('不足以覆盖往返手续费')));
 });
 

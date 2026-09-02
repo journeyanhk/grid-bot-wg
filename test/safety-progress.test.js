@@ -249,3 +249,25 @@ test('库存漂移审计：实际持仓与成交流水偏差超阈值时告警',
   await bot.reconcileOpenOrders();
   assert.ok(bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '超阈值应告警');
 });
+
+test('库存漂移审计：带基线重启不误报（已知遗留库存不算漂移）', async () => {
+  const { ex, bot } = await makeBot({}, { ...CFG, sizeBase: 0.5 });
+  // 模拟"保留持仓重启"：已有 10 币遗留库存记为基线
+  bot._invBase = 10;
+  ex.positions.set(1, { sizeBase: 10, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  bot.stats.buys = 0; bot.stats.sells = 0;
+  await bot.reconcileOpenOrders();
+  assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '遗留库存=基线，不应误报');
+  // 基线之上又成交 2 笔（推导 +1 币=2格），实际 12（net=1 格 ≤ 容忍2）
+  bot._invBase = 10;
+  bot.stats.buys = 2;
+  ex.positions.set(1, { sizeBase: 12, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  await bot.reconcileOpenOrders();
+  assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '基线之上 2 格在容忍内');
+  // 但基线之上漂移超阈（+0 推导，实际 13 => net 3 格 > 容忍2）
+  bot.stats.buys = 0;
+  ex.positions.set(1, { sizeBase: 13, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  bot._lastDriftAlertAt = 0;
+  await bot.reconcileOpenOrders();
+  assert.ok(bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '基线之上超阈仍应告警');
+});

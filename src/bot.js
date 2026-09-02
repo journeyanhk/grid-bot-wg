@@ -108,6 +108,7 @@ export class GridBot {
       placementProgress: this._placementProgress,
       retryQueue: this._retryQueue,
       autoStopped: this._autoStopped,   // 动态网格：自动停机→冷静门重启状态
+      invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
     };
   }
 
@@ -124,6 +125,7 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
+    this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线
     // P1-a: 崩溃重启后自动停机态可能待消费——监督器必须跨重启常驻，否则"跨重启自动重启"是死的
     if (snap.config?.dynamic?.enabled) this._startDynTimer();
     try {
@@ -153,6 +155,7 @@ export class GridBot {
     this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
     this._restorePendingPlacementRetries();
+    this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线（跨重启保留）
     this.outOfRange = !!snap.outOfRange;
     this.lastPrice = snap.lastPrice ?? null;
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
@@ -393,6 +396,9 @@ export class GridBot {
     this.recovery = false;
 
     // record the starting equity up front (margin pre-check, returnPct, recovery)
+    // 库存基线：保留持仓重启时，把启用时刻的已有持仓记为基线，库存漂移审计减去它，
+    // 避免"每次保留持仓重启都报假警"（用户明知的遗留库存）。
+    try { this._invBase = Number(this.ex.getPosition?.(market.marketId)?.sizeBase) || 0; } catch { this._invBase = 0; }
     if (this.startBalance == null) {
       this.startBalance =
         typeof this.ex.equity === 'number' ? this.ex.equity
@@ -414,7 +420,8 @@ export class GridBot {
     }
 
     // ---- fee vs spacing sanity check ----
-    const feeRate = Number(this.ex.displayFeeRate ?? this.ex.feeRate) || 0.0005; // 优先真实费率（Extended displayFeeRate=maker0），未知时兜底 0.0005
+    const feeRaw = Number(this.ex.displayFeeRate ?? this.ex.feeRate); // 优先真实费率（Extended displayFeeRate=maker0 / RHC=feeRate 零费率）
+    const feeRate = Number.isFinite(feeRaw) ? feeRaw : 0.0005; // 区分"零费率"与"未知"：0 合法，仅未知才兜底
     const roundTripFeePct = feeRate * 2 * 100;
     if (this.risk.spacingPct <= roundTripFeePct) {
       this._alert(`⚠️ 网格间距 ${this.risk.spacingPct}% 不足以覆盖往返手续费（约 ${round2(roundTripFeePct)}%），每完成一格可能亏损。建议拉大间距或减少网格数。`);
@@ -1537,13 +1544,15 @@ export class GridBot {
     if (!pos) return;
     const actual = Number(pos.sizeBase);
     if (!Number.isFinite(actual)) return;
-    const toleranceGrids = Math.max(2, this.config.gridCount || 2); // 容忍 ±N 格
+    const toleranceGrids = Math.max(2, Math.ceil((this.config.gridCount || 40) * 0.03)); // 140格→5格：部分成交/尘埃仓正常噪音 1-2 格，抓得住 21 格事故
+    const base = this._invBase || 0; // 库存基线（保留持仓重启时不把已知遗留库存当漂移）
+    const net = Math.abs(Math.abs(actual) - base - Math.abs(expected));
     const tolerance = toleranceGrids * this.config.sizeBase;
-    if (Math.abs(Math.abs(actual) - Math.abs(expected)) <= tolerance) return;
+    if (net <= tolerance) return;
     if (Date.now() - (this._lastDriftAlertAt || 0) < 60 * 60_000) return;
     this._lastDriftAlertAt = Date.now();
-    const driftGrids = Math.abs(Math.abs(actual) - Math.abs(expected)) / this.config.sizeBase;
-    this._alert(`⚠️ 库存与成交流水不符：实际持仓 ${round4(actual)} 币，成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
+    const driftGrids = net / this.config.sizeBase;
+    this._alert(`⚠️ 库存与成交流水不符：实际持仓 ${round4(actual)} 币（基线 ${round4(base)}），成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
   }
 
   _startReconcileTimer() {
