@@ -414,7 +414,7 @@ export class GridBot {
     }
 
     // ---- fee vs spacing sanity check ----
-    const feeRate = Number(this.ex.feeRate) || 0.0005;
+    const feeRate = Number(this.ex.displayFeeRate ?? this.ex.feeRate) || 0.0005; // 优先真实费率（Extended displayFeeRate=maker0），未知时兜底 0.0005
     const roundTripFeePct = feeRate * 2 * 100;
     if (this.risk.spacingPct <= roundTripFeePct) {
       this._alert(`⚠️ 网格间距 ${this.risk.spacingPct}% 不足以覆盖往返手续费（约 ${round2(roundTripFeePct)}%），每完成一格可能亏损。建议拉大间距或减少网格数。`);
@@ -1521,6 +1521,29 @@ export class GridBot {
       this._changed();
     }
     this._drainRetryQueue().catch(() => {});
+    this._auditInventoryDrift();
+  }
+
+  /**
+   * 库存漂移审计（Review7 修复 2）：把"成交确认丢失导致的静默漏气"变成可见告警。
+   * 实际持仓应约等于 (buys-sells)×sizeBase ± 容忍格；若偏差超阈值，说明有成交事件
+   * 未被确认（档位空洞 + 无对腿库存）。仅告警，不动作。1 小时节流防噪音。
+   */
+  _auditInventoryDrift() {
+    if (!this.running || !this.config || !this.config.sizeBase) return;
+    const baseOccurrences = this.stats.buys - this.stats.sells;
+    const expected = baseOccurrences * this.config.sizeBase;
+    const pos = this.ex.getPosition?.(this.config.marketId);
+    if (!pos) return;
+    const actual = Number(pos.sizeBase);
+    if (!Number.isFinite(actual)) return;
+    const toleranceGrids = Math.max(2, this.config.gridCount || 2); // 容忍 ±N 格
+    const tolerance = toleranceGrids * this.config.sizeBase;
+    if (Math.abs(Math.abs(actual) - Math.abs(expected)) <= tolerance) return;
+    if (Date.now() - (this._lastDriftAlertAt || 0) < 60 * 60_000) return;
+    this._lastDriftAlertAt = Date.now();
+    const driftGrids = Math.abs(Math.abs(actual) - Math.abs(expected)) / this.config.sizeBase;
+    this._alert(`⚠️ 库存与成交流水不符：实际持仓 ${round4(actual)} 币，成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
   }
 
   _startReconcileTimer() {
@@ -1757,6 +1780,7 @@ function labelMode(m) { return m === 'long' ? '做多网格' : m === 'short' ? '
 
 function round2(x) { return Math.round(x * 100) / 100; }
 function round6(x) { return Math.round(x * 1e6) / 1e6; }
+function round4(x) { return Math.round(x * 1e4) / 1e4; }
 function roundPrice(x) { return Number.isFinite(Number(x)) ? Math.round(Number(x) * 1e8) / 1e8 : null; }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 

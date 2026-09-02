@@ -39,6 +39,7 @@ export class ExtendedExchange extends EventEmitter {
     this.apiUrl = (opts.apiUrl || '').replace(/\/$/, '');
     this.network = opts.network || 'mainnet';
     this.feeRate = opts.feeRate || '0.0005'; // max fee signed into orders (taker is 0.00025)
+    this.displayFeeRate = opts.displayFeeRate ?? 0; // Extended maker 费率=0：仅用于展示/风控预检，与签名 maxFee 分离（消除虚假手续费告警）
     this.pollMs = opts.pollMs ?? 2500;
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
@@ -454,15 +455,37 @@ export class ExtendedExchange extends EventEmitter {
     } catch { /* keep 'unknown' */ }
 
     if (verdict === 'unknown') {
-      t.goneAttempts = (t.goneAttempts || 0) + 1;
-      if (t.goneAttempts < 12) return; // re-check; tolerate order-history settlement lag
-      verdict = 'cancelled';           // never confirmed filled -> assume NOT filled (no re-quote)
+      // 修复（Review7）：把耐心从"次数(12轮≈60s)"改为"时间(10min)"。订单已不在簿上，
+      // 多等不会产生重复挂单风险；而"误判已成交为已撤销"的代价（档位永久空洞+库存无对腿）
+      // 远大于多等几分钟。夜间 API 结算滞后正是 12 次耐心被击穿的原因。
+      t.goneFirstAt = t.goneFirstAt || Date.now();
+      const unresolvedMs = Date.now() - t.goneFirstAt;
+      // 第二证据源：成交流水（尽力而为；端点/结构异常则忽略，不阻断主流程）。
+      // 订单消失 20 秒后再查，给订单历史留出结算时间。
+      if (unresolvedMs >= 20_000) {
+        try {
+          const mkt = this.markets.get(Number(t.marketId))?.name || '';
+          const fills = await this._get(`/api/v1/user/trades?market=${encodeURIComponent(mkt)}`).catch(() => null);
+          const arr = Array.isArray(fills) ? fills : (Array.isArray(fills?.data) ? fills.data : []);
+          const row = arr.find((f) => String(f.order_id ?? f.orderId ?? f.external_id ?? '') === String(id)
+            || (t.externalId && String(f.order_id ?? f.orderId ?? f.external_id ?? '') === String(t.externalId)));
+          if (row) {
+            const fq = Number(row.filled_base_amount ?? row.filled_qty ?? row.filled_quantity ?? 0);
+            if (fq > 0) { verdict = 'filled'; fillSize = fq; const avg = Number(row.avg_price ?? row.average_price ?? row.price ?? 0); if (avg > 0) fillPrice = avg; }
+          }
+        } catch { /* 流水不可得：靠 10min 耐心兜底 */ }
+      }
+    }
+    if (verdict === 'unknown') {
+      if (Date.now() - (t.goneFirstAt || 0) < 10 * 60_000) return; // 10 分钟耐心（时间制）
+      // 响亮告警 + 计数，不再静默丢弃档位
+      this.droppedLevels = (this.droppedLevels || 0) + 1;
+      this.emit('error', new Error(`⚠️ 订单 ${id}（${t.side} @ ${t.price}）10 分钟仍无法确认终态，已放弃跟踪。该档位已空洞（累计 ${this.droppedLevels}），请核对交易所真实成交并考虑重启网格补齐。`));
+      verdict = 'cancelled';
     }
     this._tracked.delete(id);
     if (verdict === 'filled') {
       this.emit('fill', { orderId: id, marketId: t.marketId, side: t.side, price: fillPrice, sizeBase: fillSize, levelIndex: t.levelIndex });
-    } else {
-      this.emit('error', new Error(`订单 ${id}（${t.side} @ ${t.price}）未确认成交，已停止跟踪（不补单）。`));
     }
   }
 

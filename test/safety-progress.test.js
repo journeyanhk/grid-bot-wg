@@ -235,3 +235,17 @@ test('尘埃仓守卫：部分成交低于最小下单量时跳过补挂对腿',
   assert.equal(bot.active.size + 1, before, '不补挂对腿（5 补前数量 - 1 删除 = 4）');
   assert.ok(bot.alerts.some((a) => a.message.includes('低于最小下单量')), '应有尘埃仓提示');
 });
+
+test('库存漂移审计：实际持仓与成交流水偏差超阈值时告警', async () => {
+  const { ex, bot } = await makeBot({}, { ...CFG, sizeBase: 0.5 });
+  // 模拟成交 4 笔买单（推导库存 4×0.5=2），但实际持仓 3（差异 1 格 < 容忍 2）
+  bot.stats.buys = 4; bot.stats.sells = 0;
+  ex.positions.set(1, { sizeBase: 3, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  await bot.reconcileOpenOrders();
+  assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '1 格偏差在容忍内不告警');
+  // 实际持仓 9（推导 2，偏差 7 币，容差 = gridCount(10)×0.5 = 5 => 超阈值告警）
+  ex.positions.set(1, { sizeBase: 9, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  bot._lastDriftAlertAt = 0;
+  await bot.reconcileOpenOrders();
+  assert.ok(bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '超阈值应告警');
+});
