@@ -284,3 +284,19 @@ test('审计锚点：跨重启带历史 stats 不误报（Restore 后锚定当�
   await bot.reconcileOpenOrders();
   assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '锚点校正后不误报');
 });
+
+test('恢复后首轮重校准：基线锚点同刻校正，不把合法积累库存当漂移', async () => {
+  const { ex, bot } = await makeBot({}, { ...CFG, sizeBase: 0.5 });
+  // 模拟旧快照（无 auditBuysBase）+ 遗留库存 11 币（基线 0.0046 旧值），
+  // 但无 auditBuysBase -> 恢复路径应打 _auditNeedsRebase 标记
+  bot.restore({ config: bot.config, stats: { ...bot.stats, buys: 10 }, invBase: 0.0046, grid: bot.grid });
+  assert.equal(bot._auditNeedsRebase, true, '旧快照缺锚点应触发重校准标记');
+  ex.positions.set(1, { sizeBase: 11, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  await bot.reconcileOpenOrders(); // 首轮: 重校准将基线设为 11、锚点设为 11（stats.buys），本轮不审计
+  assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '重校准轮不误报');
+  assert.equal(bot._auditNeedsRebase, false, '重校准后清除标记');
+  assert.ok(Math.abs(bot._invBase - 11) < 1e-9, '基线被校正到当前持仓');
+  // 重校准后：基线 11，成交推导 = (11-11)=0，实际 11 => net 0，不再误报
+  await bot.reconcileOpenOrders();
+  assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '重校准后干净');
+});

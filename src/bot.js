@@ -58,6 +58,7 @@ export class GridBot {
     this._dynInFlight = false;
     this._lastDynActionAt = 0;
     this._lastCalmDeniedAt = 0;
+    this._auditNeedsRebase = false; // 恢复路径缺省既无基线又无锚点时，首次观测重校准
     this._autoStopped = null;        // { at, reason:'breakout'|'maxloss', config } 自动停机记录 → 冷静门重启
     this._lastVanishAlertAt = 0;
     // Cancellation is safety-critical: require consecutive exchange snapshots
@@ -130,6 +131,8 @@ export class GridBot {
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线
     this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0); // 审计锚点（旧快照缺省=从现在重新对账）
     this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
+    // Review13: 旧快照缺省时不"只重置锚点"（基线沿用旧值会不同步 layer 假漂移）——打重校准标记，首次观测时基线与锚点同刻校正
+    if (!Number.isFinite(Number(snap.auditBuysBase)) || !Number.isFinite(Number(snap.invBase))) this._auditNeedsRebase = true;
     // P1-a: 崩溃重启后自动停机态可能待消费——监督器必须跨重启常驻，否则"跨重启自动重启"是死的
     if (snap.config?.dynamic?.enabled) this._startDynTimer();
     try {
@@ -163,6 +166,7 @@ export class GridBot {
     // 审计锚点：旧快照缺省时取当前 stats（等效"从现在起重新对账"，跨重启不双重计数）
     this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0);
     this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
+    if (!Number.isFinite(Number(snap.auditBuysBase)) || !Number.isFinite(Number(snap.invBase))) this._auditNeedsRebase = true; // 基线/锚点同步（Review13）
     this.outOfRange = !!snap.outOfRange;
     this.lastPrice = snap.lastPrice ?? null;
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
@@ -1550,6 +1554,19 @@ export class GridBot {
    */
   _auditInventoryDrift() {
     if (!this.running || !this.config || !this.config.sizeBase) return;
+    const ppos = this.ex.getPosition?.(this.config.marketId);
+    const actual0 = ppos ? Number(ppos.sizeBase) : NaN;
+    // Review13: 恢复路径首次观测时，把"基线"与"锚点"在同刻校正到当前持仓与成交计数——
+    // 基线和锚点必须永远同时设置，否则旧快照缺省时基线沿用旧值、锚点重置，会把
+    // 下午合法积累的库存当漂移。重校准后长期再叫才是真的。
+    if (this._auditNeedsRebase && Number.isFinite(actual0)) {
+      this._invBase = actual0;
+      this._auditBuysBase = this.stats.buys;
+      this._auditSellsBase = this.stats.sells;
+      this._auditNeedsRebase = false;
+      this._changed(); // 持久化新基线/锚点，下次重启不再回退
+      return; // 本轮不审计，从下轮起干净对账
+    }
     const baseOccurrences = ((this.stats.buys - (this._auditBuysBase || 0))
                              - (this.stats.sells - (this._auditSellsBase || 0)));
     const expected = baseOccurrences * this.config.sizeBase;
