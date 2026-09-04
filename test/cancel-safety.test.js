@@ -164,3 +164,42 @@ await test('RISEx keeps tracking when single-order cancellation fails', async ()
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
+
+test('价格穿越推定：maker 卖单曾被价格上穿 + 90s 未决 -> 推定成交并补挂对腿', async () => {
+  const ex = new ExtendedExchange({ apiKey: 'x', vault: '1', privateKey: '1', apiUrl: 'https://invalid', network: 'mainnet' });
+  ex.markets.set(1, { marketId: 1, name: 'BTC-USD' });
+  ex._tracked.set('o-1', {
+    marketId: 1, levelIndex: 5, side: 'sell', price: 81000, sizeBase: 0.0002,
+    externalId: 'h-1', placedAt: Date.now(), seen: true, goneAttempts: 0, resolving: false,
+    _crossedUp: true, _crossedDown: false,   // 价格曾上穿 81000
+    goneFirstAt: Date.now() - 120_000,        // >90s
+    _lastProbeAt: Date.now() - 100_000,
+  });
+  // history 查不到、trades 也查不到 -> 走穿越推定
+  ex._get = async () => [];
+  let fill;
+  ex.on('fill', (f) => { fill = f; });
+  ex.read = { /* history 通过 _get 返回空 */ };
+  await ex._resolveGone('o-1', ex._tracked.get('o-1'));
+  assert.ok(fill, '穿越后应推定成交并 emit fill');
+  assert.equal(fill.sizeBase, 0.0002);
+  assert.equal(fill.price, 81000);
+  assert.ok(!ex._tracked.has('o-1'));
+});
+
+test('价格穿越推定：卖单未被上穿 -> 不推定，走 10 分钟耐心判取消', async () => {
+  const ex = new ExtendedExchange({ apiKey: 'x', vault: '1', privateKey: '1', apiUrl: 'https://invalid', network: 'mainnet' });
+  ex.markets.set(1, { marketId: 1, name: 'BTC-USD' });
+  ex._tracked.set('o-2', {
+    marketId: 1, levelIndex: 5, side: 'sell', price: 81000, sizeBase: 0.0002,
+    externalId: 'h-2', placedAt: Date.now(), seen: true, goneAttempts: 0, resolving: false,
+    _crossedUp: false, _crossedDown: false,   // 价格未穿越
+    goneFirstAt: Date.now() - 120_000,        // >90s 但 <10min
+  });
+  ex._get = async () => [];
+  let fill = null, dropped = 0;
+  ex.on('fill', (f) => { fill = f; });
+  await ex._resolveGone('o-2', ex._tracked.get('o-2'));
+  assert.equal(fill, null, '未穿越不推定成交');
+  assert.ok(ex._tracked.has('o-2'), '未穿越且未满 10 分钟 -> 继续耐心保留跟踪');
+});

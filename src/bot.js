@@ -58,6 +58,7 @@ export class GridBot {
     this._dynInFlight = false;
     this._lastDynActionAt = 0;
     this._lastCalmDeniedAt = 0;
+    this._lastShadowGateLogAt = 0; // 动态影子：库存门拦截日志节流
     this._auditNeedsRebase = false; // 恢复路径缺省既无基线又无锚点时，首次观测重校准
     this._autoStopped = null;        // { at, reason:'breakout'|'maxloss', config } 自动停机记录 → 冷静门重启
     this._lastVanishAlertAt = 0;
@@ -1662,6 +1663,15 @@ export class GridBot {
         const pos = this.ex.getPosition?.(mId);
         const invGate = !pos || Math.abs(Number(pos.sizeBase) || 0) <= (dyn.invGateGrids ?? 2) * (cfg.sizeBase || 0);
         const cooldownOk = Date.now() - this._lastDynActionAt >= (dyn.recenterCooldownMin ?? 360) * 60_000;
+        if (drift && !invGate) {
+          // Review14 待办 1：影子期门拦截的负样本——"正确的静默"对第 7 天评审无帮助，
+          // 输出节流的门拦截日志（每小时一条），让影子期产出可评审记录。
+          if (Date.now() - (this._lastShadowGateLogAt || 0) > 60 * 60_000) {
+            this._lastShadowGateLogAt = Date.now();
+            const inv = pos ? Math.abs(Number(pos.sizeBase) || 0) / (cfg.sizeBase || 1) : 0;
+            this._alert(`[动态·影子] 漂移已达标但被库存门拦截（库存 ${round2(inv)} 格 > 门限 ${dyn.invGateGrids ?? 2} 格）：未重定区间（带重仓追涨重定正是回测里的亏损死法）。`);
+          }
+        }
         if (drift && invGate && calm && cooldownOk) {
           this._lastDynActionAt = Date.now();
           const lo = alignToStep(price - width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);

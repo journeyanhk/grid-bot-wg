@@ -267,6 +267,7 @@ export class ExtendedExchange extends EventEmitter {
       marketId: m.marketId, levelIndex: o.levelIndex, side: o.side,
       price: Number(priceStr), sizeBase: Number(qtyStr), seen: false,
       externalId, placedAt: Date.now(), goneAttempts: 0, resolving: false,
+      _crossedUp: false, _crossedDown: false, // 价格穿越推定（Review14 第三证据源）
     });
     return { orderId };
   }
@@ -309,6 +310,7 @@ export class ExtendedExchange extends EventEmitter {
     this._tracked.set(String(orderId), {
       marketId: mId, levelIndex, side, price: Number(price), sizeBase: Number(sizeBase),
       seen: false, placedAt: Date.now(), goneAttempts: 0, resolving: false,
+      _crossedUp: false, _crossedDown: false,
     });
   }
 
@@ -366,7 +368,17 @@ export class ExtendedExchange extends EventEmitter {
         const m = this.markets.get(mId);
         if (!m) continue;
         // price (also emitted for the dashboard)
-        this.getPrice(mId, { touch: false }).then((px) => { if (px) this.emit('price', { marketId: mId, price: px }); }).catch(() => {});
+        this.getPrice(mId, { touch: false }).then((px) => {
+          if (px) {
+            this.emit('price', { marketId: mId, price: px });
+            // 价格穿越推定：记录每个 tracked 是否曾被市场价格穿过其价位（Review14）
+            for (const t of this._tracked.values()) {
+              if (t.marketId !== Number(mId)) continue;
+              if (px >= t.price) t._crossedUp = true;
+              if (px <= t.price) t._crossedDown = true;
+            }
+          }
+        }).catch(() => {});
         // open orders -> fill detection
         let open = null;
         try { open = await this._get(`/api/v1/user/orders?market=${encodeURIComponent(m.name)}`); } catch { open = null; }
@@ -502,6 +514,19 @@ export class ExtendedExchange extends EventEmitter {
             if (fq > 0) { verdict = 'filled'; fillSize = fq; const avg = Number(row.avg_price ?? row.average_price ?? row.price ?? 0); if (avg > 0) fillPrice = avg; }
           }
         } catch { /* 流水不可得：靠 10min 耐心兜底 */ }
+      }
+    }
+    // 第三证据源 — 价格穿越推定（Review14）：端点滞后击穿 history+trades 时，
+    // maker 限价单从簿上消失 + 市场价格曾穿越其价位 ≈ 成交（真成交场景可靠）。
+    // 90 秒分层：把补挂延迟从 10 分钟压到 1.5 分钟；未穿越的照旧走 10 分钟耐心（真取消保持正确）。
+    // 误判保险：方向与真成交相反，库存审计会立刻报反向漂移，形成闭环校验。
+    if (verdict === 'unknown') {
+      const unresolvedMs = Date.now() - (t.goneFirstAt || 0);
+      const crossed = (t.side === 'sell' && t._crossedUp) || (t.side === 'buy' && t._crossedDown);
+      if (crossed && unresolvedMs >= 90_000) {
+        verdict = 'filled'; fillPrice = t.price; fillSize = t.sizeBase;
+        this.crossInferredFills = (this.crossInferredFills || 0) + 1;
+        logger.warn('ex', `订单 ${id}（${t.side} @ ${t.price}）依据价格穿越推定成交（端点滞后），已记账并补挂对腿（累计 ${this.crossInferredFills}）。`);
       }
     }
     if (verdict === 'unknown') {
