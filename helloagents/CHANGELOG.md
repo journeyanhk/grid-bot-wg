@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+## [1.5.8] - 2026-09-04
+
+### 修复（dev004-dy review15）
+- RHC Lighter 三项移植（对齐 Extended 防护水平）：
+  - ① 价格穿越推定：fast 行情下 inactive 查不到 + 市场价曾穿越其价 + 90s 未决 -> 推定成交并发 fill 补挂对腿（crossInferredFills 计数）；LR 证据链本就强（inactive 带 filled_base_amount），推定为第三道保险
+  - ② inactive 查询 limit 100->250：快速行情批量成交时 100 条查证窗口溢出 -> 漏认成交 -> 档位静默死亡（9·4 LR 141->105 的 36 格衰减根因）
+  - ③ droppedLevels 死亡计数：订单出簿 10 分钟仍无法经 inactive 确认且未穿越 -> 响亮告警 + 计数（对齐 EX 监控口径，仅计数不删跟踪不重复补挂）
+
 ## [1.5.7] - 2026-09-04
 
 ### 修复（dev004-dy review14）

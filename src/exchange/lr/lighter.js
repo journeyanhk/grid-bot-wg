@@ -7,6 +7,7 @@
 // automatically recovers after disconnections and never cancels orders merely
 // because a connection went stale.
 import { EventEmitter } from 'node:events';
+import { logger } from '../../log.js';
 import { LighterSignerBridge } from './signer.js';
 import {
   CANDLE_RESOLUTIONS, RHC_API_URL, RHC_CHAIN_ID, RHC_WS_URL,
@@ -367,6 +368,7 @@ export class LighterExchange extends EventEmitter {
           orderId, marketId: x.market.marketId, levelIndex: x.order.levelIndex, side: String(x.order.side).toLowerCase(),
           price: x.normalizedPrice, sizeBase: x.normalizedSize, reduceOnly: !!x.order.reduceOnly,
           placedAt: Date.now(), seen: true,
+          _crossedUp: false, _crossedDown: false, // 价格穿越推定（Review15 第三证据源）
         });
         return { orderId, price: x.normalizedPrice, sizeBase: x.normalizedSize };
       });
@@ -443,7 +445,7 @@ export class LighterExchange extends EventEmitter {
   async _fetchInactiveOrders(marketId) {
     const auth = await this._authorization();
     const suffix = marketId == null ? '' : `&market_id=${Number(marketId)}`;
-    const data = await this._get(`/api/v1/accountInactiveOrders?account_index=${this.accountIndex}&limit=100&market_type=perp${suffix}`, { authorization: auth });
+    const data = await this._get(`/api/v1/accountInactiveOrders?account_index=${this.accountIndex}&limit=250&market_type=perp${suffix}`, { authorization: auth });
     return Array.isArray(data?.orders) ? data.orders : [];
   }
   async fetchOpenOrders(marketId) {
@@ -469,9 +471,32 @@ export class LighterExchange extends EventEmitter {
     }
     if (!needInactive) return;
     const inactive = new Map((await this._fetchInactiveOrders()).map((o) => [remoteOrderId(o), o]));
+    // 第三证据源 — 价格穿越推定（Review15，对齐 EX）：inactive 查不到但订单
+    // 已出簿 + 市场价曾穿越其价 + 90 秒未决 -> 推定成交（快速行情下端点滞后可靠判据）
+    const nowX = Date.now();
     for (const [id, tracked] of [...this._tracked]) {
       if (active.has(id)) continue;
-      const row = inactive.get(id); if (!row) continue;
+      const row = inactive.get(id);
+      if (!row) {
+        const unresolvedMs = nowX - (tracked.goneFirstAt || 0);
+        const crossed = (tracked.side === 'sell' && tracked._crossedUp) || (tracked.side === 'buy' && tracked._crossedDown);
+        if (crossed && unresolvedMs >= 90_000) {
+          this._tracked.delete(id);
+          this.crossInferredFills = (this.crossInferredFills || 0) + 1;
+          logger.warn('lr', `订单 ${id}（${tracked.side} @ ${tracked.price}）依据价格穿越推定成交（端点滞后），已记账并补挂对腿（累计 ${this.crossInferredFills}）。`);
+          this.emit('fill', { orderId: id, marketId: tracked.marketId, side: tracked.side, price: tracked.price, sizeBase: tracked.sizeBase, levelIndex: tracked.levelIndex });
+        } else if (!tracked.goneFirstAt && tracked.seen) {
+          tracked.goneFirstAt = nowX; // 开始计时（inactive 查证窗口内未确认）
+        } else if (tracked.goneFirstAt && unresolvedMs >= 10 * 60_000) {
+          // ③ 死亡计数（对齐 EX droppedLevels 监控口径）：订单出簿 10 分钟仍无法经
+          // inactive 确认成交/取消，且未穿越 -> 疑似快速行情下查证窗口溢出漏认，档位
+          // 可能已空洞。仅计数+响亮告警（不删跟踪、不重复补挂，避免双倍库存）。
+          this.droppedLevels = (this.droppedLevels || 0) + 1;
+          logger.warn('lr', `⚠️ 订单 ${id}（${tracked.side} @ ${tracked.price}）10 分钟仍无法确认终态，该档位可能已空洞（累计 ${this.droppedLevels}），请核对交易所真实成交并考虑重启网格补齐。`);
+          tracked.goneFirstAt = nowX; // 重新计时，避免每分钟刷屏（10 分钟告警节奏）
+        }
+        continue;
+      }
       const status = String(row.status || '').toLowerCase();
       if (FINAL_FILLED.has(status)) {
         this._tracked.delete(id);
@@ -508,7 +533,17 @@ export class LighterExchange extends EventEmitter {
     if (this._polling) return; this._polling = true;
     try {
       await this._loadMarkets(); // 价格源保留：成交/风控依赖价格 tick
-      for (const [marketId, price] of this._prices) this.emit('price', { marketId, price });
+      for (const [marketId, price] of this._prices) {
+        this.emit('price', { marketId, price });
+        // 价格穿越推定：记录每个 tracked 是否曾被市场价穿过其价（Review15）
+        if (price > 0) {
+          for (const t of this._tracked.values()) {
+            if (t.marketId !== Number(marketId)) continue;
+            if (price >= t.price) t._crossedUp = true;
+            if (price <= t.price) t._crossedDown = true;
+          }
+        }
+      }
       if (!this._pollLight) { // 铺单期间跳过，让出请求预算给下单
         await this._refreshAccount(); await this._refreshPnl(); await this._refreshOrders();
       }

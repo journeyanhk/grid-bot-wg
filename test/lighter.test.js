@@ -453,3 +453,24 @@ function response(data, status = 200, retryAfter = null) {
     text: async () => JSON.stringify(data),
   };
 }
+
+await (async () => {
+  const ex = new LighterExchange({ accountIndex: 12, apiKeyIndex: 4, apiPrivateKey: 'test-only',
+    signer: { start: async () => true, stop: async () => true, request: async () => ({}) } });
+  ex.markets.set(1, { marketId: 1, name: 'BTC-USD', stepSize: 0.0001, stepPrice: 0.1 });
+  ex._tracked.set('o-x', {
+    orderId: 'o-x', marketId: 1, levelIndex: 5, side: 'sell', price: 81000, sizeBase: 0.0002,
+    reduceOnly: false, placedAt: Date.now() - 120_000, seen: true,
+    _crossedUp: true, _crossedDown: false, goneFirstAt: null,
+  });
+  ex._fetchActiveOrders = async () => [];
+  ex._fetchInactiveOrders = async () => [];
+  let fill = null;
+  ex.on('fill', (f) => { fill = f; });
+  await ex._refreshOrders();
+  assert.ok(fill, '穿越后应推定成交并 emit fill');
+  assert.equal(fill.sizeBase, 0.0002);
+  assert.equal(fill.price, 81000);
+  assert.ok(!ex._tracked.has('o-x'), '成交后删除跟踪');
+  assert.ok(ex.crossInferredFills >= 1, '穿越计数 +1');
+})();
