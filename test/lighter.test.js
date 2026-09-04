@@ -474,3 +474,42 @@ await (async () => {
   assert.ok(!ex._tracked.has('o-x'), '成交后删除跟踪');
   assert.ok(ex.crossInferredFills >= 1, '穿越计数 +1');
 })();
+
+await (async () => {
+  // P1 重现清零：订单在活跃快照重现后 goneFirstAt 归零，二次消失重新计时
+  const ex = new LighterExchange({ accountIndex: 12, apiKeyIndex: 4, apiPrivateKey: 'test-only',
+    signer: { start: async () => true, stop: async () => true, request: async () => ({}) } });
+  ex.markets.set(1, { marketId: 1, name: 'BTC-USD', stepSize: 0.0001, stepPrice: 0.1 });
+  const t = { orderId: 'o-r', marketId: 1, levelIndex: 5, side: 'sell', price: 81000, sizeBase: 0.0002,
+    reduceOnly: false, placedAt: Date.now() - 200_000, seen: true, goneFirstAt: Date.now() - 120_000,
+    _crossedUp: true, _crossedDown: false };
+  ex._tracked.set('o-r', t);
+  // 活跃快照里能看到它 -> 重现 -> goneFirstAt 清零
+  ex._fetchActiveOrders = async () => [{ order_id: 'o-r', status: 'open', price: 81000, side: 'sell', base_amount: 0.0002 }];
+  ex._fetchInactiveOrders = async () => [];
+  await ex._refreshOrders();
+  assert.equal(t.goneFirstAt, 0, '重现后 goneFirstAt 应清零（防快照毛刺残留计时）');
+  assert.ok(ex._tracked.has('o-r'), '重现后保留跟踪');
+})();
+
+await (async () => {
+  // P2 空快照守卫：空快照 + 本地跟踪多 -> 本轮不做 gone 判定（不启动计时/不推定）
+  const ex = new LighterExchange({ accountIndex: 12, apiKeyIndex: 4, apiPrivateKey: 'test-only',
+    signer: { start: async () => true, stop: async () => true, request: async () => ({}) } });
+  ex.markets.set(1, { marketId: 1, name: 'BTC-USD', stepSize: 0.0001, stepPrice: 0.1 });
+  const t = { orderId: 'o-e', marketId: 1, levelIndex: 5, side: 'sell', price: 81000, sizeBase: 0.0002,
+    reduceOnly: false, placedAt: Date.now() - 120_000, seen: true, goneFirstAt: null,
+    _crossedUp: true, _crossedDown: false };
+  ex._tracked.set('o-e', t);
+  for (let i = 0; i < 12; i++) {
+    ex._tracked.set('o-e2-' + i, { orderId: 'o-e2-' + i, marketId: 1, levelIndex: 6 + i, side: 'buy', price: 80900 - i, sizeBase: 0.0002, reduceOnly: false, placedAt: Date.now() - 120_000, seen: true, goneFirstAt: null, _crossedUp: true });
+  }
+  let fills = 0;
+  ex.on('fill', () => { fills++; });
+  ex._fetchActiveOrders = async () => [];  // 空快照
+  ex._fetchInactiveOrders = async () => []; // 即使 inactive 也空
+  await ex._refreshOrders();
+  assert.ok(ex._tracked.has('o-e'), '空快照轮不删跟踪');
+  assert.equal(fills, 0, '空快照轮不触发推定/成交');
+  assert.ok(!t.goneFirstAt, '空快照轮不启动 goneFirstAt 计时');
+})();

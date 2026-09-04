@@ -463,10 +463,26 @@ export class LighterExchange extends EventEmitter {
 
   async _refreshOrders() {
     const activeRows = await this._fetchActiveOrders();
+    // P2 空快照守卫（Review16，对齐 EX v1.5.4）：RHC 曾出现 502/空数组——
+    // 一次 200+空数组会给全梯启动计时，后续毛刺触发幻影推定成交。空快照但本地
+    // 跟踪多视为异常，本轮不做任何 gone 判定；持续 >3 分钟升级运营健康事件。
+    if (Array.isArray(activeRows) && activeRows.length === 0 && this._tracked.size >= 10) {
+      if (!this._emptyStreakStart) this._emptyStreakStart = Date.now();
+      if (this._emptyStreakStart && Date.now() - this._emptyStreakStart > 3 * 60_000) {
+        this.operationalIssue = { title: 'RHC 活跃挂单快照持续为空', message: '成交检测暂停中，请检查交易所状态 / 代理出口 IP' };
+      }
+      if (Date.now() - (this._lastEmptyWarnAt || 0) > 60_000) {
+        this._lastEmptyWarnAt = Date.now();
+        logger.warn('lr', `快照为空但本地跟踪 ${this._tracked.size} 单，本轮跳过 gone 判定（已持续 ${Math.round((Date.now() - this._emptyStreakStart) / 1000)}s）。`);
+      }
+      return;
+    }
+    this._emptyStreakStart = 0;
+    if (this.operationalIssue?.title === 'RHC 活跃挂单快照持续为空') this.operationalIssue = null;
     const active = new Map(activeRows.map((o) => [remoteOrderId(o), o]));
     let needInactive = false;
     for (const tracked of this._tracked.values()) {
-      if (active.has(tracked.orderId)) tracked.seen = true;
+      if (active.has(tracked.orderId)) { tracked.seen = true; tracked.goneFirstAt = 0; } // P1: 重现清零计时器（防快照毛刺残留计时 -> 假多次消失触发幻影推定）
       else if (tracked.seen || Date.now() - tracked.placedAt > 1000) needInactive = true;
     }
     if (!needInactive) return;
