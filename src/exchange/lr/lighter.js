@@ -445,7 +445,7 @@ export class LighterExchange extends EventEmitter {
   async _fetchInactiveOrders(marketId) {
     const auth = await this._authorization();
     const suffix = marketId == null ? '' : `&market_id=${Number(marketId)}`;
-    const data = await this._get(`/api/v1/accountInactiveOrders?account_index=${this.accountIndex}&limit=250&market_type=perp${suffix}`, { authorization: auth });
+    const data = await this._get(`/api/v1/accountInactiveOrders?account_index=${this.accountIndex}&limit=100&market_type=perp${suffix}`, { authorization: auth });
     return Array.isArray(data?.orders) ? data.orders : [];
   }
   async fetchOpenOrders(marketId) {
