@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-09-08
+
+### 修复（review2：钱在 spot 口袋里 + RHC 面板被误删）
+- HL clearinghouseState 查询补 dex:"io" 参数（hyperliquid.js:174）：HIP-3 建设者市场有独立清算账户，不带 dex 读的是核心 Perps -> io dex 的保证金/持仓永远显示 0（"当前可用 0 USDC" 的代码层根因之一）
+- 恢复 tab-lr 面板（上轮清理前端残骸时误删整段，switchTab('lr') 拿 null 崩在 1565 行）：从 dev004-dy 提取完整面板插回 tab-hl 之前
+
+### 变更
+- scripts/check-html.mjs 升级为四项核对：重复 id / 缺失面板（tab 数组前缀逐一验证面板+导航+控制台+徽章）/ P() 引用核对（面板内引用的 ${prefix}-* id 必须存在于 DOM）/ 残缺标签
+
+### 部署层说明（资金路径）
+- HL 资金三级口袋：链上钱包 -> 核心 Perps -> io dex（HIP-3 独立清算账户）
+- 用户需在 Entropy(io dex) 页面把资金从核心 Perps 划入 io dex，否则 io:ANTH 无保证金
+
+### 测试
+- npm test 8 套件 + check:html 四项全绿 + paper 冒烟（5 所 overview + RHC 路由正常）
+
 ## [1.6.3] - 2026-09-08
 
 ### 修复（review1：总览无数据 + 可用 0 USDC 诊断）

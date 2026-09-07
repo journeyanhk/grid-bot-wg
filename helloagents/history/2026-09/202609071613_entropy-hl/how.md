@@ -90,3 +90,13 @@ P0 签名器五处、P1 市场元数据四处、P2 逻辑三处已全部修复�
 ③ Cloid.from_str 强制 0x+32hex（16 字节）→ JS randomBytes 生成 + 归一化 + tracked 同源
 签名器请求级冒烟（假 key 真实走 SDK 0.24.0）：place_order/bulk_cancel/update_leverage 签名上送全过，非法 cloid 优雅报错。
 详见 CHANGELOG 1.6.2
+
+---
+
+## 2026-09-08 review2 修复记录
+
+① HL clearinghouseState 补 dex:"io"（HIP-3 独立清算账户，不带 dex 读核心 Perps 恒 0）
+② 恢复 tab-lr 面板（v1.6.3 清残骸误删，switchTab('lr') null 崩溃）
+③ check-html.mjs 升级四项（重复 id/缺失面板/P() 引用/残缺标签）
+资金路径提醒：链上钱包 -> 核心 Perps -> io dex 三级口袋，需在 Entropy 页面划转。
+详见 CHANGELOG 1.6.4

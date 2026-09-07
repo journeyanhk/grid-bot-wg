@@ -169,7 +169,9 @@ export class HyperliquidExchange extends EventEmitter {
   }
 
   async _refreshAccount() {
-    const data = await this._postInfo({ type: 'clearinghouseState', user: this.accountAddress });
+    // 保证金与持仓在 dex 作用域内（HIP-3 建设者市场有独立清算账户）：
+    // 不带 dex:"io" 读的是核心 Perps 清算账户，io dex 的保证金/持仓会永远显示 0
+    const data = await this._postInfo({ type: 'clearinghouseState', user: this.accountAddress, dex: this.dex });
     const marginSummary = data?.marginSummary || {};
     this.balance = finite(marginSummary.accountValue, marginSummary.totalMarginUsed);
     this.equity = finite(marginSummary.accountValue, marginSummary.totalMarginUsed);
