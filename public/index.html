@@ -687,7 +687,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <details class="dyn">
         <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
         <div class="row" style="align-items:center">
-          <label style="margin:0"><input type="checkbox" id="de-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="de-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="de-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="de-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
         </div>
@@ -833,7 +833,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <details class="dyn">
         <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
         <div class="row" style="align-items:center">
-          <label style="margin:0"><input type="checkbox" id="ex-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="ex-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="ex-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="ex-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
         </div>
@@ -978,7 +978,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <details class="dyn">
         <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
         <div class="row" style="align-items:center">
-          <label style="margin:0"><input type="checkbox" id="rs-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="rs-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="rs-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="rs-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
         </div>
@@ -1125,7 +1125,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <details class="dyn">
         <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
         <div class="row" style="align-items:center">
-          <label style="margin:0"><input type="checkbox" id="lr-dyn-enable"> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="lr-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="lr-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="lr-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
         </div>
@@ -1550,6 +1550,39 @@ function makeExchangeCtrl(prefix, chartId) {
   const P = (suf) => $(prefix + '-' + suf);
   // 面板缺失守卫：防止半接线导致后续所有脚本中断（曾致全站崩溃）
   if (!P('modes')) { console.warn('[' + prefix + '] 控制台面板缺失，跳过初始化'); return { getLastState: () => null }; }
+
+  // 动态网格面板持久化：保存/恢复勾选与数值（防"刷新即失忆"配置陷阱，review18）
+  const dynPrefsKey = 'dyn_prefs_' + prefix;
+  function saveDynPrefs() {
+    try {
+      const prefs = {};
+      ['dyn-enable', 'dyn-shadow', 'dyn-restart'].forEach((id) => {
+        const el = P(id); if (el) prefs[id] = el.checked;
+      });
+      ['dyn-drift', 'dyn-calmh', 'dyn-calm', 'dyn-rec-cd', 'dyn-rest-cd'].forEach((id) => {
+        const el = P(id); if (el) prefs[id] = el.value;
+      });
+      localStorage.setItem(dynPrefsKey, JSON.stringify(prefs));
+    } catch (e) { /* localStorage 不可用时静默跳过 */ }
+  }
+  function restoreDynPrefs() {
+    try {
+      const raw = localStorage.getItem(dynPrefsKey);
+      if (!raw) return;
+      const prefs = JSON.parse(raw);
+      Object.entries(prefs).forEach(([id, val]) => {
+        const el = P(id);
+        if (!el) return;
+        if (typeof val === 'boolean') el.checked = val;
+        else if (el.type === 'number') el.value = val;
+      });
+    } catch (e) { /* 恢复失败则保持默认 */ }
+  }
+  restoreDynPrefs();
+  ['dyn-enable', 'dyn-shadow', 'dyn-restart', 'dyn-drift', 'dyn-calmh', 'dyn-calm', 'dyn-rec-cd', 'dyn-rest-cd'].forEach((id) => {
+    const el = P(id);
+    if (el) el.addEventListener('change', saveDynPrefs);
+  });
 
   // mode buttons
   P('modes').querySelectorAll('.mode-btn').forEach(b => b.onclick = () => {

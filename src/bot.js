@@ -483,7 +483,7 @@ export class GridBot {
     this._startDynTimer();
     const progress = this._placementProgressView();
     if (progress?.status === 'complete') {
-      this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。`);
+      this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。动态网格：${this.config.dynamic?.enabled ? (this.config.dynamic.shadow ? '启用（影子）' : '启用（实盘）') : '未启用'}。`);
       this._placementProgress.completionAlerted = true;
     } else {
       const paceSec = (Number(this.ex.orderBatchPaceMs) || 1500) / 1000;
@@ -1619,6 +1619,7 @@ export class GridBot {
     if (this._dynTimer) return;
     this._dynTimer = setInterval(() => { this._dynCheck().catch(() => {}); }, 60_000);
     this._dynTimer.unref?.();
+    logger.info('bot', `动态监督器已启动 ${this.config.displayName}（${this.config.dynamic?.enabled ? (this.config.dynamic.shadow ? '影子' : '实盘') : '未启用'}，60s 节拍）`);
   }
   _stopDynTimer() { if (this._dynTimer) { clearInterval(this._dynTimer); this._dynTimer = null; } }
 
