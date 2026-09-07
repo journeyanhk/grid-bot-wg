@@ -13,6 +13,7 @@ import { createExchange as createDeExchange } from './exchange/de/index.js';
 import { createExchange as createExExchange } from './exchange/ex/index.js';
 import { createExchange as createRsExchange } from './exchange/rs/index.js';
 import { createExchange as createLrExchange } from './exchange/lr/index.js';
+import { createExchange as createHlExchange } from './exchange/hl/index.js';
 import { GridBot } from './bot.js';
 import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
@@ -51,6 +52,10 @@ logger.info('server', `启动 v${APP_VERSION}`);
     if (!Number.isInteger(cfg.lr.apiKeyIndex) || cfg.lr.apiKeyIndex < 4) missing.push(['RHC     ', 'LIGHTER_API_KEY_INDEX', 'RHC API Key 索引（4-254，0-3 平台保留）']);
     if (!cfg.lr.apiPrivateKey && !cfg.lr.apiPrivateKeyFile) missing.push(['RHC     ', 'LIGHTER_API_PRIVATE_KEY(_FILE)', 'RHC API 签名私钥或私钥文件路径']);
   }
+  if (cfg.hl.mode === 'live') {
+    if (!cfg.hl.accountAddress) missing.push(['Entropy ', 'HL_ACCOUNT_ADDRESS', 'agent 钱包地址（官网授权可交易不可提现）']);
+    if (!cfg.hl.agentPrivateKey && !cfg.hl.agentPrivateKeyFile) missing.push(['Entropy ', 'HL_AGENT_PRIVATE_KEY(_FILE)', 'agent 钱包私钥或私钥文件路径']);
+  }
   if (missing.length) {
     console.error('\n[启动失败] 有交易所被设为 live 实盘模式，但 .env 里还缺以下凭据：\n');
     for (const [ex, key, where] of missing) {
@@ -75,7 +80,7 @@ if (proxyResult.used) {
     console.log('[代理检测] ✓ 代理正常，当前出口 IP: ' + chk.ip);
   } else {
     console.error('[代理检测] ✗ 代理无法联网：' + chk.error);
-    const hasLive = cfg.de.mode === 'live' || cfg.ex.mode === 'live' || cfg.rs.mode === 'live' || cfg.lr.mode === 'live';
+    const hasLive = cfg.de.mode === 'live' || cfg.ex.mode === 'live' || cfg.rs.mode === 'live' || cfg.lr.mode === 'live' || cfg.hl.mode === 'live';
     if (hasLive) {
       console.error('  实盘模式已中止启动，以免在断网状态下运行造成挂单失控。');
       process.exit(1);
@@ -97,6 +102,8 @@ const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s) }
 const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s) });
 const lrExchange = createLrExchange(cfg.lr);
 const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s) });
+const hlExchange = createHlExchange(cfg.hl);
+const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s) });
 
 // Restore cumulative stats / config from the previous run (display continuity).
 // Trading does NOT auto-resume; stray-order cleanup happens after each exchange
@@ -105,17 +112,18 @@ deBot.restore(loadSnapshot('de'));
 exBot.restore(loadSnapshot('ex'));
 rsBot.restore(loadSnapshot('rs'));
 lrBot.restore(loadSnapshot('lr'));
+hlBot.restore(loadSnapshot('hl'));
 
 // Belt-and-suspenders: ensure every exchange always has an 'error' listener so a
 // stray emit can never crash the process (the GridBot also attaches one).
-for (const ex of [deExchange, exExchange, rsExchange, lrExchange]) {
+for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange]) {
   ex.on('error', (e) => { logger.error('exchange', e?.message || String(e)); });
 }
 
 // ── AI 服务（哨兵/日报/分析/对话/出区间建议）────────────────────────────────
 const aiService = createAiService({
-  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot },
-  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange },
+  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange },
 });
 aiService.start();
 
@@ -124,6 +132,7 @@ const deClients = new Set();
 const exClients = new Set();
 const rsClients = new Set();
 const lrClients = new Set();
+const hlClients = new Set();
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 const MIME = {
@@ -283,6 +292,7 @@ const deHandler = makeExchangeHandler('/api/de', deBot, deExchange, cfg.de, deCl
 const exHandler = makeExchangeHandler('/api/ex', exBot, exExchange, cfg.ex, exClients, 'Extended');
 const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsClients, 'RISEx');
 const lrHandler = makeExchangeHandler('/api/lr', lrBot, lrExchange, cfg.lr, lrClients, 'RHC Lighter');
+const hlHandler = makeExchangeHandler('/api/hl', hlBot, hlExchange, cfg.hl, hlClients, 'Entropy');
 
 // ── 鉴权守卫（VPS 安全）──────────────────────────────────────────────────────
 // 三层防护：
@@ -397,6 +407,7 @@ const server = http.createServer(async (request, res) => {
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
         lr: pick(lrBot.getState(), cfg.lr.mode),
+        hl: pick(hlBot.getState(), cfg.hl.mode),
       });
     }
 
@@ -414,6 +425,7 @@ const server = http.createServer(async (request, res) => {
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
         lr: pick(lrBot.getState(), cfg.lr.mode),
+        hl: pick(hlBot.getState(), cfg.hl.mode),
       };
       res.write(`data: ${JSON.stringify(initial, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}\n\n`);
       const overviewClients = server._overviewClients;
@@ -536,6 +548,9 @@ const server = http.createServer(async (request, res) => {
     if (p.startsWith('/api/lr/')) {
       return await lrHandler(request, res, p.slice('/api/lr'.length), url);
     }
+    if (p.startsWith('/api/hl/')) {
+      return await hlHandler(request, res, p.slice('/api/hl'.length), url);
+    }
 
     // ── 静态文件 ──────────────────────────────────────────────────────────
     let file = p === '/' ? '/index.html' : p;
@@ -574,16 +589,22 @@ setInterval(() => {
     const data = `data: ${stringify(lrBot.getState())}\n\n`;
     for (const r of lrClients) { try { r.write(data); } catch { lrClients.delete(r); } }
   }
+  if (hlClients.size > 0) {
+    const data = `data: ${stringify(hlBot.getState())}\n\n`;
+    for (const r of hlClients) { try { r.write(data); } catch { hlClients.delete(r); } }
+  }
   if (server._overviewClients.size > 0) {
     const deState = deBot.getState();
     const exState = exBot.getState();
     const rsState = rsBot.getState();
     const lrState = lrBot.getState();
+    const hlState = hlBot.getState();
     const overview = {
       de: pick(deState, cfg.de.mode),
       ex: pick(exState, cfg.ex.mode),
       rs: pick(rsState, cfg.rs.mode),
       lr: pick(lrState, cfg.lr.mode),
+      hl: pick(hlState, cfg.hl.mode),
     };
     const data = `data: ${stringify(overview)}\n\n`;
     for (const r of server._overviewClients) { try { r.write(data); } catch { server._overviewClients.delete(r); } }
@@ -652,6 +673,7 @@ await Promise.all([
   initExchange(exExchange, 'Extended', cfg.ex),
   initExchange(rsExchange, 'RISEx', cfg.rs),
   initExchange(lrExchange, 'RHC Lighter', cfg.lr),
+  initExchange(hlExchange, 'Entropy', cfg.hl),
 ]);
 
 // ── 崩溃恢复 / 续跑 ────────────────────────────────────────────────────────────
@@ -680,6 +702,7 @@ await Promise.all([
   resumeIfWasRunning(exBot, exExchange, 'ex'),
   resumeIfWasRunning(rsBot, rsExchange, 'rs'),
   resumeIfWasRunning(lrBot, lrExchange, 'lr'),
+  resumeIfWasRunning(hlBot, hlExchange, 'hl'),
 ]);
 
 // After init, surface any LEFTOVER position so the dashboard can prompt the user
@@ -717,6 +740,7 @@ server.listen(cfg.port, cfg.host, () => {
   console.log(`  Extended [${cfg.ex.mode.toUpperCase()}]  ${cfg.ex.network}`);
   console.log(`  RISEx    [${cfg.rs.mode.toUpperCase()}]  ${cfg.rs.network}`);
   console.log(`  RHC      [${cfg.lr.mode.toUpperCase()}]  ${cfg.lr.network}`);
+  console.log(`  Entropy  [${cfg.hl.mode.toUpperCase()}]  ${cfg.hl.network} (${cfg.hl.dex})`);
   console.log(`${'─'.repeat(52)}`);
   if (cfg.de.mode === 'paper' || cfg.ex.mode === 'paper' || cfg.rs.mode === 'paper') {
     console.log('  ⚠ 部分交易所为模拟模式，不涉及真实资金。');

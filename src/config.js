@@ -127,6 +127,25 @@ export function getConfig() {
     proxy: process.env.LIGHTER_PROXY || globalProxy,
   };
 
+  // ── Hyperliquid (HL) / Entropy io dex ────────────────────────────────────
+  // 固定官方主网端点 + dex:"io" 命名空间（HIP-3 建设者市场，如 io:ANTH）。
+  // 签名器只持 agent wallet 私钥（可交易不可提现）。
+  const hl = {
+    mode: (process.env.HL_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    apiUrl: 'https://api.hyperliquid.xyz',
+    infoUrl: 'https://api.hyperliquid.xyz/info',
+    chainId: 421614,
+    dex: process.env.HL_DEX || 'io',
+    accountAddress: process.env.HL_ACCOUNT_ADDRESS || '',
+    agentPrivateKey: process.env.HL_AGENT_PRIVATE_KEY || '',
+    agentPrivateKeyFile: process.env.HL_AGENT_PRIVATE_KEY_FILE || '',
+    pythonPath: process.env.HL_PYTHON || '',
+    feeRate: Number(process.env.HL_FEE_RATE || 0.0005),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.HL_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
@@ -142,6 +161,7 @@ export function getConfig() {
     ex,
     rs,
     lr,
+    hl,
   };
 }
 

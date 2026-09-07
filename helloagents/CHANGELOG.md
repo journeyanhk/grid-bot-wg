@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-07
+
+### 新增
+- 第5交易所 Entropy（Hyperliquid io dex，HIP-3 建设者市场）：`src/exchange/hl/` 六文件（market/signer_worker/signer/hyperliquid/paper/index）
+  - io:ANTH 美股网格试点（1,880-2,100 / 22 格 / $10 间距 / 0.005/格 / 3x 逐仓 / recover+$30 / $150 本金）
+  - 签名器用 agent wallet（可交易不可提现），命令面白名单（place/cancel/cancel_all/update_leverage isolated）
+  - userFills 游标为成交权威源，无需 EX/LR 的三层证据链与穿越推定
+  - 空快照守卫 + droppedLevels 死亡计数（对齐 EX 监控口径）
+- 总览页过滤：只展示有金额在运行的交易所（live + balance>0 + running），隐藏 paper/无资金/未运行卡片；汇总区动态化并顺带修复 tot-modes 漏 lr 的历史 bug
+- 前端/后端全链路接线：config.js hl 块、server.js 全触点、index.html 全套 hl 前缀（tab/面板/卡片/徽章/CSS/JS）
+
+### 变更
+- dev004-dy → dev005 分支承载全部开发
+- test/hl.test.js 加入 npm test 串联（现 8 套件）
+
+### 测试
+- hl 适配器单测：市场解析（io dex 过滤）/ 逐仓字段 / userFills 游标去重 / 空快照守卫
+- 全量 npm test 退出码 0 + lint 干净 + paper 冒烟（/api/overview 5 所、/api/hl/markets io:ANTH）
+
 ## [1.5.11] - 2026-09-05
 
 ### 修复（review18：动态网格零输出诊断）
