@@ -135,7 +135,7 @@ export function getConfig() {
     network: 'mainnet',
     apiUrl: 'https://api.hyperliquid.xyz',
     infoUrl: 'https://api.hyperliquid.xyz/info',
-    chainId: 421614,
+    chainId: 42161,
     dex: process.env.HL_DEX || 'io',
     accountAddress: process.env.HL_ACCOUNT_ADDRESS || '',
     agentPrivateKey: process.env.HL_AGENT_PRIVATE_KEY || '',

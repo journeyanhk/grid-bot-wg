@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-09-08
+
+### 修复（review1：总览无数据 + 可用 0 USDC 诊断）
+- 前端残骸清除：index.html 628 行起残留整段残缺重复块（丢 < 的 ov-card lr + 未闭合 </div<，22 个重复 id）导致 DOM 错乱、总览渲染写入被打断的卡片 -> 删除残骸，保留完整 lr/hl 卡片
+- config.js hl 块 chainId 421614 -> 42161（v1.6.1 只改了 market.js，config 漏网；421614 是 Sepolia 测试网）
+
+### 变更
+- 新增 scripts/check-html.mjs（npm run check:html）：交叉核对重复 id/残缺标签/未闭合标签，并挂入 npm test 串联——v1.4.2 与 v1.6.0 两次前端插卡漏检事故的一劳永逸防线
+
+### 部署层说明（代码层已确认正常）
+- "当前可用 0 USDC" 是部署配置问题：新 VPS .env 显式写了 PAPER_BALANCE=0 或 HL 未配 live；总览"PAPER 徽标"= HL_MODE 未设 live
+- 正确配置：HL_MODE=live + HL_ACCOUNT_ADDRESS + HL_AGENT_PRIVATE_KEY（官网已 approve 的 agent 私钥）+ PAPER_BALANCE=10000 或删掉该行
+
+### 测试
+- npm test 8 套件 + check:html 全绿（9 项）+ paper 冒烟总览 5 所数据完整
+
 ## [1.6.2] - 2026-09-07
 
 ### 修复（review20：三颗"过得了 health、死在第一单"的运行时地雷）
