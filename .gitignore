@@ -23,3 +23,7 @@ Thumbs.db
 .idea/
 # 原作者参考副本（仅本地对比用，不入库）
 WGALL-ZJ005 - OPEN-SOURCE-CLEAN/
+# Python 编译缓存与虚拟环境
+__pycache__/
+*.pyc
+.hl-venv/
