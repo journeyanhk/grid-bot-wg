@@ -80,3 +80,13 @@ P0 签名器五处、P1 市场元数据四处、P2 逻辑三处已全部修复�
 - 签名器真实启动通过 health（agent wallet 假 key）；io:ANTH asset id=200001（offset 200000）
 - userFills 无 cursor → userFillsByTime + startTime 增量；_filledSeen 环形上限 5000
 - 详见 CHANGELOG 1.6.1
+
+---
+
+## 2026-09-07 review20 修复记录（三颗运行时地雷）
+
+① Tif 是类型别名非枚举（.Gtc AttributeError）→ 字符串 "Gtc"/"Ioc"
+② bulk_cancel(cancel_requests: List[CancelRequest])，元素 {"coin","oid"} 字典
+③ Cloid.from_str 强制 0x+32hex（16 字节）→ JS randomBytes 生成 + 归一化 + tracked 同源
+签名器请求级冒烟（假 key 真实走 SDK 0.24.0）：place_order/bulk_cancel/update_leverage 签名上送全过，非法 cloid 优雅报错。
+详见 CHANGELOG 1.6.2

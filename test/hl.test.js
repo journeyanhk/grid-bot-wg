@@ -145,4 +145,54 @@ const ANTH = { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:AN
   }
 }
 
+{
+  // review20 ①：cloid 生成必须是 HL 合规 16 字节 hex（0x + 32 hex）
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  const prepared = ex._prepareOrder({ marketId: 0, side: 'sell', price: 2000, sizeBase: 0.005, levelIndex: 1 });
+  assert.ok(/^0x[0-9a-f]{32}$/.test(prepared.clientOrderId), 'cloid 必须是 0x + 32 位 hex');
+  // 外部传入非法格式被归一化
+  const p2 = ex._prepareOrder({ marketId: 0, side: 'sell', price: 2000, sizeBase: 0.005, levelIndex: 1, clientOrderId: 'gabc123' });
+  assert.ok(/^0x[0-9a-f]{32}$/.test(p2.clientOrderId), '非法 cloid 被归一化');
+  // 外部传入合规格式保留
+  const good = '0x' + 'ab'.repeat(16);
+  const p3 = ex._prepareOrder({ marketId: 0, side: 'sell', price: 2000, sizeBase: 0.005, levelIndex: 1, clientOrderId: good });
+  assert.equal(p3.clientOrderId, good, '合规 cloid 保留');
+}
+
+{
+  // review20 ③：cloid 成交匹配（oid 不符但 cloid 匹配也能确认成交）
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  const cloid = '0x' + 'cd'.repeat(16);
+  ex._tracked.set('77777', { orderId: '77777', marketId: 0, levelIndex: 5, side: 'buy', price: 2000, sizeBase: 0.005, reduceOnly: false, placedAt: Date.now(), seen: true, clientOrderId: cloid });
+  let fill = null;
+  ex.on('fill', (f) => { fill = f; });
+  ex._postInfo = async (payload) => {
+    if (payload.type === 'userFillsByTime') {
+      return [{ coin: 'io:ANTH', oid: 12345, cloid, side: 'B', px: '2000', sz: '0.005', tid: 6001, pnl: '0', time: Date.now() }];
+    }
+    return [];
+  };
+  await ex._refreshFills();
+  assert.ok(fill, 'cloid 匹配应确认成交');
+  assert.equal(fill.orderId, '77777');
+}
+
+{
+  // review20 ②：cancelAll 走 bulk_cancel，请求结构为 {coin, oid:int} 字典列表
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  ex._tradingReady = true; ex.dataSource = 'real';
+  ex._fetchActiveOrders = async () => [
+    { orderId: '111', marketId: 0, side: 'sell', price: 2000, sizeBase: 0.005, status: 'open' },
+    { orderId: '222', marketId: 0, side: 'buy', price: 1900, sizeBase: 0.005, status: 'open' },
+  ];
+  let bulkReq = null;
+  ex.signer = { start: async () => true, stop: async () => true, request: async (cmd, payload) => { if (cmd === 'bulk_cancel') bulkReq = payload; return { status: [{ ok: true }, { ok: true }] }; } };
+  await ex.cancelAll(0);
+  assert.ok(bulkReq, '应走 bulk_cancel');
+  assert.deepEqual(bulkReq, { coin: 'io:ANTH', oids: [111, 222] }, 'oids 应为数字数组（worker 内转 {coin,oid} 字典）');
+}
+
 console.log('hl tests passed');

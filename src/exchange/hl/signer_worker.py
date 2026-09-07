@@ -30,7 +30,7 @@ try:
     from eth_account import Account
     from hyperliquid.info import Info
     from hyperliquid.exchange import Exchange
-    from hyperliquid.utils.signing import Cloid, Tif
+    from hyperliquid.utils.signing import Cloid  # Tif 是类型别名（Literal），无 .Gtc 属性，直接用字符串
 except Exception as exc:  # pragma: no cover - exercised by the JS bridge
     print(json.dumps({"ready": False, "error": f"无法加载 hyperliquid-python-sdk: {exc}"}), flush=True)
     raise SystemExit(2)
@@ -73,9 +73,8 @@ def _handle(exchange, address: str, req: dict):
         return {"ok": True, "profile": "hyperliquid", "dex": HL_DEX, "accountAddress": address}
     if command == "place_order":
         order = req["order"]
-        limit_type = {"limit": {"tif": Tif.Gtc}}
-        if order.get("immediate"):
-            limit_type = {"limit": {"tif": Tif.Ioc}}
+        # Tif 是类型别名 Union[Literal['Alo'],'Ioc','Gtc']，无枚举属性；直接用字符串
+        limit_type = {"limit": {"tif": "Ioc" if order.get("immediate") else "Gtc"}}
         cloid = None
         if order.get("clientOrderId"):
             cloid = Cloid.from_str(str(order["clientOrderId"]))
@@ -93,7 +92,9 @@ def _handle(exchange, address: str, req: dict):
         result = exchange.cancel(str(req["coin"]), int(req["oid"]))
         return {"status": result}
     if command == "bulk_cancel":
-        result = exchange.bulk_cancel(str(req["coin"]), [int(x) for x in req.get("oids", [])])
+        # SDK 签名：bulk_cancel(cancel_requests: List[CancelRequest])，元素是 {"coin","oid"} 字典
+        reqs = [{"coin": str(req["coin"]), "oid": int(x)} for x in req.get("oids", [])]
+        result = exchange.bulk_cancel(reqs)
         return {"status": result}
     if command == "update_leverage":
         leverage = max(1, int(req["leverage"]))

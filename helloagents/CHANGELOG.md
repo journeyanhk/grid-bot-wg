@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-07
+
+### 修复（review20：三颗"过得了 health、死在第一单"的运行时地雷）
+- ① Tif.Gtc 抛 AttributeError：Tif 是类型别名（Union[Literal['Alo'],'Ioc','Gtc']）非枚举 → 删 Tif 导入，limit_type 直接用字符串 "Gtc"/"Ioc"
+- ② bulk_cancel 签名不符：SDK 是 bulk_cancel(cancel_requests: List[CancelRequest])，元素 {"coin","oid"} 字典 → worker 侧把 (coin, oids) 转为字典列表
+- ③ Cloid 格式不匹配：Cloid.from_str 强制 0x+32 位 hex（16 字节），JS 生成的 g<base36> 字符串直接 TypeError → JS 侧改为 randomBytes(16) 生成合规 cloid，外部非法格式归一化；tracked 记录下单实际提交的 clientOrderId（与成交匹配同源），_refreshFills 增加 cloid 兜底匹配
+- 连带修复：cancelAll 里 market 变量被 lint 误删导致 ReferenceError（本评审自检发现）
+- 新增测试：cloid 合规生成/归一化/保留、cloid 成交匹配、bulk_cancel 请求结构
+
+### 验证
+- 签名器请求级冒烟（假 key 真实走 SDK）：place_order 带合规 cloid 签名上送成功（asset=200001 确认 io:ANTH 寻址）、非法 cloid 优雅报错不崩、bulk_cancel 字典列表上送、update_leverage 上送 —— 四命令全过
+- npm test 8 套件全绿 + lint 干净
+
 ## [1.6.1] - 2026-09-07
 
 ### 修复（review19：HL 外部契约实测校准）

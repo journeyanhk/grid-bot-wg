@@ -10,6 +10,7 @@
 // 契约已按 2026-09-07 主网实测校准：metaAndAssetCtxs 返回数组 [meta, ctxs]、
 // userFills 无 cursor（增量用 userFillsByTime + startTime）、candleSnapshot 直接
 // 返回数组、HL 报价必须 ≤5 位有效数字。
+import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
 import { HLSignerBridge } from './signer.js';
@@ -213,10 +214,14 @@ export class HyperliquidExchange extends EventEmitter {
         for (let i = 0; i < FILLS_SEEN_TRIM && list.length; i++) this._filledSeen.delete(list.shift());
       }
       this.realizedPnl = (this.realizedPnl || 0) + Number(f.pnl || 0);
-      // 从 userFills 权威确认本地跟踪订单的成交（无需穿越推定）
+      // 从 userFills 权威确认本地跟踪订单的成交（无需穿越推定）。
+      // 匹配键：oid 优先，cloid 兜底（与下单实际提交的 clientOrderId 同源）。
+      const fillCloid = String(f.cloid || '').toLowerCase();
       for (const [id, tracked] of [...this._tracked]) {
         if (tracked.marketId !== marketId) continue;
-        if (String(tracked.orderId) !== String(f.oid)) continue;
+        const oidMatch = String(tracked.orderId) === String(f.oid);
+        const cloidMatch = !!fillCloid && String(tracked.clientOrderId || '').toLowerCase() === fillCloid;
+        if (!oidMatch && !cloidMatch) continue;
         if (tracked.side !== (String(f.side) === 'B' ? 'buy' : 'sell')) continue;
         this._tracked.delete(id);
         this.emit('fill', { orderId: id, marketId, side: tracked.side, price: Number(f.px || tracked.price), sizeBase: Number(f.sz || tracked.sizeBase), levelIndex: tracked.levelIndex });
@@ -290,7 +295,12 @@ export class HyperliquidExchange extends EventEmitter {
     const normalizedPrice = price / 10 ** market.priceDecimals;
     if (!(baseAmount > 0) || normalizedSize < market.minOrderSize) throw new Error(`数量低于 HL ${market.displayName} 最小下单量 ${market.minOrderSize}。`);
     if (!order.reduceOnly && normalizedPrice * normalizedSize < HL_MIN_NOTIONAL_USD) throw new Error(`订单名义价值低于 HL 最低 ${HL_MIN_NOTIONAL_USD} USD。`);
-    const clientOrderId = String(order.clientOrderId || `g${Date.now().toString(36)}${(++this._clientSeq).toString(36)}`);
+    // HL Cloid.from_str 要求 0x + 32 位 hex（16 字节）：外部传入的必须是合规格式，
+    // 否则用 randomBytes 生成（Cloid 用于成交匹配，格式不符会 TypeError）
+    const rawClientOrderId = String(order.clientOrderId || '');
+    const clientOrderId = /^0x[0-9a-f]{32}$/i.test(rawClientOrderId)
+      ? rawClientOrderId
+      : '0x' + randomBytes(16).toString('hex');
     return { order, market, normalizedSize, normalizedPrice, clientOrderId };
   }
 
@@ -331,6 +341,7 @@ export class HyperliquidExchange extends EventEmitter {
       side: String(tracked.order.side).toLowerCase(), price: tracked.normalizedPrice,
       sizeBase: tracked.normalizedSize, reduceOnly: !!tracked.order.reduceOnly,
       placedAt: Date.now(), seen: true, goneFirstAt: null,
+      clientOrderId: tracked.clientOrderId, // 下单实际提交的 cloid（成交匹配同源）
     });
     return [{ orderId, price: tracked.normalizedPrice, sizeBase: tracked.normalizedSize }];
   }
@@ -343,7 +354,7 @@ export class HyperliquidExchange extends EventEmitter {
   }
   async cancelAll(marketId) {
     this._assertTradingReady();
-    this._market(marketId);
+    const market = this._market(marketId);
     const open = await this._fetchActiveOrders(marketId);
     const oids = open.map((o) => Number(o.orderId));
     if (!oids.length) return true;
