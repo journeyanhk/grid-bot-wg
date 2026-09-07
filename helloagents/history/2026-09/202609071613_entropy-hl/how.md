@@ -71,3 +71,12 @@
 ## 测试与部署
 - **测试:** hl.test.js 单测（市场解析/逐仓/fills 游标）；npm test 全绿；lint 干净
 - **部署:** 主网前 paper 验证 → HL 测试网（若 io 市场存在）→ 主网 $150 试点 io:ANTH（1,880–2,100 / 22 格 / $10 间距 / 0.005/格 / 3x 逐仓 / recover+$30）
+---
+
+## 2026-09-07 review19 修复记录（实测校准）
+
+P0 签名器五处、P1 市场元数据四处、P2 逻辑三处已全部修复，均基于对 HL 主网真实 API 的探测（SDK 0.24.0）：
+- metaAndAssetCtxs 返回数组 [meta, ctxs]；maxLeverage 在 universe；无 pxDecimals（stepPrice = 10**-(6-szDecimals)）
+- 签名器真实启动通过 health（agent wallet 假 key）；io:ANTH asset id=200001（offset 200000）
+- userFills 无 cursor → userFillsByTime + startTime 增量；_filledSeen 环形上限 5000
+- 详见 CHANGELOG 1.6.1

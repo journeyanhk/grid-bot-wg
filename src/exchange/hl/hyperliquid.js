@@ -1,17 +1,22 @@
 // Hyperliquid (HL) LIVE adapter for the "io" dex namespace.
 //
-// Hyperliquid exposes an authoritative fills API (userFills with a cursor),
-// so the three-layer evidence chain built for EX/LR is unnecessary here:
-// every fill is confirmed from userFills, no price-crossing inference needed.
+// Hyperliquid exposes an authoritative fills API, so the three-layer evidence
+// chain built for EX/LR is unnecessary here: every fill is confirmed from
+// userFillsByTime (incremental by startTime), no price-crossing inference.
 // Public reads use the /info endpoint; signed writes go through the Python
 // signer worker (agent wallet, can trade but cannot withdraw).  All requests
 // carry dex:"io" so HIP-3 assets such as io:ANTH are addressed correctly.
+//
+// 契约已按 2026-09-07 主网实测校准：metaAndAssetCtxs 返回数组 [meta, ctxs]、
+// userFills 无 cursor（增量用 userFillsByTime + startTime）、candleSnapshot 直接
+// 返回数组、HL 报价必须 ≤5 位有效数字。
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
 import { HLSignerBridge } from './signer.js';
 import {
   CANDLE_RESOLUTIONS, HL_API_URL, HL_DEX, HL_INFO_URL, HL_MIN_NOTIONAL_USD,
-  HL_MAINNET_CHAIN_ID, parseCandles, parseMarkets, toExchangeInteger,
+  HL_MAINNET_CHAIN_ID, parseCandles, parseMarkets, roundToSignificantDigits,
+  toExchangeInteger,
 } from './market.js';
 
 const POLL_MS = 2000;
@@ -20,6 +25,9 @@ const SAFE_GRID_BATCH = 15;
 const SAFE_GRID_BATCH_PACE_MS = 1500;
 const OPENING_RETRY_BASE_MS = 5_000;
 const OPENING_RETRY_MAX = 8;
+const FILLS_BACKFILL_MS = 5 * 60_000;      // 首次/重连回填窗口
+const FILLS_SEEN_MAX = 5000;               // _filledSeen 环形上限，防内存泄漏
+const FILLS_SEEN_TRIM = 1000;              // 超出上限后一次裁剪数量
 
 export class HyperliquidExchange extends EventEmitter {
   constructor(opts = {}) {
@@ -33,9 +41,9 @@ export class HyperliquidExchange extends EventEmitter {
     this.balance = null; this.equity = null; this.realizedPnl = null; this.accountTotalPnl = null;
     this.lastOkAt = 0; this.lastError = null; this.operationalIssue = null;
     this.markets = new Map(); this._prices = new Map(); this._positions = new Map(); this._tracked = new Map();
-    this._cursor = null; this._filledSeen = new Set();
+    this._fillsStartMs = Date.now() - FILLS_BACKFILL_MS; this._filledSeen = new Set(); // 环形上限，防内存泄漏
     this._timer = null; this._polling = false; this._tradingReady = false;
-    this._lastAlertAt = 0; this._emptyStreakStart = 0; this._lastEmptyWarnAt = 0;
+    this._lastAlertAt = 0; this._emptyStreakStart = 0; this._lastEmptyWarnAt = 0; this._clientSeq = 0;
     this.supportsSafeOpeningRetry = true;
     this.orderBatchSize = SAFE_GRID_BATCH;
     this._adaptivePaceMs = SAFE_GRID_BATCH_PACE_MS;
@@ -110,8 +118,8 @@ export class HyperliquidExchange extends EventEmitter {
         const detail = data?.message || data?.error || `HTTP ${res.status}`;
         const err = new Error(`HL 接口错误 ${res.status || ''}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
         err.status = res.status; err.data = data;
-        if (res.status === 429 || res.status === 400) {
-          err.rateLimited = res.status === 429;
+        if (res.status === 429) {
+          err.rateLimited = true;
           this._adaptivePaceMs = Math.min(40_000, this._adaptivePaceMs * 2);
         }
         throw err;
@@ -177,19 +185,22 @@ export class HyperliquidExchange extends EventEmitter {
         realizedPnl: Number(pos.realizedPnl || 0),
         liquidationPrice: finite(pos.liquidationPx),
         leverage: finite(pos.leverage?.value) ? Number(pos.leverage.value) : null,
-        marginMode: String(pos.marginMode || 'isolated').toLowerCase() === 'isolated' ? 'isolated' : 'cross',
+        marginMode: String(pos.marginMode || 'isolated').toLowerCase() === 'cross' ? 'cross' : 'isolated',
       });
     }
     this._positions = positions; this.lastOkAt = Date.now();
   }
   getPosition(marketId) { return this._positions.get(Number(marketId)) || null; }
 
+  // userFillsByTime 增量（userFills 无 cursor；首拉回填 5 分钟窗口）
   async _refreshFills() {
-    const payload = { type: 'userFills', user: this.accountAddress };
-    if (this._cursor) payload.cursor = this._cursor;
+    const payload = { type: 'userFillsByTime', user: this.accountAddress, startTime: this._fillsStartMs };
     const data = await this._postInfo(payload, false);
     const fills = Array.isArray(data) ? data : [];
+    let maxTime = this._fillsStartMs;
     for (const f of fills) {
+      const t = Number(f.time || 0);
+      if (t > maxTime) maxTime = t;
       const name = String(f.coin || '');
       const m = [...this.markets.values()].find((x) => x.name === name);
       if (!m) continue;
@@ -197,18 +208,21 @@ export class HyperliquidExchange extends EventEmitter {
       const key = `${name}:${f.tid ?? f.time ?? f.oid ?? ''}`;
       if (this._filledSeen.has(key)) continue;
       this._filledSeen.add(key);
+      if (this._filledSeen.size > FILLS_SEEN_MAX) { // 环形裁剪防内存泄漏
+        const list = [...this._filledSeen];
+        for (let i = 0; i < FILLS_SEEN_TRIM && list.length; i++) this._filledSeen.delete(list.shift());
+      }
       this.realizedPnl = (this.realizedPnl || 0) + Number(f.pnl || 0);
       // 从 userFills 权威确认本地跟踪订单的成交（无需穿越推定）
       for (const [id, tracked] of [...this._tracked]) {
         if (tracked.marketId !== marketId) continue;
-        if (String(tracked.orderId) !== String(f.oid) && !tracked._cloids?.has(String(f.cloid))) continue;
+        if (String(tracked.orderId) !== String(f.oid)) continue;
         if (tracked.side !== (String(f.side) === 'B' ? 'buy' : 'sell')) continue;
         this._tracked.delete(id);
         this.emit('fill', { orderId: id, marketId, side: tracked.side, price: Number(f.px || tracked.price), sizeBase: Number(f.sz || tracked.sizeBase), levelIndex: tracked.levelIndex });
       }
     }
-    if (fills.length) this._cursor = data.cursor ?? null;
-    if (!this._cursor && fills.length === 0 && !this._cursorSet) this._cursor = '0';
+    this._fillsStartMs = maxTime + 1; // 增量游标：下次只拉更新的成交
   }
 
   async _refreshOrders() {
@@ -231,7 +245,7 @@ export class HyperliquidExchange extends EventEmitter {
     const nowX = Date.now();
     for (const [id, tracked] of [...this._tracked]) {
       if (active.has(id)) { tracked.seen = true; tracked.goneFirstAt = 0; continue; }
-      // 出簿但 fills 未确认：短暂计时后由 userFills 游标权威兜底；出簿 10 分钟仍
+      // 出簿但 fills 未确认：短暂计时后由 userFillsByTime 权威兜底；出簿 10 分钟仍
       // 无成交记录 -> 死亡计数 + 响亮告警（对齐 EX droppedLevels 监控口径）。
       if (!tracked.goneFirstAt && tracked.seen) tracked.goneFirstAt = nowX;
       else if (tracked.goneFirstAt && nowX - tracked.goneFirstAt >= 10 * 60_000) {
@@ -269,8 +283,11 @@ export class HyperliquidExchange extends EventEmitter {
   _prepareOrder(order) {
     const market = this._market(order.marketId);
     const baseAmount = toExchangeInteger(order.sizeBase, market.sizeDecimals, 'down');
-    const price = toExchangeInteger(order.price, market.priceDecimals, 'nearest');
-    const normalizedSize = baseAmount / 10 ** market.sizeDecimals, normalizedPrice = price / 10 ** market.priceDecimals;
+    const normalizedSize = baseAmount / 10 ** market.sizeDecimals;
+    // HL 报价约束：≤5 位有效数字 + 小数位 ≤ priceDecimals
+    const priceRounded = roundToSignificantDigits(Number(order.price), 5);
+    const price = toExchangeInteger(priceRounded, market.priceDecimals, 'nearest');
+    const normalizedPrice = price / 10 ** market.priceDecimals;
     if (!(baseAmount > 0) || normalizedSize < market.minOrderSize) throw new Error(`数量低于 HL ${market.displayName} 最小下单量 ${market.minOrderSize}。`);
     if (!order.reduceOnly && normalizedPrice * normalizedSize < HL_MIN_NOTIONAL_USD) throw new Error(`订单名义价值低于 HL 最低 ${HL_MIN_NOTIONAL_USD} USD。`);
     const clientOrderId = String(order.clientOrderId || `g${Date.now().toString(36)}${(++this._clientSeq).toString(36)}`);
@@ -280,43 +297,62 @@ export class HyperliquidExchange extends EventEmitter {
   async placeLimitOrders(orders) {
     this._assertTradingReady();
     if (!Array.isArray(orders) || !orders.length || orders.length > MAX_BATCH) throw new Error('HL 每个批量下单请求必须是 1-15 笔。');
-    const prepared = orders.map((o) => this._prepareOrder(o));
-    const marketIds = new Set(prepared.map((x) => x.market.marketId));
-    if (marketIds.size !== 1) throw new Error('HL 一个网格批次只能包含同一市场。');
+    // HL 无批量下单端点：逐笔签名发送（本适配器支持 placeLimitOrders 但退化为串行）
+    const results = [];
+    for (const order of orders) {
+      results.push(await this._placeOne(order));
+    }
+    this._adaptivePaceMs = Math.max(SAFE_GRID_BATCH_PACE_MS, Math.round(this._adaptivePaceMs * 0.85));
+    return results;
+  }
+  async placeLimitOrder(order) { return (await this._placeOne(order))[0]; }
+
+  async _placeOne(order) {
+    this._assertTradingReady();
+    const prepared = this._prepareOrder(order);
     const signed = await this.signer.request('place_order', {
       order: {
-        coin: prepared[0].market.name, side: String(prepared[0].order.side).toLowerCase(),
-        sizeBase: prepared[0].normalizedSize, price: prepared[0].normalizedPrice,
-        reduceOnly: !!prepared[0].order.reduceOnly, clientOrderId: prepared[0].clientOrderId,
+        coin: prepared.market.name, isBuy: String(prepared.order.side).toLowerCase() === 'buy',
+        sizeBase: prepared.normalizedSize, price: prepared.normalizedPrice,
+        reduceOnly: !!prepared.order.reduceOnly, immediate: !!prepared.order.immediate,
+        clientOrderId: prepared.clientOrderId,
       },
     }, 30_000);
     const response = signed?.order;
-    const orderId = String(response?.response?.data?.statuses?.[0]?.resting?.oid ?? response?.oid ?? '');
-    if (!orderId) throw new Error('HL 下单未返回订单号。');
-    this._adaptivePaceMs = Math.max(SAFE_GRID_BATCH_PACE_MS, Math.round(this._adaptivePaceMs * 0.85));
-    const tracked = prepared[0];
+    // SDK exchange.order 返回 { status, response: { data: { statuses: [...] } } }
+    const status = response?.response?.data?.statuses?.[0];
+    if (!status) throw new Error('HL 下单未返回状态。');
+    if (status.error) throw new Error(`HL 下单被拒：${status.error}`);
+    const orderId = String(status.resting?.oid ?? '');
+    if (!orderId) throw new Error('HL 下单未返回订单号（可能已立即成交）。');
+    const tracked = prepared;
     this._tracked.set(orderId, {
       orderId, marketId: tracked.market.marketId, levelIndex: tracked.order.levelIndex,
       side: String(tracked.order.side).toLowerCase(), price: tracked.normalizedPrice,
       sizeBase: tracked.normalizedSize, reduceOnly: !!tracked.order.reduceOnly,
       placedAt: Date.now(), seen: true, goneFirstAt: null,
-      _cloids: new Set([tracked.clientOrderId]),
     });
     return [{ orderId, price: tracked.normalizedPrice, sizeBase: tracked.normalizedSize }];
   }
-  async placeLimitOrder(order) { return (await this.placeLimitOrders([order]))[0]; }
 
   async cancelOrder(marketId, orderId) {
     this._assertTradingReady();
     const market = this._market(marketId);
-    void market;
-    await this.signer.request('cancel', { coin: market.name, oid: String(orderId) });
+    await this.signer.request('cancel', { coin: market.name, oid: Number(orderId) });
     return true;
   }
   async cancelAll(marketId) {
     this._assertTradingReady();
-    const market = this._market(marketId);
-    await this.signer.request('cancel_all', { coin: market.name });
+    this._market(marketId);
+    const open = await this._fetchActiveOrders(marketId);
+    const oids = open.map((o) => Number(o.orderId));
+    if (!oids.length) return true;
+    // HL SDK 无 cancel_all：用 bulk_cancel 一次性撤（或逐笔撤）
+    const result = await this.signer.request('bulk_cancel', { coin: market.name, oids });
+    if (result?.status?.some?.((s) => s?.error)) {
+      const errors = result.status.filter((s) => s?.error).map((s) => s.error).join('; ');
+      throw new Error(`HL 批量撤单部分失败：${errors}`);
+    }
     return true;
   }
   async setLeverage(marketId, leverage) {
@@ -330,8 +366,11 @@ export class HyperliquidExchange extends EventEmitter {
   async closePosition(marketId) {
     const pos = this.getPosition(marketId); if (!pos?.sizeBase) return true;
     const market = this._market(marketId);
+    const price = await this.getPrice(marketId);
     const side = pos.sizeBase > 0 ? 'sell' : 'buy';
-    await this.placeLimitOrder({ marketId: Number(marketId), side, price: (await this.getPrice(marketId)), sizeBase: Math.abs(pos.sizeBase), reduceOnly: true, levelIndex: -1 });
+    // 对齐其他适配器：±5% 激进限价 + IOC（mark 价挂 GTC 可能一直躺在簿上平不掉）
+    const worst = side === 'sell' ? price * 0.95 : price * 1.05;
+    await this.placeLimitOrder({ marketId: Number(marketId), side, price: worst, sizeBase: Math.abs(pos.sizeBase), reduceOnly: true, immediate: true, levelIndex: -1 });
     return true;
   }
 

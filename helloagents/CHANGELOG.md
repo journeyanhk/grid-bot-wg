@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-07
+
+### 修复（review19：HL 外部契约实测校准）
+- P0 签名器五处 SDK 错误（实测 SDK 0.24.0 校准）：
+  - 移除不存在的 OrderSide/OrderTimeInForce 导入（改为 Cloid/Tif）
+  - Info/Exchange 构造加 perp_dexs=["io"]（实测正确解析 io 市场，asset id 偏移 200000）
+  - Exchange wallet 改为 eth_account.Account.from_key（不再传裸私钥字符串）
+  - order 改位置参数签名（实测 exchange.order(name,is_buy,sz,limit_px,order_type,...)）
+  - 无 cancel_all → 用 bulk_cancel；cancel oid 改 int；update_leverage 参数名 is_cross
+- P1 市场元数据四处（实测 metaAndAssetCtxs 返回数组 [meta, ctxs]）：
+  - parseMarkets 改数组解构；maxLeverage 从 universe 读取（SNDK 10x 不再被压到 6）
+  - stepPrice = 10**-(6-szDecimals)（无 pxDecimals 字段）+ 5 位有效数字报价取整校验
+  - 费率改 0.00015/0.00045（HL 基础档，deployerFeeScale 1.0）
+  - HL_MAINNET_CHAIN_ID 421614 → 42161（421614 是 Sepolia 测试网）
+- P2 逻辑：userFills 无 cursor → 改 userFillsByTime + startTime 增量；_filledSeen 环形上限 5000；closePosition 改 ±5% IOC；清理 _cloids 死代码
+- 新增 requirements-hl.txt 锁定 SDK 0.24.0
+- 实测探针结论：签名器真实启动成功（health 通过）、io:ANTH asset id=200001、metaAndAssetCtxs/candleSnapshot 结构确认
+
+### 测试
+- hl.test.js 同步更新（数组市场结构/费率/priceDecimals/游标推进/环形裁剪）；npm test 8 套件全绿 + lint 干净
+
 ## [1.6.0] - 2026-09-07
 
 ### 新增

@@ -1,8 +1,8 @@
 // Hyperliquid (HL) adapter tests: market parsing, isolated position fields and
-// userFills cursor handling.  Network calls are stubbed with a fake signer and
-// mocked fetch, mirroring test/lighter.test.js.
+// userFillsByTime incremental confirmation.  Network calls are stubbed with a
+// fake signer and mocked fetch, mirroring test/lighter.test.js.
 import { strict as assert } from 'node:assert';
-import { parseMarkets, parseCandles, toExchangeInteger } from '../src/exchange/hl/market.js';
+import { parseMarkets, parseCandles, toExchangeInteger, roundToSignificantDigits } from '../src/exchange/hl/market.js';
 import { HyperliquidExchange } from '../src/exchange/hl/hyperliquid.js';
 
 const mkSigner = () => ({ start: async () => true, stop: async () => true, request: async () => ({}) });
@@ -10,63 +10,65 @@ const mkEx = () => new HyperliquidExchange({
   accountAddress: '0xabc', agentPrivateKey: 'test-only',
   signer: mkSigner(),
 });
+const ANTH = { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:ANTH', sizeDecimals: 3, priceDecimals: 3, maxLeverage: 6, onlyIsolated: true, minOrderNotional: 10, minOrderSize: 0.001, stepSize: 0.001, stepPrice: 0.001, makerFee: 0.00015, takerFee: 0.00045 };
 
 {
-  // 市场解析：只保留 io dex 市场，HIP-3 资产按名称寻址
-  const data = {
-    universe: [
-      { name: 'io:ANTH', szDecimals: 3, pxDecimals: 1, onlyIsolated: true, openInterest: 18.4e6 },
-      { name: 'io:SNDK', szDecimals: 3, pxDecimals: 1, onlyIsolated: true, openInterest: 5.9e6 },
-      { name: 'BTC', szDecimals: 5, pxDecimals: 1, onlyIsolated: false, openInterest: 1e9 },
+  // 市场解析：metaAndAssetCtxs 返回数组 [meta, assetCtxs]，只保留 io dex 市场
+  const data = [
+    { universe: [
+      { name: 'io:ANTH', szDecimals: 3, maxLeverage: 6, onlyIsolated: true, openInterest: 18.4e6 },
+      { name: 'io:SNDK', szDecimals: 4, maxLeverage: 10, onlyIsolated: true, openInterest: 5.9e6 },
+      { name: 'BTC', szDecimals: 5, onlyIsolated: false, openInterest: 1e9 },
+    ] },
+    [
+      { markPx: '1994.5' }, { markPx: '1783.2' }, { markPx: '97000' },
     ],
-    assetCtxs: [
-      { markPx: '1994.5', maxLeverage: '6' },
-      { markPx: '1783.2', maxLeverage: '10' },
-      { markPx: '97000', maxLeverage: '50' },
-    ],
-  };
+  ];
   const rows = parseMarkets(data);
   assert.equal(rows.length, 2, '只保留 io dex 市场');
   assert.equal(rows[0].name, 'io:ANTH');
   assert.equal(rows[0].symbol, 'ANTH');
   assert.equal(rows[0].stepSize, 0.001);
-  assert.equal(rows[0].stepPrice, 0.1);
-  assert.equal(rows[0].maxLeverage, 6, 'io:ANTH 最大杠杆 6x');
+  assert.equal(rows[0].stepPrice, 0.001, 'HL 价格小数位 = 6 - szDecimals = 3');
+  assert.equal(rows[0].maxLeverage, 6, 'io:ANTH 最大杠杆 6x（来自 universe）');
   assert.equal(rows[0].onlyIsolated, true, 'io 系强制逐仓');
   assert.equal(rows[0].minOrderNotional, 10, '最小名义 $10');
+  assert.equal(rows[0].makerFee, 0.00015, '基础 maker 费率 0.015%');
   assert.equal(rows[1].name, 'io:SNDK');
+  assert.equal(rows[1].maxLeverage, 10, 'io:SNDK 最大杠杆 10x');
+  assert.equal(rows[1].stepPrice, 0.01, 'SNDK szDecimals=4 -> priceDecimals=2');
 }
 
 {
-  // K 线解析（candleSnapshot 返回 ms 时间戳）
-  const candles = parseCandles({ candles: [
+  // K 线解析（candleSnapshot 直接返回数组，t 为 ms）
+  const candles = parseCandles([
     { t: 1725000000000, o: '100', h: '101', l: '99', c: '100.5', v: '10' },
     { t: 1725003600000, o: '100.5', h: '102', l: '100', c: '101', v: '12' },
-  ] });
+  ]);
   assert.equal(candles.length, 2);
   assert.equal(candles[0].time, 1725000000000);
   assert.equal(candles[1].close, 101);
 }
 
 {
-  // 精度转换
+  // 精度转换与 5 位有效数字报价约束
   assert.equal(toExchangeInteger(0.005, 3, 'down'), 5);
   assert.equal(toExchangeInteger(1994.55, 1, 'nearest'), 19946);
+  assert.equal(roundToSignificantDigits(1994.56, 5), 1994.6, '报价 5 位有效数字取整');
+  assert.equal(roundToSignificantDigits(0.00123456, 5), 0.0012346);
 }
 
 {
   // 逐仓字段解析：强平价/杠杆/保证金模式从 isolated position 读取
   const ex = mkEx();
-  ex.markets.set(0, { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:ANTH', sizeDecimals: 3, priceDecimals: 1, maxLeverage: 6, onlyIsolated: true, minOrderNotional: 10, minOrderSize: 0.001, stepSize: 0.001, stepPrice: 0.1 });
-  let calls = 0;
+  ex.markets.set(0, ANTH);
   ex._postInfo = async (payload) => {
-    calls++;
     if (payload.type === 'clearinghouseState') {
       return { marginSummary: { accountValue: '150.5', totalMarginUsed: '37.2' }, assetPositions: [{ position: { coin: 'io:ANTH', szi: '0.005', entryPx: '1990', unrealizedPnl: '0.02', realizedPnl: '0.1', liquidationPx: '1700', leverage: { value: 3 }, marginMode: 'isolated' } }] };
     }
-    if (payload.type === 'userFills') return [];
+    if (payload.type === 'userFillsByTime') return [];
     if (payload.type === 'frontendOpenOrders') return [];
-    if (payload.type === 'metaAndAssetCtxs') return { universe: [], assetCtxs: [] };
+    if (payload.type === 'metaAndAssetCtxs') return [{ universe: [] }, []];
     return [];
   };
   await ex._refreshAccount();
@@ -81,15 +83,22 @@ const mkEx = () => new HyperliquidExchange({
 }
 
 {
-  // userFills 游标：成交按 oid 匹配本地跟踪订单并 emit fill
+  // userFillsByTime 增量：按 oid 匹配本地跟踪订单 emit fill；游标推进
   const ex = mkEx();
-  ex.markets.set(0, { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:ANTH', sizeDecimals: 3, priceDecimals: 1, maxLeverage: 6, onlyIsolated: true, minOrderNotional: 10, minOrderSize: 0.001, stepSize: 0.001, stepPrice: 0.1 });
+  ex.markets.set(0, ANTH);
   ex._tracked.set('12345', { orderId: '12345', marketId: 0, levelIndex: 5, side: 'sell', price: 2000, sizeBase: 0.005, reduceOnly: false, placedAt: Date.now(), seen: true });
   let fill = null;
   ex.on('fill', (f) => { fill = f; });
+  let calls = 0;
   ex._postInfo = async (payload) => {
-    if (payload.type === 'userFills') {
-      return [{ coin: 'io:ANTH', oid: 12345, side: 'A', px: '2000', sz: '0.005', tid: 999, pnl: '0.05', time: 1725000000000 }, { coin: 'io:ANTH', oid: 99999, side: 'A', px: '2001', sz: '0.005', tid: 1000, pnl: '0.01', time: 1725000001000 }];
+    calls++;
+    if (payload.type === 'userFillsByTime') {
+      if (calls === 1) {
+        return [{ coin: 'io:ANTH', oid: 12345, side: 'A', px: '2000', sz: '0.005', tid: 999, pnl: '0.05', time: 1725000000000 }, { coin: 'io:ANTH', oid: 99999, side: 'A', px: '2001', sz: '0.005', tid: 1000, pnl: '0.01', time: 1725000001000 }];
+      }
+      // 第二次调用：游标已推进（startTime > 最后一条 time），返回空
+      assert.ok(payload.startTime > 1725000001000, '增量游标应推进');
+      return [];
     }
     return [];
   };
@@ -100,16 +109,32 @@ const mkEx = () => new HyperliquidExchange({
   assert.equal(fill.sizeBase, 0.005);
   assert.ok(!ex._tracked.has('12345'), '成交后删除跟踪');
   assert.ok(Math.abs(ex.realizedPnl - 0.06) < 1e-9, '两条 fill 的 pnl 累加');
-  // 重复拉取不重复 emit（去重）
+  // 重复拉取不重复 emit（游标推进 + 去重）
   fill = null;
   await ex._refreshFills();
-  assert.ok(!fill, '同一 fill 游标内不重复 emit');
+  assert.ok(!fill, '游标推进后不重复 emit');
+}
+
+{
+  // _filledSeen 环形上限：超出 5000 时裁剪（经 _refreshFills 触发）
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  for (let i = 0; i < 5000; i++) ex._filledSeen.add('k' + i);
+  // 模拟新成交触发 add + 裁剪
+  ex._postInfo = async (payload) => {
+    if (payload.type === 'userFillsByTime') {
+      return [{ coin: 'io:ANTH', oid: 12345, side: 'B', px: '2000', sz: '0.005', tid: 5001, pnl: '0', time: Date.now() }];
+    }
+    return [];
+  };
+  await ex._refreshFills();
+  assert.ok(ex._filledSeen.size <= 5000, '环形裁剪生效');
 }
 
 {
   // 空快照守卫：空活跃快照 + 本地跟踪多 -> 不做 gone 判定
   const ex = mkEx();
-  ex.markets.set(0, { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:ANTH', sizeDecimals: 3, priceDecimals: 1, maxLeverage: 6, onlyIsolated: true, minOrderNotional: 10, minOrderSize: 0.001, stepSize: 0.001, stepPrice: 0.1 });
+  ex.markets.set(0, ANTH);
   for (let i = 0; i < 12; i++) {
     ex._tracked.set('o-' + i, { orderId: 'o-' + i, marketId: 0, levelIndex: i, side: 'sell', price: 2000 + i, sizeBase: 0.005, reduceOnly: false, placedAt: Date.now() - 120_000, seen: true, goneFirstAt: null });
   }

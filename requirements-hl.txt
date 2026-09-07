@@ -1,0 +1,4 @@
+# Hyperliquid Python SDK — 版本锁定（HIP-3 builder dex 支持需要较新版本）
+# 实测环境: Python 3.14 / SDK 0.24.0（Info(perp_dexs=["io"]) 正确解析 io 市场，asset id 偏移 200000）
+hyperliquid-python-sdk==0.24.0
+eth-account>=0.11.0

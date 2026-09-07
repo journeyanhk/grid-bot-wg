@@ -2,7 +2,7 @@
 
 Accepts JSON-lines on stdin, writes JSON-lines on stdout.  Deliberately exposes
 only the trading operations required by the grid bot: place order, cancel,
-cancel-all, update leverage (isolated).  There is no withdrawal, transfer,
+bulk-cancel, update leverage (isolated).  There is no withdrawal, transfer,
 API-key mutation or bridge command.
 
 The signer holds only an AGENT wallet private key (authorised on the official
@@ -10,6 +10,12 @@ site as "can trade, cannot withdraw").  Private key material is read once from
 the environment or a local file and is never included in a response or log
 line.  The "io" dex namespace is applied to every order so HIP-3 assets such as
 io:ANTH are addressed correctly.
+
+API 契约已按 2026-09-07 对主网的真实探测校准（SDK 0.24.0）：
+- Info(perp_dexs=["io"]) 解析 io 市场（asset id 偏移 200000），coin 名直传 "io:ANTH"
+- Exchange.order(name, is_buy, sz, limit_px, order_type, reduce_only, cloid)
+- Exchange.cancel(name, oid:int)；无 cancel_all —— 全撤由 bulk_cancel 实现
+- update_leverage(lev, name, is_cross=False) 即逐仓
 """
 
 from __future__ import annotations
@@ -21,9 +27,10 @@ import asyncio
 from pathlib import Path
 
 try:
+    from eth_account import Account
     from hyperliquid.info import Info
     from hyperliquid.exchange import Exchange
-    from hyperliquid.utils.signing import OrderRequest, OrderType, OrderSide, OrderTimeInForce
+    from hyperliquid.utils.signing import Cloid, Tif
 except Exception as exc:  # pragma: no cover - exercised by the JS bridge
     print(json.dumps({"ready": False, "error": f"无法加载 hyperliquid-python-sdk: {exc}"}), flush=True)
     raise SystemExit(2)
@@ -54,23 +61,10 @@ def _make_client():
     address = os.environ.get("HL_ACCOUNT_ADDRESS", "").strip()
     if not address:
         raise RuntimeError("缺少 HL_ACCOUNT_ADDRESS（agent 钱包地址）")
-    private_key = _private_key()
-    info = Info(base_url=url, skip_ws=True, meta=None)
-    exchange = Exchange(wallet=private_key, base_url=url, account_address=address)
+    wallet = Account.from_key(_private_key())
+    info = Info(base_url=url, skip_ws=True, perp_dexs=[HL_DEX])
+    exchange = Exchange(wallet=wallet, base_url=url, account_address=address, perp_dexs=[HL_DEX])
     return info, exchange, address
-
-
-def _order_request(row: dict) -> OrderRequest:
-    return OrderRequest(
-        name=str(row["coin"]),           # 例如 "io:ANTH"
-        is_buy=str(row["side"]).lower() == "buy",
-        sz=float(row["sizeBase"]),
-        limit_px=float(row["price"]),
-        order_type=OrderType.Limit,
-        reduce_only=bool(row.get("reduceOnly", False)),
-        time_in_force=OrderTimeInForce.Gtc,
-        cloid=str(row.get("clientOrderId", "")) or None,
-    )
 
 
 def _handle(exchange, address: str, req: dict):
@@ -78,18 +72,33 @@ def _handle(exchange, address: str, req: dict):
     if command == "health":
         return {"ok": True, "profile": "hyperliquid", "dex": HL_DEX, "accountAddress": address}
     if command == "place_order":
-        order = _order_request(req["order"])
-        result = exchange.order(order, build_request=True)
+        order = req["order"]
+        limit_type = {"limit": {"tif": Tif.Gtc}}
+        if order.get("immediate"):
+            limit_type = {"limit": {"tif": Tif.Ioc}}
+        cloid = None
+        if order.get("clientOrderId"):
+            cloid = Cloid.from_str(str(order["clientOrderId"]))
+        result = exchange.order(
+            str(order["coin"]),
+            bool(order["isBuy"]),
+            float(order["sizeBase"]),
+            float(order["price"]),
+            limit_type,
+            reduce_only=bool(order.get("reduceOnly", False)),
+            cloid=cloid,
+        )
         return {"order": result}
     if command == "cancel":
-        result = exchange.cancel(str(req["coin"]), float(req["oid"]))
+        result = exchange.cancel(str(req["coin"]), int(req["oid"]))
         return {"status": result}
-    if command == "cancel_all":
-        result = exchange.cancel_all(str(req["coin"]))
+    if command == "bulk_cancel":
+        result = exchange.bulk_cancel(str(req["coin"]), [int(x) for x in req.get("oids", [])])
         return {"status": result}
     if command == "update_leverage":
         leverage = max(1, int(req["leverage"]))
-        result = exchange.update_leverage(leverage, str(req["coin"]), is_isolated=True)
+        # is_cross=False => 逐仓（HL io 系市场强制逐仓；对齐实测契约）
+        result = exchange.update_leverage(leverage, str(req["coin"]), is_cross=False)
         return {"status": result}
     raise RuntimeError("不支持的签名命令")
 
