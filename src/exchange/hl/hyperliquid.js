@@ -10,6 +10,10 @@
 // 契约已按 2026-09-07 主网实测校准：metaAndAssetCtxs 返回数组 [meta, ctxs]、
 // userFills 无 cursor（增量用 userFillsByTime + startTime）、candleSnapshot 直接
 // 返回数组、HL 报价必须 ≤5 位有效数字。
+// HIP-3 铁律：接入 builder-dex 时，每个按 user 查询的端点都要问一遍"它认不认
+// dex 参数"——clearinghouseState ✓、frontendOpenOrders ✓（缺它曾导致 14 单翻倍
+// 成 42 单）、userFillsByTime（实测不带 dex 也返回 io 成交，保持不带）、
+// metaAndAssetCtxs 本身按 dex 查询。
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
@@ -264,7 +268,9 @@ export class HyperliquidExchange extends EventEmitter {
   }
 
   async _fetchActiveOrders(marketId) {
-    const data = await this._postInfo({ type: 'frontendOpenOrders', user: this.accountAddress });
+    // 挂单快照必须在 dex 作用域查询：不带 dex:"io" 的 frontendOpenOrders 不返回
+    // builder-dex 的订单（2026-09-08 事故：14 单被空快照骗成 42 单）
+    const data = await this._postInfo({ type: 'frontendOpenOrders', user: this.accountAddress, dex: this.dex });
     const rows = Array.isArray(data) ? data : [];
     return rows
       .filter((o) => marketId == null || this.markets.get(Number(marketId))?.name === String(o.coin))

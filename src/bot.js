@@ -1018,6 +1018,12 @@ export class GridBot {
         for (let i = 0; i < 2; i++) {
           const rows = await this.ex.fetchOpenOrders(this.config.marketId);
           if (!Array.isArray(rows)) throw new Error('交易所没有返回有效挂单快照。');
+          // 空快照纵深防御（2026-09-08 HL 事故）：期望有单但交易所返回 0 单——
+          // 视为快照不可信（如 builder-dex 端点没认 dex 参数），本轮放弃重挂，
+          // 宁可慢、不可翻倍。四所通用，同类欺骗已两次骗过校验层。
+          if (rows.length === 0 && (this.active.size + this._retryQueue.length) >= 10) {
+            throw new Error('交易所挂单快照为空但本地预期有单，疑似接口异常，本轮不重挂。');
+          }
           snapshots.push(rows);
           if (i === 0) await sleep(750);
         }

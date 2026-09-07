@@ -286,6 +286,23 @@ test('stop：撤单 + 平仓 + 状态复位', async () => {
   assert.equal(ex.orders.size, 0);
 });
 
+test('重试空快照守卫：期望有单但快照为空 -> 本轮不重挂（防翻倍下单）', async () => {
+  const { ex, bot } = await makeBot();
+  // 塞入 10+ 个 opening 重试项，且本地 active 有 10+ 单（满足守卫阈值）
+  for (let i = 0; i < 12; i++) {
+    bot.active.set('a' + i, { levelIndex: i, side: 'buy', price: 110 + i, sizeBase: 1, opening: true, placedAt: Date.now() });
+    bot._retryQueue.push({ levelIndex: i, sizeBase: 1, side: 'buy', price: 110 + i, opening: true, _nextAt: 0 });
+  }
+  // 交易所挂单快照为空（模拟 dex 端点瞎眼）——守卫应拦截重挂
+  ex.orders.clear();
+  const before = bot.active.size;
+  await bot._drainRetryQueueNow();
+  assert.equal(bot.active.size, before, '空快照轮不得重挂/新增挂单');
+  assert.equal(ex.orders.size, 0, '交易所侧不得出现任何新单');
+  assert.ok(bot._retryQueue.length >= 12, '重试项应保留（推后重试而非放弃）');
+  assert.ok(bot.alerts.some((a) => a.message.includes('安全重试暂缓')), '应发出安全重试暂缓告警');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

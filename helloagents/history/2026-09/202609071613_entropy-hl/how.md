@@ -100,3 +100,12 @@ P0 签名器五处、P1 市场元数据四处、P2 逻辑三处已全部修复�
 ③ check-html.mjs 升级四项（重复 id/缺失面板/P() 引用/残缺标签）
 资金路径提醒：链上钱包 -> 核心 Perps -> io dex 三级口袋，需在 Entropy 页面划转。
 详见 CHANGELOG 1.6.4
+
+---
+
+## 2026-09-08 review3 修复记录（14 单变 42 单事故）
+
+① frontendOpenOrders 补 dex:"io"（挂单快照不认 dex -> 恒空 -> 重试翻倍）
+② bot.js _drainRetryQueueNow 空快照守卫（期望有单但快照 0 单 -> 本轮不重挂，四所通用）
+③ HIP-3 铁律写入文件头：每个按 user 查询的端点都要问"认不认 dex 参数"
+详见 CHANGELOG 1.6.5
