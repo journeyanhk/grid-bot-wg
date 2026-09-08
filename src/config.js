@@ -146,6 +146,34 @@ export function getConfig() {
     proxy: process.env.HL_PROXY || globalProxy,
   };
 
+  // ── Variational Omni (VA) ────────────────────────────────────────────────
+  // RFQ/OLP 报价模型（无订单簿），全有或全无限价单，零手续费（点差成本）。
+  // LIVE 鉴权用 vr-token cookie（VARIATIONAL_TOKEN，贴 token 优先）。
+  // 精度默认保守，未经实盘校验前不要放大下单量（见 market.js 说明）。
+  const vaUnderlyings = (process.env.VA_UNDERLYINGS || 'BTC')
+    .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+  const vaFundingInterval = optionalNumber('VA_FUNDING_INTERVAL_S');
+  const vaLeverage = optionalNumber('VA_LEVERAGE');
+  const va = {
+    mode: (process.env.VA_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    baseUrl: process.env.VA_BASE_URL || 'https://omni.variational.io',
+    underlyings: vaUnderlyings.length ? vaUnderlyings : ['BTC'],
+    token: process.env.VARIATIONAL_TOKEN || '',
+    address: process.env.VA_ADDRESS || '',
+    slippageLimit: process.env.VA_SLIPPAGE_LIMIT || '0.005',
+    leverage: Number.isFinite(vaLeverage) ? vaLeverage : null,
+    instrument: {
+      instrumentType: process.env.VA_INSTRUMENT_TYPE || 'perpetual_future',
+      settlementAsset: process.env.VA_SETTLEMENT_ASSET || 'USDC',
+      fundingIntervalS: Number.isFinite(vaFundingInterval) ? vaFundingInterval : undefined,
+      kind: process.env.VA_KIND || '',
+    },
+    feeRate: Number(process.env.VA_FEE_RATE || 0.0001),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.VA_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
@@ -162,6 +190,7 @@ export function getConfig() {
     rs,
     lr,
     hl,
+    va,
   };
 }
 

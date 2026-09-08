@@ -17,7 +17,7 @@ const dup = [...new Set(ids.filter((id) => (seen.has(id) ? true : (seen.add(id),
 if (dup.length) problems.push(`重复 id: ${dup.join(', ')}`);
 
 // ② 缺失面板：tab 数组里的每个前缀都必须有对应面板、导航按钮、控制台实例
-const prefixes = ['de', 'ex', 'rs', 'lr', 'hl'];
+const prefixes = ['de', 'ex', 'rs', 'lr', 'hl', 'va'];
 for (const p of prefixes) {
   if (!html.includes(`<div id="tab-${p}" class="tab-panel">`)) problems.push(`缺失面板 tab-${p}`);
   if (!html.includes(`onclick="switchTab('${p}')"`)) problems.push(`缺失导航按钮 switchTab('${p}')`);
