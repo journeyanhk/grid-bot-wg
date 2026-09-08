@@ -1,0 +1,5 @@
+# Variational Omni transport (curl_cffi) — required for VA_TRANSPORT=bridge.
+# Node fetch is blocked by Cloudflare (403); curl_cffi's Chrome TLS/JA3
+# impersonation passes (200). Also used by scripts/va_probe.py.
+#   pip install -r requirements-va.txt
+curl_cffi>=0.7

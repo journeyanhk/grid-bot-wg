@@ -162,6 +162,10 @@ export function getConfig() {
     token: process.env.VARIATIONAL_TOKEN || '',
     address: process.env.VA_ADDRESS || '',
     slippageLimit: process.env.VA_SLIPPAGE_LIMIT || '0.005',
+    // Cloudflare: Node fetch -> 403, curl_cffi(Chrome) -> 200. 'bridge' spawns the
+    // Python transport worker and is the only mode that passes CF in prod.
+    transport: (process.env.VA_TRANSPORT || 'bridge').toLowerCase() === 'node' ? 'node' : 'bridge',
+    pythonPath: process.env.VA_PYTHON || '',
     leverage: Number.isFinite(vaLeverage) ? vaLeverage : null,
     instrument: {
       instrumentType: process.env.VA_INSTRUMENT_TYPE || 'perpetual_future',

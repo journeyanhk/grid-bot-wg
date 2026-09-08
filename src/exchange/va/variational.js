@@ -1,33 +1,50 @@
 // VariationalExchange — LIVE adapter for Variational Omni (BTC perpetual grid).
 //
 // Implements the IExchange contract (see rs/types.js). Design decisions, all
-// driven by the real 2026-09-08 capture and the two design docs:
+// driven by the real 2026-09-08 captures (3 rounds) and the two design docs:
 //
 //   * POSITIVE fill confirmation only. Omni exposes orders/v2 terminal status
-//     (cleared/canceled) + trades.source_rfq, so — unlike the RISEx adapter,
-//     which has no status endpoint and must GUESS from a vanished order — we
-//     NEVER infer a fill. A tracked order that leaves the pending list is
-//     resolved by reading its terminal row; if we cannot read it, we keep
-//     tracking and warn (fail-closed), never fabricate a fill.
+//     (limit fill terminal = `cleared`, `price` = actual fill — confirmed) plus
+//     trades.source_rfq. Unlike RISEx (which GUESSES from a vanished order) we
+//     NEVER infer a fill; if we cannot read the terminal row we keep tracking
+//     and warn (fail-closed).
 //   * rfq_id is the only order key. order_id is logged, never used for control.
-//   * instrument identity funding_interval_s = 3600 (NOT metadata's 28800).
-//   * Auth is the vr-token cookie (pasted from .env for now); a 401 marks the
-//     adapter not-trading-ready and raises so the bot pauses replacement.
+//   * instrument identity = `P-BTC-USDC-3600` (funding_interval_s 3600, NOT
+//     metadata's 28800 window). Every pending/history query carries `instrument=`.
+//   * Soft-forget: the bot's forgetOrder(s) must not drop an order we are still
+//     mid-cancel on — otherwise a fill that lands during the cancel is lost.
+//   * closePosition goes through the verified indicative→accept path and its
+//     order is `internal` (never re-emitted as a grid fill).
 //
-// HTTP + Cloudflare live entirely in VaHttpClient; this file is pure strategy
-// plumbing so the transport can later swap to a Python bridge with no changes.
+// HTTP + Cloudflare (curl_cffi bridge) live entirely in VaHttpClient; this file
+// is pure strategy plumbing.
+import { Buffer } from 'node:buffer';
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
 import { CloudflareError, VaHttpClient, VaHttpError } from './httpclient.js';
 import {
-  DEFAULT_PRECISION, candlePeriod, formatStep, instrumentFor, isCanceled, isFilled,
-  parseCandles, parseOrderRow, parsePortfolio, parsePosition, parseSupportedAsset,
-  parseTrade, roundPrice, roundQty, unwrapResult,
+  DEFAULT_PRECISION, candlePeriod, formatStep, instrumentFor, instrumentKey,
+  isCanceled, isFilled, nextPageOf, parseCandles, parseIndicative, parseOrderRow,
+  parsePortfolio, parsePosition, parseSupportedAsset, parseTrade, roundPrice,
+  roundQty, unwrapResult,
 } from './market.js';
 
 const POLL_MS = 2500;
 const HISTORY_BUFFER_MS = 5 * 60_000;   // look-back padding when querying terminal rows
 const RESOLVE_TIMEOUT_MS = 10 * 60_000; // a gone order unresolved this long -> loud dropped-level warning
+const MAX_PAGES = 5;                     // pagination cap for orders/v2 + trades (100/page)
+const TOKEN_WARN_MS = 24 * 3600_000;     // warn when the vr-token JWT has < 24h left
+
+/** Decode a JWT's `exp` (seconds) WITHOUT verifying the signature. */
+function decodeJwtExp(token) {
+  try {
+    const parts = String(token).split('.');
+    if (parts.length < 2) return null;
+    const json = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const exp = Number(JSON.parse(json).exp);
+    return Number.isFinite(exp) ? exp : null;
+  } catch { return null; }
+}
 
 export class VariationalExchange extends EventEmitter {
   constructor(opts = {}) {
@@ -40,22 +57,25 @@ export class VariationalExchange extends EventEmitter {
     this.instrumentCfg = opts.instrument || {}; // { instrumentType, settlementAsset, fundingIntervalS, kind }
     this.slippageLimit = String(opts.slippageLimit ?? '0.005');
     this.leverage = Number(opts.leverage) || null;
-    this.feeRate = Number(opts.feeRate) || 0.0001; // base_spread/2 ~ 0.005%; confirm from /metadata/stats
+    this.feeRate = Number(opts.feeRate) || 0.0001; // spread-based; ~0.005%
     this.pollMs = opts.pollMs || POLL_MS;
     this._graceMs = this.pollMs * 2;
     this.apiUrl = opts.baseUrl || undefined;
+    this.maxNotional = null;              // from indicative at init (per-side cap for bot preflight)
     this.balance = null; this.equity = null; this.realizedPnl = null;
     this.lastOkAt = 0; this.lastError = null; this.operationalIssue = null;
-    this.rejectedOrders = 0; this.droppedLevels = 0;
-    this.markets = new Map();       // marketId(number) -> market
+    this.rejectedOrders = 0; this.droppedLevels = 0; this.lateFills = 0;
+    this.markets = new Map();        // marketId(number) -> market
     this._byUnderlying = new Map();  // 'BTC' -> marketId
     this._prices = new Map();        // marketId -> price
-    this._positions = new Map();     // marketId -> {sizeBase, entryPrice, unrealizedPnl}
-    this._tracked = new Map();       // rfqId -> {orderId, marketId, side, price, sizeBase, levelIndex, reduceOnly, seen, placedAt, goneFirstAt, canceling}
+    this._positions = new Map();     // marketId -> {sizeBase, entryPrice, ...}
+    this._posSeq = new Map();        // marketId -> last_local_sequence (cheap fill trigger)
+    this._tracked = new Map();       // rfqId -> {orderId, marketId, side, price, sizeBase, levelIndex, reduceOnly, createdAt, seen, placedAt, goneFirstAt, canceling, forgotten, internal}
     this._timer = null; this._polling = false; this._tradingReady = false;
     this._lastAlertAt = 0;
     this.http = opts.http || new VaHttpClient({
       baseUrl: opts.baseUrl, address: opts.address, token: opts.token,
+      transportMode: opts.transport, pythonPath: opts.pythonPath,
     });
   }
 
@@ -65,15 +85,18 @@ export class VariationalExchange extends EventEmitter {
     try {
       await this._loadMarkets();
       if (this.http.hasToken()) {
-        await this._refreshAccount();     // validates the vr-token cookie
+        this._checkTokenLife();               // decode JWT exp; reject if expired, warn if < 24h
+        await this._refreshAccount();          // validates the vr-token cookie
+        await this._initInstrumentCaps().catch((e) => logger.warn('va', `读取合约精度/杠杆失败，沿用默认值：${e?.message || e}`));
+        await this._preflightInstrument();     // throws (blocks trading) on instrument-identity mismatch
         await this._refreshOrders().catch(() => {});
         this._tradingReady = true;
       } else {
-        // No token: read-only price/candles still work (public endpoints), but
-        // trading is refused until VARIATIONAL_TOKEN is provided.
         logger.warn('va', '未配置 VARIATIONAL_TOKEN：仅行情可用，实盘交易被锁定，请贴入 7 天会话 token。');
       }
-      if (this.leverage) { for (const u of this.underlyings) await this.setLeverage(this._byUnderlying.get(u), this.leverage).catch(() => {}); }
+      // NOTE: leverage is intentionally NOT set here — the bot sets it in its
+      // own _start (setting leverage while holding a position can be rejected or
+      // silently change margin). See P1 in grid-review1.
       this.dataSource = 'real';
       this.lastOkAt = Date.now();
       this.operationalIssue = null;
@@ -92,6 +115,14 @@ export class VariationalExchange extends EventEmitter {
     return this.init();
   }
 
+  _checkTokenLife() {
+    const exp = decodeJwtExp(this.http.token);
+    if (!exp) return;
+    const msLeft = exp * 1000 - Date.now();
+    if (msLeft <= 0) throw new VaHttpError('VARIATIONAL_TOKEN（vr-token）已过期，请重新获取会话 token 后重连。', 401);
+    if (msLeft < TOKEN_WARN_MS) logger.warn('va', `vr-token 将在约 ${Math.max(1, Math.round(msLeft / 3600_000))} 小时后过期，请及时更新 VARIATIONAL_TOKEN。`);
+  }
+
   async _loadMarkets() {
     let idx = 0;
     for (const underlying of this.underlyings) {
@@ -105,11 +136,45 @@ export class VariationalExchange extends EventEmitter {
         stepSize: this.precision.stepSize, stepPrice: this.precision.stepPrice,
         minOrderSize: this.precision.minOrderSize,
         maxLeverage: snap.maxLeverage || this.precision.maxLeverage,
+        maxNotional: null,
         instrumentType: snap.instrumentType, marketStatus: snap.marketStatus,
         isCloseOnly: snap.isCloseOnly,
       });
       this._byUnderlying.set(underlying, marketId);
       this._prices.set(marketId, snap.price);
+    }
+  }
+
+  /** Read REAL precision/leverage/max-notional from an indicative quote (token-gated). */
+  async _initInstrumentCaps() {
+    for (const [marketId, m] of this.markets) {
+      const body = { instrument: instrumentFor(m.underlying, this.instrumentCfg), qty: '0.001' };
+      const ind = parseIndicative(await this.http.post('/api/quotes/indicative', body, { auth: true, skipGap: true }));
+      if (!ind) continue;
+      if (ind.minQtyTick) m.stepSize = ind.minQtyTick;
+      if (ind.minQty) m.minOrderSize = ind.minQty;
+      if (ind.maxLeverage) m.maxLeverage = ind.maxLeverage;
+      if (ind.markPrice) { m.lastPrice = ind.markPrice; this._prices.set(marketId, ind.markPrice); }
+      m.maxNotional = ind.maxNotionalBid ?? ind.maxNotionalAsk ?? m.maxNotional;
+      this.maxNotional = m.maxNotional;
+      logger.info('va', `${m.underlying} 合约精度：step=${m.stepSize} min=${m.minOrderSize} maxLev=${m.maxLeverage} maxNotional≈${m.maxNotional ?? '?'}`);
+    }
+  }
+
+  /** Block trading if a resting order's instrument echo differs from our identity. */
+  async _preflightInstrument() {
+    for (const m of this.markets.values()) {
+      const key = instrumentKey(m.underlying, this.instrumentCfg);
+      const json = await this.http.get(`/api/orders/v2?status=pending&instrument=${encodeURIComponent(key)}&limit=1`, { auth: true });
+      const row = unwrapResult(json)[0];
+      if (!row?.instrument) continue;
+      const want = instrumentFor(m.underlying, this.instrumentCfg);
+      const got = row.instrument;
+      const mismatch = ['underlying', 'instrument_type', 'settlement_asset', 'funding_interval_s']
+        .filter((k) => String(got[k]) !== String(want[k]));
+      if (mismatch.length) {
+        throw new VaHttpError(`Variational 合约身份回显不一致（${mismatch.join(',')}）：本地 ${JSON.stringify(want)} vs 交易所 ${JSON.stringify(got)}，已阻止交易。`, 0);
+      }
     }
   }
 
@@ -126,7 +191,7 @@ export class VariationalExchange extends EventEmitter {
 
   async getMarkets() { return [...this.markets.values()]; }
   getPosition(marketId) { return this._positions.get(Number(marketId)) || null; }
-  getOpenOrders(marketId) { return [...this._tracked.values()].filter((o) => o.marketId === Number(marketId)); }
+  getOpenOrders(marketId) { return [...this._tracked.values()].filter((o) => o.marketId === Number(marketId) && !o.internal); }
 
   async getPrice(marketId) {
     const id = Number(marketId); const m = this._market(id);
@@ -175,14 +240,26 @@ export class VariationalExchange extends EventEmitter {
       use_mark_price: false,
       is_reduce_only: !!o.reduceOnly,
     };
-    const resp = await this.http.post('/api/orders/new/limit', body);
+    let resp;
+    try {
+      resp = await this.http.post('/api/orders/new/limit', body);
+    } catch (e) {
+      // A 4xx at placement is a rejection path (risk/capacity). Surface a message
+      // containing `reject` so bot._handleExError's back-off regex triggers.
+      if (e instanceof VaHttpError && e.status >= 400 && e.status < 500) {
+        this.rejectedOrders += 1;
+        if (/limit|max|exceed|capacity/i.test(String(e.message))) this._setIssue(e);
+        throw new Error(`Variational 下单被拒 reject（${e.message}）`, { cause: e });
+      }
+      throw e;
+    }
     const rfqId = resp?.rfq_id != null ? String(resp.rfq_id) : null;
     if (!rfqId) throw new VaHttpError('Variational 下单响应缺少 rfq_id。', 0, resp);
     this._tracked.set(rfqId, {
       orderId: rfqId, marketId: m.marketId, side: body.side, price, sizeBase: qty,
-      levelIndex: o.levelIndex, reduceOnly: !!o.reduceOnly,
+      levelIndex: o.levelIndex, reduceOnly: !!o.reduceOnly, createdAt: null,
       seen: false, placedAt: Date.now(), goneFirstAt: 0, canceling: false,
-      clientOrderId: o.clientOrderId,
+      forgotten: false, internal: false, clientOrderId: o.clientOrderId,
     });
     return { orderId: rfqId };
   }
@@ -192,11 +269,11 @@ export class VariationalExchange extends EventEmitter {
     const id = String(orderId);
     const t = this._tracked.get(id);
     // Mark canceling instead of deleting: positive confirmation resolves the
-    // fill-vs-cancel race — if it turns out this order actually filled between
-    // our decision and the cancel landing, _refreshOrders emits the fill.
+    // fill-vs-cancel race. CRITICAL: a POST failure most often means the order
+    // ALREADY FILLED — do NOT reset canceling here; let _refreshOrders adjudicate.
     if (t) t.canceling = true;
     try { await this.http.post('/api/orders/cancel', { rfq_id: id }); return true; }
-    catch (e) { if (t) t.canceling = false; this.emit('error', e); return false; }
+    catch (e) { this.emit('error', e); return false; }
   }
 
   async cancelAll(marketId) {
@@ -213,38 +290,85 @@ export class VariationalExchange extends EventEmitter {
     return ok;
   }
 
-  /** REAL resting orders (pending) on the exchange — used by the bot for reconciliation. */
-  async fetchOpenOrders(marketId) {
-    const rows = unwrapResult(await this.http.get('/api/orders/v2?status=pending', { auth: true })).map(parseOrderRow);
-    const wantUnderlying = marketId != null ? this._market(marketId).underlying : null;
-    return rows
-      .filter((r) => r && r.rfqId && (!wantUnderlying || !r.underlying || r.underlying === wantUnderlying))
-      .map((r) => ({
-        orderId: r.rfqId,
-        marketId: this._byUnderlying.get(r.underlying) ?? Number(marketId),
-        side: r.side, price: r.limitPrice ?? r.price, sizeBase: r.qty, status: r.status,
-      }));
+  /** Paged GET over orders/v2/trades. Stops at next_page===null, `stop()` hit, or MAX_PAGES. */
+  async _getPaged(buildPath, { auth = true, stop } = {}) {
+    const rows = [];
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const json = await this.http.get(buildPath(page * 100), { auth });
+      for (const r of unwrapResult(json)) rows.push(r);
+      if (nextPageOf(json) == null) break;
+      if (stop && stop(rows)) break;
+    }
+    return rows;
   }
 
-  adoptOrder({ orderId, marketId, levelIndex, side, price, sizeBase, reduceOnly }) {
+  /** RAW pending rows across all markets (ALL order types) — for the live set. */
+  async _fetchPendingRaw() {
+    const out = [];
+    for (const m of this.markets.values()) {
+      const key = instrumentKey(m.underlying, this.instrumentCfg);
+      const raw = await this._getPaged((offset) => `/api/orders/v2?status=pending&instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}`, { auth: true });
+      for (const r of raw.map(parseOrderRow)) if (r?.rfqId) out.push(r);
+    }
+    return out;
+  }
+
+  /** REAL resting LIMIT orders (bot reconciliation) — instrument-filtered, limit-only, strict underlying. */
+  async fetchOpenOrders(marketId) {
+    const markets = marketId != null ? [this._market(marketId)] : [...this.markets.values()];
+    const out = [];
+    for (const m of markets) {
+      const key = instrumentKey(m.underlying, this.instrumentCfg);
+      const raw = await this._getPaged((offset) => `/api/orders/v2?status=pending&instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}`, { auth: true });
+      for (const r of raw.map(parseOrderRow)) {
+        if (!r?.rfqId) continue;
+        if (r.orderType !== 'limit') continue;          // skip in-flight market orders
+        if (r.underlying && r.underlying !== m.underlying) { this.http.warnOnce('ufilter:' + r.underlying, `orders/v2 返回了非本市场 underlying=${r.underlying}，已忽略。`); continue; }
+        out.push({ orderId: r.rfqId, marketId: m.marketId, side: r.side, price: r.limitPrice ?? r.price, sizeBase: r.qty, status: r.status, createdAt: r.createdAt });
+      }
+    }
+    return out;
+  }
+
+  adoptOrder({ orderId, marketId, levelIndex, side, price, sizeBase, reduceOnly, createdAt }) {
     this._tracked.set(String(orderId), {
       orderId: String(orderId), marketId: Number(marketId), side, price: Number(price), sizeBase: Number(sizeBase),
-      levelIndex, reduceOnly: !!reduceOnly, seen: false, placedAt: Date.now(), goneFirstAt: 0, canceling: false,
+      levelIndex, reduceOnly: !!reduceOnly, createdAt: createdAt || null,
+      seen: false, placedAt: Date.now(), goneFirstAt: 0, canceling: false, forgotten: false, internal: false,
     });
   }
-  forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
-  forgetOrders(marketId) { for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id); }
+
+  // SOFT-FORGET: the bot deletes a level after confirming it "left the book", but
+  // "left the book" INCLUDES "filled". If we are mid-cancel, keep the entry alive
+  // (marked forgotten) so _refreshOrders can adjudicate the terminal row.
+  forgetOrder(orderId) {
+    const t = this._tracked.get(String(orderId));
+    if (!t) return;
+    if (t.canceling) { t.forgotten = true; return; }
+    this._tracked.delete(String(orderId));
+  }
+  forgetOrders(marketId) { for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this.forgetOrder(id); }
 
   async closePosition(marketId) {
-    const pos = this.getPosition(marketId); if (!pos?.sizeBase) return true;
+    this._assertTradingReady();
     const m = this._market(marketId);
-    const price = await this.getPrice(marketId);
+    const pos = this.getPosition(marketId);
+    if (!pos?.sizeBase) return true;
     const side = pos.sizeBase > 0 ? 'sell' : 'buy';
-    // Aggressive reduce-only limit that crosses the OLP quote (Omni is
-    // all-or-nothing; a crossing limit fills like a taker). The market endpoint
-    // (indicative -> new/market) is deferred until its body is captured.
-    const cross = side === 'sell' ? price * (1 - 0.02) : price * (1 + 0.02);
-    await this.placeLimitOrder({ marketId: m.marketId, side, price: cross, sizeBase: Math.abs(pos.sizeBase), reduceOnly: true, levelIndex: -1 });
+    const qty = formatStep(Math.abs(pos.sizeBase), m.stepSize); // position is already 1e-6, no dust
+    // Verified market-close path: indicative -> accept. quote_id valid ~1-2s, so
+    // both writes use skipGap to avoid the 1s belt expiring the quote.
+    const q = parseIndicative(await this.http.post('/api/quotes/indicative', { instrument: instrumentFor(m.underlying, this.instrumentCfg), qty }, { auth: true, skipGap: true }));
+    if (!q?.quoteId) throw new VaHttpError('Variational 平仓报价缺少 quote_id。', 0, q);
+    const r = await this.http.post('/api/quotes/accept', { quote_id: q.quoteId, side, max_slippage: 0.01, is_reduce_only: true }, { auth: true, skipGap: true });
+    const rfqId = r?.rfq_id != null ? String(r.rfq_id) : null;
+    if (!rfqId) throw new VaHttpError('Variational 平仓 accept 缺少 rfq_id。', 0, r);
+    // internal:true -> _refreshOrders will NOT emit a grid fill for it.
+    this._tracked.set(rfqId, {
+      orderId: rfqId, marketId: m.marketId, side, price: side === 'sell' ? q.bid : q.ask, sizeBase: Number(qty),
+      levelIndex: -1, reduceOnly: true, createdAt: null, seen: false, placedAt: Date.now(),
+      goneFirstAt: 0, canceling: false, forgotten: false, internal: true,
+    });
     return true;
   }
 
@@ -262,8 +386,11 @@ export class VariationalExchange extends EventEmitter {
       }
       this.lastOkAt = Date.now(); this.lastError = null;
       if (this.operationalIssue?.transient) this.operationalIssue = null;
-    } catch (e) { this.lastError = e?.message || String(e); this._setIssue(e); }
-    finally { this._polling = false; }
+    } catch (e) {
+      this.lastError = e?.message || String(e);
+      if (e?.status === 401) { this._tradingReady = false; this._setIssue(e); this.operationalIssue.title = 'Variational vr-token 失效'; }
+      else this._setIssue(e, !!e?.transient);
+    } finally { this._polling = false; }
   }
 
   async _refreshPrices() {
@@ -278,76 +405,120 @@ export class VariationalExchange extends EventEmitter {
   async _refreshAccount() {
     const port = parsePortfolio(await this.http.get('/api/portfolio?compute_margin=true', { auth: true }));
     if (port) { this.balance = port.balance; this.equity = port.equity; this.available = port.available; }
-    // Positions: shape unverified -> parse defensively, never fabricate.
-    try {
-      const raw = await this.http.get('/api/positions', { auth: true });
-      const next = new Map();
-      for (const [marketId, m] of this.markets) {
-        const p = parsePosition(raw, m.underlying);
-        if (p) next.set(marketId, p);
+    // Positions three-state: ok:false -> keep last + issue; ok:true&&pos:null -> flat.
+    let raw;
+    try { raw = await this.http.get('/api/positions', { auth: true }); }
+    catch (e) { this.http.warnOnce('positions', `读取 /api/positions 失败（保持上次持仓，勿据此下单）：${e?.message || e}`); this.lastOkAt = Date.now(); return; }
+    for (const [marketId, m] of this.markets) {
+      const res = parsePosition(raw, m.underlying);
+      if (!res.ok) { this.http.warnOnce('posparse:' + res.reason, `无法解析 ${m.underlying} 持仓（${res.reason}）——保持上次持仓，不据此判定已平仓。`); this._setIssue(new Error(`持仓结构无法解析：${res.reason}`), true); continue; }
+      if (res.pos) {
+        this._positions.set(marketId, res.pos);
+        if (res.pos.lastLocalSequence != null) this._posSeq.set(marketId, res.pos.lastLocalSequence); // cheap fill trigger
+      } else {
+        this._positions.delete(marketId); // genuinely flat
       }
-      this._positions = next;
-    } catch (e) {
-      this.http.warnOnce('positions', `读取 /api/positions 失败（保持上次持仓，勿据此下单）：${e?.message || e}`);
     }
     this.lastOkAt = Date.now();
   }
 
   async _refreshOrders() {
-    const pending = await this.fetchOpenOrders(); // all underlyings
-    const live = new Set(pending.map((o) => String(o.orderId)));
+    const pending = await this._fetchPendingRaw(); // all markets, all order types
+    const live = new Set(pending.map((o) => o.rfqId));
+    const createdMap = new Map(pending.map((o) => [o.rfqId, o.createdAt]));
     const now = Date.now();
     for (const t of this._tracked.values()) {
-      if (live.has(t.orderId)) { t.seen = true; t.goneFirstAt = 0; }
+      if (live.has(t.orderId)) { t.seen = true; t.goneFirstAt = 0; if (!t.createdAt) t.createdAt = createdMap.get(t.orderId) || null; }
     }
-    // Which tracked orders have left the pending list (and deserve resolution)?
     const gone = [...this._tracked.values()].filter((t) => !live.has(t.orderId) && (t.seen || now - t.placedAt > this._graceMs));
     if (!gone.length) return;
 
-    const since = new Date(Math.min(...gone.map((t) => t.placedAt)) - HISTORY_BUFFER_MS).toISOString();
-    let historyById; const tradesByRfq = new Map();
+    // Window terminal queries by each order's OWN created_at (survives restart-adoption
+    // and long runs), padded by HISTORY_BUFFER_MS.
+    const sinceMs = Math.min(...gone.map((t) => Date.parse(t.createdAt) || t.placedAt)) - HISTORY_BUFFER_MS;
+    const since = new Date(sinceMs).toISOString();
+    const wantIds = new Set(gone.map((t) => t.orderId));
+
+    let historyById;
     try {
-      const hist = unwrapResult(await this.http.get(`/api/orders/v2?limit=100&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`, { auth: true })).map(parseOrderRow);
-      historyById = new Map(hist.filter((r) => r?.rfqId).map((r) => [r.rfqId, r]));
+      const hist = [];
+      for (const m of this.markets.values()) {
+        const key = instrumentKey(m.underlying, this.instrumentCfg);
+        const raw = await this._getPaged(
+          (offset) => `/api/orders/v2?instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`,
+          { auth: true, stop: (rows) => rows.filter((r) => wantIds.has(String(r.rfq_id))).length >= wantIds.size },
+        );
+        for (const r of raw) hist.push(r);
+      }
+      historyById = new Map(hist.map(parseOrderRow).filter((r) => r?.rfqId).map((r) => [r.rfqId, r]));
     } catch (e) {
-      // Cannot read terminal rows -> resolve nothing this round (fail-closed).
-      this._setIssue(e, true);
+      this._setIssue(e, true); // cannot read terminal rows -> resolve nothing (fail-closed)
       return;
     }
+
+    const tradesByRfq = new Map();
     try {
-      const trades = unwrapResult(await this.http.get(`/api/trades?limit=100&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`, { auth: true })).map(parseTrade);
-      for (const tr of trades) { if (tr?.rfqId) tradesByRfq.set(tr.rfqId, tr); }
+      const trades = [];
+      for (const m of this.markets.values()) {
+        const key = instrumentKey(m.underlying, this.instrumentCfg);
+        const raw = await this._getPaged(
+          (offset) => `/api/trades?instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`,
+          { auth: true, stop: (rows) => rows.filter((r) => wantIds.has(String(r.source_rfq))).length >= wantIds.size },
+        );
+        for (const r of raw) trades.push(r);
+      }
+      for (const tr of trades.map(parseTrade)) if (tr?.rfqId) tradesByRfq.set(tr.rfqId, tr);
     } catch { /* trades optional: fall back to order-row price */ }
 
     for (const t of gone) {
       const row = historyById.get(t.orderId);
       if (!row) {
-        // Not yet in history — keep tracking, time it, warn (never fabricate).
         if (!t.goneFirstAt) t.goneFirstAt = now;
         else if (now - t.goneFirstAt >= RESOLVE_TIMEOUT_MS) {
           this.droppedLevels += 1;
-          logger.warn('va', `⚠️ 订单 ${t.orderId}（${t.side} @ ${t.price}）出簿 10 分钟仍无法从 orders/v2 确认终态，该档位可能空洞（累计 ${this.droppedLevels}），请核对交易所并考虑重启网格补齐。`);
-          t.goneFirstAt = now; // re-arm to throttle the warning
+          logger.warn('va', `⚠️ 订单 ${t.orderId}（${t.side} @ ${t.price}）出簿 10 分钟仍无法从 orders/v2 确认终态，档位可能空洞（累计 ${this.droppedLevels}），请核对交易所并考虑重启网格补齐。`);
+          t.goneFirstAt = now; // re-arm to throttle
         }
         continue;
       }
-      if (isFilled(row.status)) {
+      const filled = isFilled(row.status);
+      const canceled = isCanceled(row.status);
+      const rejected = row.failedRiskChecks.length > 0;
+
+      // INTERNAL (closePosition accept): update state, NEVER re-emit as a grid fill.
+      if (t.internal) {
+        if (filled) { logger.info('va', `平仓单 ${t.orderId} 已成交 @ ${row.price ?? t.price}。`); this._tracked.delete(t.orderId); }
+        else if (canceled || rejected) { this._tracked.delete(t.orderId); this.emit('error', new Error(`Variational 平仓单 ${t.orderId} 未成交（${row.cancelReason || (rejected ? 'risk' : 'unknown')}），请重试平仓。`)); }
+        else this.http.warnOnce('istatus:' + row.status, `Variational 平仓单出现未知状态 ${row.status}，保持跟踪。`);
+        continue;
+      }
+
+      // FORGOTTEN (bot dropped the level, we were mid-cancel): a fill here is "late".
+      if (t.forgotten) {
+        if (filled) {
+          this.lateFills += 1; this._tracked.delete(t.orderId);
+          this.emit('error', new Error(`Variational 订单 ${t.orderId}（${t.side} @ ${t.price}）在撤单期间已成交，库存已变化，请核对持仓（累计迟到成交 ${this.lateFills}）。`));
+        } else if (canceled || rejected) { this._tracked.delete(t.orderId); }
+        else this.http.warnOnce('fstatus:' + row.status, `Variational 已遗忘订单出现未知状态 ${row.status}，保持跟踪。`);
+        continue;
+      }
+
+      // NORMAL grid order.
+      if (filled) {
         const tr = tradesByRfq.get(t.orderId);
-        const fillPrice = tr?.price ?? row.price ?? t.price;
-        const fillQty = tr?.qty ?? row.qty ?? t.sizeBase;
+        const fillPrice = row.price ?? tr?.price ?? t.price;   // row.price is the actual fill (may beat the limit)
+        const fillQty = row.qty ?? tr?.qty ?? t.sizeBase;
         this._tracked.delete(t.orderId);
         this.emit('fill', { orderId: t.orderId, marketId: t.marketId, side: t.side, price: fillPrice, sizeBase: fillQty, levelIndex: t.levelIndex, clientOrderId: t.clientOrderId });
-      } else if (row.failedRiskChecks.length) {
+      } else if (rejected) {
         this._tracked.delete(t.orderId); this.rejectedOrders += 1;
-        this.emit('error', new Error(`Variational 拒单（风控 ${row.failedRiskChecks.join(',')}）：订单 ${t.orderId} ${t.side} @ ${t.price}，不补反向单（累计拒单 ${this.rejectedOrders}）。`));
-      } else if (isCanceled(row.status)) {
+        this.emit('error', new Error(`Variational 拒单 reject（风控 ${row.failedRiskChecks.join(',')}）：订单 ${t.orderId} ${t.side} @ ${t.price}，不补反向单（累计拒单 ${this.rejectedOrders}）。`));
+      } else if (canceled) {
         this._tracked.delete(t.orderId);
-        if (!t.canceling) {
-          // Cancelled but WE didn't cancel it -> manual/website cancel. Surface
-          // as an error so the bot pauses replacement rather than guessing.
-          this.emit('error', new Error(`Variational 订单 ${t.orderId}（${t.side} @ ${t.price}）被非本地撤销（${row.cancelReason || 'unknown'}），不视为成交、不补单。`));
-        }
-      } // else: still pending in history (snapshot lag) -> keep tracking
+        if (!t.canceling) this.emit('error', new Error(`Variational 订单 ${t.orderId}（${t.side} @ ${t.price}）被非本地撤销（${row.cancelReason || 'unknown'}），不视为成交、不补单。`));
+      } else {
+        this.http.warnOnce('status:' + row.status, `Variational 订单 ${t.orderId} 出现未知状态 ${row.status}，保持跟踪待下轮裁决。`);
+      }
     }
   }
 

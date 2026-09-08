@@ -24,7 +24,7 @@ export class PaperExchange extends EventEmitter {
     this.balance = opts.startBalance ?? 10000;
     this.underlyings = (opts.underlyings && opts.underlyings.length ? opts.underlyings : DEFAULT_UNDERLYINGS).map((u) => u.toUpperCase());
     this.precision = { ...DEFAULT_PRECISION, ...(opts.precision || {}) };
-    this.http = new VaHttpClient({ proxy: opts.proxy });
+    this.http = new VaHttpClient({ baseUrl: opts.baseUrl, proxy: opts.proxy, transportMode: opts.transport || 'bridge', pythonPath: opts.pythonPath });
     this.dataSource = 'connecting'; // 'real' | 'synthetic'
     this.tickMs = opts.tickMs ?? 1000;
     this.pollMs = opts.pollMs ?? 4000;

@@ -27,7 +27,7 @@ export const DEFAULT_UNDERLYINGS = ['BTC'];
 export const DEFAULT_PRECISION = {
   stepSize: 0.000001,   // qty increment (capture showed 6dp: "0.001709")
   stepPrice: 0.01,      // price increment (capture showed 2dp: "58496.84")
-  minOrderSize: 0.0001, // minimum base qty — UNVERIFIED, keep small and safe
+  minOrderSize: 0.000002, // min_qty from indicative.qty_limits (confirmed 2026-09-08)
   maxLeverage: 50,      // set_leverage response reported max 50
 };
 
@@ -173,29 +173,38 @@ export function parseTrade(row) {
 }
 
 /**
- * Defensive parser for /api/positions. The exact shape was NOT in the capture
- * (WS pushed positions:[]), so this accepts several plausible shapes and returns
- * null when it cannot confidently read a signed size — NEVER a fabricated zero
- * that could mask a real position. Confirm the real shape in M1 and tighten.
+ * Parser for GET /api/positions — a BARE ARRAY (confirmed 2026-09-08).
+ * position_info.qty is SIGNED (short = "-0.0001"); upnl/rpnl/cum_funding and the
+ * mark price live at the OUTER level, NOT inside position_info.
+ *
+ * THREE-STATE (fail-closed) so the bot never mistakes "unreadable" for "flat":
+ *   { ok:true,  pos:{...} }   -> a real open position
+ *   { ok:true,  pos:null  }   -> genuinely flat (no row for this underlying, or qty 0)
+ *   { ok:false, reason }      -> shape unreadable; caller MUST keep last position
  */
 export function parsePosition(json, underlying) {
-  const rows = unwrapResult(json?.positions ? { result: json.positions } : json);
-  for (const raw of rows) {
-    const info = raw?.position_info || raw; // rbh saw a nested position_info row
-    const u = info?.instrument?.underlying || info?.underlying || raw?.underlying;
-    if (u && String(u).toUpperCase() !== String(underlying).toUpperCase()) continue;
-    const rawSize = numOrNull(info?.size) ?? numOrNull(info?.qty) ?? numOrNull(info?.position);
-    if (rawSize == null) continue;
-    let sizeBase = rawSize;
-    const side = String(info?.side || '').toLowerCase();
-    if (side === 'short' || side === 'sell') sizeBase = -Math.abs(rawSize);
-    else if (side === 'long' || side === 'buy') sizeBase = Math.abs(rawSize);
-    if (sizeBase === 0) return null;
-    const entryPrice = numOrNull(info?.avg_entry_price) ?? numOrNull(info?.entry_price) ?? 0;
-    const unrealizedPnl = numOrNull(info?.unrealized_pnl) ?? numOrNull(info?.upnl) ?? 0;
-    return { sizeBase, entryPrice, unrealizedPnl };
+  if (!Array.isArray(json)) return { ok: false, reason: 'positions 非数组' };
+  const want = String(underlying).toUpperCase();
+  for (const raw of json) {
+    const info = raw?.position_info;
+    if (!info || typeof info !== 'object') return { ok: false, reason: '缺 position_info' };
+    const u = String(info.instrument?.underlying || '').toUpperCase();
+    if (u !== want) continue;
+    const qty = numOrNull(info.qty); // already signed: short is negative
+    if (qty == null) return { ok: false, reason: 'qty 不可解析' };
+    if (qty === 0) return { ok: true, pos: null };
+    return { ok: true, pos: {
+      sizeBase: qty,
+      entryPrice: numOrNull(info.avg_entry_price) ?? 0,
+      unrealizedPnl: numOrNull(raw.upnl) ?? 0,        // OUTER level, not in position_info
+      markPrice: numOrNull(raw.price_info?.price),
+      realizedPnl: numOrNull(raw.rpnl),
+      cumFunding: numOrNull(raw.cum_funding),
+      liqPrice: numOrNull(raw.estimated_liquidation_price),
+      lastLocalSequence: numOrNull(info.last_local_sequence),
+    } };
   }
-  return null;
+  return { ok: true, pos: null }; // walked the whole array, no row for this underlying = truly flat
 }
 
 /** Round a base quantity DOWN to the market step (never over-order). */
@@ -218,4 +227,52 @@ function decimalsOf(step) {
   if (s.includes('e-')) return Number(s.split('e-')[1]);
   const dot = s.indexOf('.');
   return dot === -1 ? 0 : s.length - dot - 1;
+}
+
+/**
+ * The instrument IDENTITY STRING used by orders/v2?instrument= and positions.
+ * Format `P-{underlying}-{settlement}-{funding_interval_s}` — confirmed as
+ * `P-BTC-USDC-3600` (3600, NOT metadata's 28800 window). Independent second
+ * proof of the 3600 identity via the working `instrument=` filter.
+ */
+export function instrumentKey(underlying, cfg = {}) {
+  const i = instrumentFor(underlying, cfg);
+  return `P-${i.underlying}-${i.settlement_asset}-${i.funding_interval_s}`;
+}
+
+/**
+ * POST /api/quotes/indicative {instrument, qty} response -> a snapshot used at
+ * init to read REAL precision/leverage/max-notional (none of which metadata
+ * publishes), and by closePosition to get a fresh quote_id (valid ~1-2s).
+ */
+export function parseIndicative(json) {
+  if (!json || typeof json !== 'object') return null;
+  const bidLim = json.qty_limits?.bid || {};
+  const askLim = json.qty_limits?.ask || {};
+  const btcParam = json.margin_params?.params?.asset_params?.BTC
+    || json.margin_params?.params?.asset_params?.[Object.keys(json.margin_params?.params?.asset_params || {})[0]]
+    || {};
+  const fim = numOrNull(btcParam.futures_initial_margin); // 0.02 -> 50x
+  const mr = json.margin_requirements || {};
+  return {
+    quoteId: json.quote_id || null,
+    bid: numOrNull(json.bid),
+    ask: numOrNull(json.ask),
+    markPrice: numOrNull(json.mark_price),
+    indexPrice: numOrNull(json.index_price),
+    minQtyTick: numOrNull(bidLim.min_qty_tick) ?? numOrNull(askLim.min_qty_tick),
+    minQty: numOrNull(bidLim.min_qty) ?? numOrNull(askLim.min_qty),
+    maxQty: numOrNull(bidLim.max_qty) ?? numOrNull(askLim.max_qty),
+    maxLeverage: fim && fim > 0 ? Math.floor(1 / fim) : null,
+    maxNotionalBid: numOrNull(mr.bid_max_notional_delta),
+    maxNotionalAsk: numOrNull(mr.ask_max_notional_delta),
+    liqPrice: numOrNull(mr.estimated_liquidation_price_bid),
+  };
+}
+
+/** Read the { pagination: { next_page } } envelope. next_page===null => last page. */
+export function nextPageOf(json) {
+  if (!json || typeof json !== 'object') return null;
+  const np = json.pagination?.next_page;
+  return np == null ? null : np;
 }

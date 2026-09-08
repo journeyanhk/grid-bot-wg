@@ -20,6 +20,8 @@ export function createExchange(cfg = {}) {
       baseUrl: cfg.baseUrl,
       address: cfg.address,
       token: cfg.token,
+      transport: cfg.transport,
+      pythonPath: cfg.pythonPath,
     });
   }
   return new PaperExchange({
@@ -29,5 +31,7 @@ export function createExchange(cfg = {}) {
     precision: cfg.precision,
     proxy: cfg.proxy,
     baseUrl: cfg.baseUrl,
+    transport: cfg.transport,
+    pythonPath: cfg.pythonPath,
   });
 }
