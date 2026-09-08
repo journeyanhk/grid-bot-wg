@@ -195,4 +195,43 @@ const ANTH = { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:AN
   assert.deepEqual(bulkReq, { coin: 'io:ANTH', oids: [111, 222] }, 'oids 应为数字数组（worker 内转 {coin,oid} 字典）');
 }
 
+{
+  // review4：价格走 allMids 轻端点（~2 权重）替代 metaAndAssetCtxs
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  let called = null;
+  ex._postInfo = async (payload) => {
+    called = payload;
+    if (payload.type === 'allMids') return { 'io:ANTH': '2001.5', 'io:SNDK': '1790.0' };
+    return [];
+  };
+  await ex._refreshPrices();
+  assert.equal(called.type, 'allMids', '价格应走 allMids');
+  assert.equal(called.dex, 'io', 'allMids 带 dex');
+  assert.equal(ex._prices.get(0), 2001.5, '价格已更新');
+}
+
+{
+  // review4：分级节拍——_poll 不重复拉重端点（5s 内只走价格节拍）
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  const calls = [];
+  ex._postInfo = async (payload) => {
+    calls.push(payload.type);
+    if (payload.type === 'metaAndAssetCtxs') return [{ universe: [{ name: 'io:ANTH', szDecimals: 3, maxLeverage: 6, onlyIsolated: true }] }, [{ markPx: '2000' }]];
+    if (payload.type === 'allMids') return { 'io:ANTH': '2001.5' };
+    return [];
+  };
+  ex.markets = new Map();
+  // 模拟首次轮询后立刻二次轮询（间隔 < 5s）：只应触发价格节拍
+  await ex._poll();
+  ex.markets.set(0, ANTH);
+  calls.length = 0;
+  ex._lastPriceAt = Date.now(); // 假装价格刚拉过
+  await ex._poll();
+  assert.ok(!calls.includes('clearinghouseState'), '5s 内不得重复拉账户端点');
+  assert.ok(!calls.includes('frontendOpenOrders'), '5s 内不得重复拉挂单端点');
+  assert.ok(!calls.includes('metaAndAssetCtxs'), '60s 内不得重复拉市场元数据');
+}
+
 console.log('hl tests passed');

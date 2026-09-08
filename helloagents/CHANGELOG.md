@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+## [1.6.6] - 2026-09-08
+
+### 修复（review4：429 治理——分级节拍 + 读取侧退避）
+- HL info 限额 ~1200 权重/分/IP，原 2s 全量轮询 ~1500 权重/分超支 -> 间歇 429
+- 分级节拍：每 2s 价格走 allMids（~2 权重，替代 metaAndAssetCtxs 取价）；每 5s 账户+挂单+成交（clearinghouseState/frontendOpenOrders/userFillsByTime）；每 60s 市场元数据（metaAndAssetCtxs）——预算 ~1500 -> ~585 权重/分
+- 读取侧 429 退避：2-5 秒 backoff + 抖动（原裸 250ms 重试）
+
+### 测试
+- hl.test.js 新增：allMids 价格更新（带 dex）、分级节拍（5s/60s 内不重复拉重端点）；npm test 9 项全绿 + lint 干净
+
 ## [1.6.5] - 2026-09-08
 
 ### 紧急修复（review3：14 单变 42 单事故）

@@ -25,6 +25,11 @@ import {
 } from './market.js';
 
 const POLL_MS = 2000;
+// 429 治理（review4）：HL info 限额 ~1200 权重/分/IP，分级节拍把预算从 ~1500 降到 ~585：
+// 每 2s 价格（allMids ~2 权重）、每 5s 账户+挂单+成交、每 60s 市场元数据
+const POLL_PRICE_MS = 2000;
+const POLL_ACCOUNT_MS = 5000;
+const POLL_MARKETS_MS = 60_000;
 const MAX_BATCH = 15;
 const SAFE_GRID_BATCH = 15;
 const SAFE_GRID_BATCH_PACE_MS = 1500;
@@ -130,7 +135,11 @@ export class HyperliquidExchange extends EventEmitter {
         throw err;
       } catch (e) {
         last = e?.status ? e : new Error(`无法连接 HL 官方接口 ${this.infoUrl}（${e?.cause?.code || e?.code || e?.message || ''}）。程序会保持交易锁定。`, { cause: e });
-        if (attempt + 1 < (retry ? 2 : 1)) await sleep(250);
+        if (attempt + 1 < (retry ? 2 : 1)) {
+          // 读取侧 429 退避（review4）：2-5 秒 backoff + 抖动，替代裸 250ms
+          const backoff = e?.status === 429 ? 2000 + Math.random() * 3000 : 250;
+          await sleep(backoff);
+        }
       }
     }
     throw last;
@@ -400,19 +409,38 @@ export class HyperliquidExchange extends EventEmitter {
   stop() { /* monitoring remains active after the grid stops */ }
   setPollLight(v) { this._pollLight = !!v; }
 
+  // 分级节拍（review4 429 治理）：价格 2s / 账户+挂单+成交 5s / 市场元数据 60s
   async _poll() {
     if (this._polling) return; this._polling = true;
+    const now = Date.now();
     try {
-      await this._loadMarkets();
-      for (const [marketId, price] of this._prices) {
-        if (price > 0) this.emit('price', { marketId, price });
+      if (!this._lastPriceAt || now - this._lastPriceAt >= POLL_PRICE_MS) {
+        this._lastPriceAt = now;
+        await this._refreshPrices();
+        for (const [marketId, price] of this._prices) {
+          if (price > 0) this.emit('price', { marketId, price });
+        }
       }
-      if (!this._pollLight) {
+      if (!this._pollLight && (!this._lastAccountAt || now - this._lastAccountAt >= POLL_ACCOUNT_MS)) {
+        this._lastAccountAt = now;
         await this._refreshAccount(); await this._refreshFills(); await this._refreshOrders();
+      }
+      if (!this._lastMarketsAt || now - this._lastMarketsAt >= POLL_MARKETS_MS) {
+        this._lastMarketsAt = now;
+        await this._loadMarkets();
       }
       this.lastOkAt = Date.now(); this.lastError = null; this.operationalIssue = null;
     } catch (e) { this.lastError = e?.message || String(e); this._setIssue(e); }
     finally { this._polling = false; }
+  }
+  // 价格走轻端点 allMids（~2 权重），替代拉整个 metaAndAssetCtxs 取价
+  async _refreshPrices() {
+    const data = await this._postInfo({ type: 'allMids', dex: this.dex });
+    if (!data || typeof data !== 'object') return;
+    for (const [marketId, m] of this.markets) {
+      const px = Number(data[m.name]);
+      if (px > 0) this._prices.set(marketId, px);
+    }
   }
   _setIssue(error) {
     const message = error?.message || String(error);
