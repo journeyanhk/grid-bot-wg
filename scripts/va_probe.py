@@ -13,6 +13,8 @@ vr-token 贴进环境变量就能在服务器上跑，把三份剩余硬样本�
     python3 scripts/va_probe.py ladder 60 --run  # 最大挂单数 + 分页样本（硬门槛）
     python3 scripts/va_probe.py tick --run       # 价格精度
     python3 scripts/va_probe.py rate             # 限速（只读，120s）
+    python3 scripts/va_probe.py cancel-all --run  # 多轮撤单可靠性样本（1.1s 间隔，最多 5 轮）
+    python3 scripts/va_probe.py reject-trigger --run  # 硬触发风控拒单（临时改杠杆=1）
     python3 scripts/va_probe.py cancel-filled <rfq_id> --run
     python3 scripts/va_probe.py ws               # WS 持仓行结构（只读，可选）
 
@@ -135,20 +137,33 @@ def list_pending():
     return st, rows
 
 
-def cancel_all_pending():
-    st, rows = list_pending()
-    ids = [r.get("rfq_id") for r in rows if r.get("order_type") == "limit"]
-    print(f"收尾：撤 {len(ids)} 张 pending 限价单…")
-    for rid in ids:
-        cancel(rid)
-        time.sleep(0.3)
-    time.sleep(1.0)
-    st2, rows2 = list_pending()
-    remaining = [r for r in rows2 if r.get("order_type") == "limit"]
-    print(f"收尾后 pending={len(remaining)}（应为 0）")
+def cancel_all_pending(max_rounds=5, record=None):
+    """多轮撤单 + 每次记录响应码/体（cancelAll 单轮不可靠）。间隔 1.1s 避免读写抢节拍。"""
+    rounds = []
+    remaining = None
+    for rnd in range(max_rounds):
+        st, rows = list_pending()
+        ids = [r.get("rfq_id") for r in rows if r.get("order_type") == "limit"]
+        print(f"[round {rnd}] pending 限价单 {len(ids)} 张，逐张撤…")
+        resp = []
+        for rid in ids:
+            s, _, body = cancel(rid)
+            resp.append({"rfq_id": rid, "status": s, "body": body})
+            time.sleep(1.1)
+        rounds.append({"round": rnd, "before": len(ids), "responses": resp})
+        time.sleep(1.5)
+        _, rows2 = list_pending()
+        remaining = [r.get("rfq_id") for r in rows2 if r.get("order_type") == "limit"]
+        print(f"[round {rnd}] 撤后剩 {len(remaining)}")
+        if not remaining:
+            break
     st3, _, pos = call("GET", "/api/positions")
     print(f"仓位确认：{json.dumps(pos, ensure_ascii=False)[:300]}")
-    return len(remaining)
+    if record is not None:
+        record["cancel_rounds"] = rounds
+        record["residual"] = remaining
+        record["positions"] = pos
+    return len(remaining or [])
 
 
 # ── subcommands ───────────────────────────────────────────────────────────
@@ -223,7 +238,9 @@ def cmd_reject(_args):
         rfq = (body or {}).get("rfq_id") if isinstance(body, dict) else None
         if rfq and not DRY:
             time.sleep(2.0)
-            s2, _, term = call("GET", f"/api/orders/v2?rfq_id={rfq}")
+            # rfq_id= 过滤器无效（探针已证），改用 status+instrument+limit 拉最近终态行
+            s2, _, term = call("GET", f"/api/orders/v2?status=canceled&instrument={INSTRUMENT_KEY}&limit=3&order_by=created_at&order=desc")
+            rec["terminal_status"] = s2
             rec["terminal"] = term
             cancel(rfq)  # if it somehow rested, pull it
         out[f"qty_{qty}"] = rec
@@ -261,8 +278,52 @@ def cmd_ws(_args):
     dump("ws", {"note": "skipped", "hint": "wss://…/portfolio，发 {\"claims\": token}"})
 
 
+def cmd_cancel_all(_args):
+    """多轮 cancelAll 可靠性样本：逐张撤 pending、每次记响应、最多 5 轮，落盘残留。"""
+    out = {}
+    if DRY:
+        st, rows = list_pending()
+        print(f"[dry] 将对 {sum(1 for r in rows if r.get('order_type')=='limit')} 张 pending 限价单做多轮撤单")
+        dump("cancel-all", {"_dry": True, "pending": len(rows)})
+        return
+    cancel_all_pending(max_rounds=5, record=out)
+    dump("cancel-all", out)
+
+
+def cmd_reject_trigger(_args):
+    """风控拒单（硬触发）：把杠杆设为 1，挂一张远超保证金的对手价单，
+    捕获 failed_risk_checks，最后恢复杠杆并撤单收尾。"""
+    out = {"steps": []}
+    if DRY:
+        print("[dry] set_leverage=1 → 大额越界单 → 捕获 failed_risk_checks → 恢复杠杆")
+        dump("reject-trigger", {"_dry": True})
+        return
+    # 记录当前杠杆（best-effort），设为 1 放大保证金压力
+    s0, _, lev0 = call("GET", "/api/settlement_pools")
+    out["leverage_before"] = lev0
+    sL, _, bL = call("POST", "/api/settlement_pools/set_leverage", {"leverage": "1", "asset": INSTRUMENT["underlying"]})
+    out["steps"].append({"set_leverage_1": {"status": sL, "body": bL}})
+    mp = mark_price()
+    # 对手价 + 超大数量（远超 1x 保证金），触发风控
+    px = f"{mp * 1.05:.2f}"
+    s, h, body = place_limit("buy", px, qty="5")
+    rfq = (body or {}).get("rfq_id") if isinstance(body, dict) else None
+    out["place"] = {"status": s, "px": px, "qty": "5", "body": body}
+    if rfq:
+        time.sleep(2.0)
+        s2, _, term = call("GET", f"/api/orders/v2?status=canceled&instrument={INSTRUMENT_KEY}&limit=3&order_by=created_at&order=desc")
+        out["terminal"] = {"status": s2, "rows": term}
+        cancel(rfq)
+    # 恢复杠杆到 3（保守默认；如需其它值，改这里）
+    sR, _, bR = call("POST", "/api/settlement_pools/set_leverage", {"leverage": "3", "asset": INSTRUMENT["underlying"]})
+    out["steps"].append({"restore_leverage_3": {"status": sR, "body": bR}})
+    cancel_all_pending(max_rounds=3, record=out)
+    dump("reject-trigger", out)
+
+
 COMMANDS = {
     "caps": cmd_caps, "tick": cmd_tick, "ladder": cmd_ladder, "reject": cmd_reject,
+    "reject-trigger": cmd_reject_trigger, "cancel-all": cmd_cancel_all,
     "cancel-filled": cmd_cancel_filled, "rate": cmd_rate, "ws": cmd_ws,
 }
 

@@ -372,6 +372,14 @@ export class GridBot {
     const market = (await this.ex.getMarkets()).find((m) => m.marketId === Number(cfg.marketId));
     if (!market) throw new Error('找不到该市场 marketId=' + cfg.marketId);
 
+    // VA 硬约束：单合约单一订单类型（limit）最多 50 个挂单（探针验证，第 51 个 => HTTP 422）。
+    // 网格挂单与回收阶梯共用这个额度，预留 5 格安全垫，避免补格/回收时触顶被拒。
+    if (market.maxOpenOrders) {
+      const budget = market.maxOpenOrders - 5;
+      if (Number(cfg.gridCount) > budget) {
+        throw new Error(`网格数 ${cfg.gridCount} 超过 ${market.displayName} 的挂单上限（${market.maxOpenOrders} 单/合约，需预留补格与回收阶梯，建议 ≤ ${budget}）。`);
+      }
+    }
     const leverage = Math.min(Number(cfg.leverage || 3), market.maxLeverage || 50);
     const sizeBase = Math.max(Number(cfg.sizeBase), market.minOrderSize || 0);
     this.config = {
@@ -1208,7 +1216,14 @@ export class GridBot {
     const L = this.config.lower, U = this.config.upper;
     const long = pos.sizeBase > 0;
     const existing = new Set([...this.active.values()].filter((o) => o.recovery).map((o) => o.levelIndex));
-    const maxRungs = this.grid.count;
+    // VA 50 单/合约上限：回收阶梯与仍在挂的网格单共用额度。用「上限−已挂非回收单−2 安全垫」
+    // 与网格数取小，避免阶梯把挂单顶到 50 触发 422 被拒。
+    const cap = this.config.marketId != null ? (this.ex.getMarket?.(this.config.marketId)?.maxOpenOrders || 0) : 0;
+    let maxRungs = this.grid.count;
+    if (cap > 0) {
+      const activeNonRecovery = [...this.active.values()].filter((o) => !o.recovery).length;
+      maxRungs = Math.max(existing.size, Math.min(this.grid.count, cap - activeNonRecovery - 2));
+    }
     let placed = 0;
     const room = () => existing.size + placed < maxRungs;
     if (long && price < L) {

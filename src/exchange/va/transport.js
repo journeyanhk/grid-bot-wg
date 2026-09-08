@@ -11,6 +11,7 @@
 // share identical semantics. Token/address travel per-request, so a token refresh
 // needs NO worker restart.
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -18,12 +19,28 @@ import { logger } from '../../log.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..', '..');
+// Resolve the Python interpreter that has curl_cffi. Priority:
+//   1) explicit VA_PYTHON / opts.pythonPath (set this to your venv's python)
+//   2) a bundled venv next to the repo (.va-venv / .runtime/python)
+//   3) plain "python3" on PATH
+function defaultPython() {
+  const candidates = [
+    path.join(ROOT, '.va-venv', 'bin', 'python3'),
+    path.join(ROOT, '.va-venv', 'bin', 'python'),
+    path.join(ROOT, '.va-venv', 'Scripts', 'python.exe'),
+    path.join(ROOT, '.runtime', 'python', 'bin', 'python3'),
+    path.join(ROOT, '.runtime', 'python', 'python.exe'),
+  ];
+  for (const c of candidates) { if (fs.existsSync(c)) return c; }
+  return 'python3';
+}
+
 const START_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 export class VaTransport {
   constructor(opts = {}) {
-    this.python = opts.pythonPath || process.env.VA_PYTHON || 'python3';
+    this.python = opts.pythonPath || process.env.VA_PYTHON || defaultPython();
     this.worker = opts.workerPath || path.join(HERE, 'transport_worker.py');
     this.baseUrl = opts.baseUrl || process.env.VA_BASE_URL || 'https://omni.variational.io';
     this.child = null;

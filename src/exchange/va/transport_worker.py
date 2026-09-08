@@ -26,7 +26,11 @@ import sys
 try:
     from curl_cffi import requests as cffi_requests
 except Exception as exc:  # pragma: no cover - exercised by the JS bridge
-    print(json.dumps({"ready": False, "error": f"无法加载 curl_cffi（请 pip install curl_cffi）: {exc}"}), flush=True)
+    print(json.dumps({"ready": False, "error": (
+        f"无法加载 curl_cffi（{exc}）。当前解释器 {sys.executable} 未安装该库。"
+        "请安装：pip install curl_cffi；或用 VA_PYTHON 指向已装 curl_cffi 的 python"
+        "（例如虚拟环境 .va-venv/bin/python3）。"
+    )}), flush=True)
     raise SystemExit(2)
 
 

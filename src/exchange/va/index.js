@@ -22,6 +22,7 @@ export function createExchange(cfg = {}) {
       token: cfg.token,
       transport: cfg.transport,
       pythonPath: cfg.pythonPath,
+      maxOpenOrders: cfg.maxOpenOrders,
     });
   }
   return new PaperExchange({

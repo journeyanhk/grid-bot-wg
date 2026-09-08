@@ -98,7 +98,7 @@ export class VaHttpClient {
     try { data = text ? JSON.parse(text) : null; }
     catch { data = { _raw: String(text).slice(0, 500) }; }
     if (status < 200 || status >= 300) {
-      const detail = data?.message || data?.error || data?._raw || `HTTP ${status}`;
+      const detail = data?.error_message || data?.message || data?.error || data?._raw || `HTTP ${status}`;
       throw new VaHttpError(`Variational 接口错误 ${status}: ${detail}`, status, data);
     }
     return data;

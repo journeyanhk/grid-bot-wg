@@ -315,6 +315,47 @@ async function ready(http) {
   assert.ok(ex.operationalIssue, 'unreadable positions surface an issue');
 }
 
+// ⑬ maxOpenOrders: default 50 on the market + 422 max-orders pauses opens
+{
+  const http = new MockHttp();
+  const { ex } = await ready(http);
+  assert.equal(ex.getMarket(1).maxOpenOrders, 50, 'market carries the 50-order cap');
+  // Simulate the server 50-order 422 (error_message shape from the probe).
+  const orig = http.post.bind(http);
+  http.post = async (path, body) => {
+    if (path.includes('orders/new/limit')) {
+      const { VaHttpError } = await import('../src/exchange/va/httpclient.js');
+      throw new VaHttpError('Variational 接口错误 422: user exceeds max orders per instrument limit for order type (limit), max orders limit for this type is 50', 422, {});
+    }
+    return orig(path, body);
+  };
+  await assert.rejects(
+    ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 }),
+    /reject/, 'a 50-order 422 surfaces as a reject',
+  );
+  assert.ok(ex._placementPausedUntil > Date.now(), 'opens are paused after the cap 422');
+  await assert.rejects(
+    ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 57000, sizeBase: 0.001, levelIndex: 2 }),
+    /50 单|上限/, 'while paused, new opens are refused locally',
+  );
+}
+
+// ⑭ cancelAll verify-retry: residual orders after all rounds -> false + issue
+{
+  const http = new MockHttp();
+  const { ex } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 });
+  // The order never leaves the pending set no matter how many cancels we send.
+  http.pending = [pendRow(orderId)];
+  const origPost = http.post.bind(http);
+  http.post = async (path, body) => origPost(path, body); // cancels "succeed" but book stays full
+  const ok = await ex.cancelAll(1);
+  assert.equal(ok, false, 'cancelAll reports failure when orders keep resting');
+  assert.ok(ex.operationalIssue && /仍有/.test(ex.operationalIssue.message), 'residual raises an operational issue');
+  const cancelCalls = http.posted.filter((p) => p.path.includes('orders/cancel')).length;
+  assert.ok(cancelCalls >= 4, `retried across rounds (saw ${cancelCalls} cancels)`);
+}
+
 // JWT exp decode is exercised implicitly (MockHttp has no token field -> null exp -> no throw).
 void Buffer;
 

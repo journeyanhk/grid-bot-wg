@@ -21,7 +21,7 @@
 import { Buffer } from 'node:buffer';
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
-import { CloudflareError, VaHttpClient, VaHttpError } from './httpclient.js';
+import { CloudflareError, VaHttpClient, VaHttpError, VaRateLimitError } from './httpclient.js';
 import {
   DEFAULT_PRECISION, candlePeriod, formatStep, instrumentFor, instrumentKey,
   isCanceled, isFilled, nextPageOf, parseCandles, parseIndicative, parseOrderRow,
@@ -46,6 +46,8 @@ function decodeJwtExp(token) {
   } catch { return null; }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export class VariationalExchange extends EventEmitter {
   constructor(opts = {}) {
     super();
@@ -62,6 +64,7 @@ export class VariationalExchange extends EventEmitter {
     this._graceMs = this.pollMs * 2;
     this.apiUrl = opts.baseUrl || undefined;
     this.maxNotional = null;              // from indicative at init (per-side cap for bot preflight)
+    this.maxOpenOrders = Number(opts.maxOpenOrders) > 0 ? Number(opts.maxOpenOrders) : 50; // hard cap: 50/instrument/order-type (verified via probe; 51st => HTTP 422)
     this.balance = null; this.equity = null; this.realizedPnl = null;
     this.lastOkAt = 0; this.lastError = null; this.operationalIssue = null;
     this.rejectedOrders = 0; this.droppedLevels = 0; this.lateFills = 0;
@@ -73,6 +76,7 @@ export class VariationalExchange extends EventEmitter {
     this._tracked = new Map();       // rfqId -> {orderId, marketId, side, price, sizeBase, levelIndex, reduceOnly, createdAt, seen, placedAt, goneFirstAt, canceling, forgotten, internal}
     this._timer = null; this._polling = false; this._tradingReady = false;
     this._lastAlertAt = 0;
+    this._placementPausedUntil = 0; // set on a 50-order-cap 422; refuse new opens until it passes
     this.http = opts.http || new VaHttpClient({
       baseUrl: opts.baseUrl, address: opts.address, token: opts.token,
       transportMode: opts.transport, pythonPath: opts.pythonPath,
@@ -136,7 +140,7 @@ export class VariationalExchange extends EventEmitter {
         stepSize: this.precision.stepSize, stepPrice: this.precision.stepPrice,
         minOrderSize: this.precision.minOrderSize,
         maxLeverage: snap.maxLeverage || this.precision.maxLeverage,
-        maxNotional: null,
+        maxNotional: null, maxOpenOrders: this.maxOpenOrders,
         instrumentType: snap.instrumentType, marketStatus: snap.marketStatus,
         isCloseOnly: snap.isCloseOnly,
       });
@@ -190,6 +194,7 @@ export class VariationalExchange extends EventEmitter {
   }
 
   async getMarkets() { return [...this.markets.values()]; }
+  getMarket(marketId) { return this.markets.get(Number(marketId)) || null; }
   getPosition(marketId) { return this._positions.get(Number(marketId)) || null; }
   getOpenOrders(marketId) { return [...this._tracked.values()].filter((o) => o.marketId === Number(marketId) && !o.internal); }
 
@@ -226,6 +231,10 @@ export class VariationalExchange extends EventEmitter {
     this._assertTradingReady();
     const m = this._market(o.marketId);
     if (m.isCloseOnly && !o.reduceOnly) throw new Error(`Variational ${m.underlying} 处于只减仓模式，拒绝开仓单。`);
+    // Touched the 50-order server cap recently — back off new opens (reduce-only still allowed).
+    if (!o.reduceOnly && this._placementPausedUntil && Date.now() < this._placementPausedUntil) {
+      throw new Error('Variational 下单被拒 reject（已达 50 单/合约上限，暂停开仓约 60s）。');
+    }
     const qty = roundQty(o.sizeBase, m.stepSize);
     if (!(qty >= m.minOrderSize)) throw new Error(`数量 ${o.sizeBase} 低于 ${m.underlying} 最小下单量 ${m.minOrderSize}。`);
     const price = roundPrice(o.price, m.stepPrice);
@@ -248,7 +257,14 @@ export class VariationalExchange extends EventEmitter {
       // containing `reject` so bot._handleExError's back-off regex triggers.
       if (e instanceof VaHttpError && e.status >= 400 && e.status < 500) {
         this.rejectedOrders += 1;
-        if (/limit|max|exceed|capacity/i.test(String(e.message))) this._setIssue(e);
+        // The 50-order/instrument/order-type cap returns HTTP 422 with error_message
+        // "user exceeds max orders per instrument limit ..." — pause opens for 60s.
+        if (/max orders|exceeds max|per instrument limit/i.test(String(e.message))) {
+          this._placementPausedUntil = Date.now() + 60_000;
+          this._setIssue(e); this.operationalIssue.title = 'Variational 挂单已达 50 单上限';
+        } else if (/limit|max|exceed|capacity/i.test(String(e.message))) {
+          this._setIssue(e);
+        }
         throw new Error(`Variational 下单被拒 reject（${e.message}）`, { cause: e });
       }
       throw e;
@@ -273,21 +289,50 @@ export class VariationalExchange extends EventEmitter {
     // ALREADY FILLED — do NOT reset canceling here; let _refreshOrders adjudicate.
     if (t) t.canceling = true;
     try { await this.http.post('/api/orders/cancel', { rfq_id: id }); return true; }
-    catch (e) { this.emit('error', e); return false; }
+    catch (e) {
+      // Log the real status+body a bounded number of times so a systemic cancel
+      // failure (e.g. cancelAll returning non-2xx en masse) is visible in logs.
+      if ((this._cancelErrLogged = (this._cancelErrLogged || 0) + 1) <= 20) {
+        const st = e instanceof VaHttpError ? e.status : 0;
+        logger.warn('va', `撤单失败 rfq=${id} status=${st}：${String(e?.message || e).slice(0, 200)}`);
+      }
+      this.emit('error', e); return false;
+    }
   }
 
   async cancelAll(marketId) {
     this._assertTradingReady();
     const mId = Number(marketId);
-    let open;
-    try { open = await this.fetchOpenOrders(mId); } catch { open = this.getOpenOrders(mId); }
-    for (const o of open) { const t = this._tracked.get(String(o.orderId)); if (t) t.canceling = true; }
-    let ok = true;
-    for (const o of open) {
-      try { await this.http.post('/api/orders/cancel', { rfq_id: String(o.orderId) }); }
-      catch (e) { ok = false; this.emit('error', e); }
+    const MAX_ROUNDS = 4;
+    let residual = [];
+    for (let round = 0; round < MAX_ROUNDS; round += 1) {
+      // Re-read the live set each round: cancelAll is unreliable in one pass, and
+      // an order may have FILLED between rounds (must not treat that as failure).
+      let open;
+      try { open = await this.fetchOpenOrders(mId); }
+      catch { open = this.getOpenOrders(mId); }
+      if (!open.length) { residual = []; break; }
+      for (const o of open) { const t = this._tracked.get(String(o.orderId)); if (t) t.canceling = true; }
+      for (const o of open) {
+        try { await this.http.post('/api/orders/cancel', { rfq_id: String(o.orderId) }); }
+        catch (e) {
+          if (e instanceof VaRateLimitError) { await sleep(e.retryAfterMs || 2000); }
+          // any other failure: leave it for the next round's re-read to adjudicate
+          this.emit('error', e);
+        }
+      }
+      residual = open;
+      // Let the server settle before verifying; widen the gap each round.
+      if (round < MAX_ROUNDS - 1) await sleep(2000 * (round + 1));
     }
-    return ok;
+    // Final verification: anything still resting is a real problem — flag it.
+    let stillOpen;
+    try { stillOpen = await this.fetchOpenOrders(mId); } catch { stillOpen = residual; }
+    if (stillOpen.length) {
+      this._setIssue(new Error(`cancelAll 后仍有 ${stillOpen.length} 个挂单未撤销（已重试 ${MAX_ROUNDS} 轮）。`), true);
+      return false;
+    }
+    return true;
   }
 
   /** Paged GET over orders/v2/trades. Stops at next_page===null, `stop()` hit, or MAX_PAGES. */
@@ -442,13 +487,19 @@ export class VariationalExchange extends EventEmitter {
     let historyById;
     try {
       const hist = [];
+      // Probe-verified: the `rfq_id=` filter is IGNORED, but `status=` + `instrument=`
+      // + `created_at_gte=` work. Query each terminal status separately (cleared=fill,
+      // canceled=cancel/risk-reject) so pagination can't bury a terminal row behind
+      // a wall of still-pending rows.
       for (const m of this.markets.values()) {
         const key = instrumentKey(m.underlying, this.instrumentCfg);
-        const raw = await this._getPaged(
-          (offset) => `/api/orders/v2?instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`,
-          { auth: true, stop: (rows) => rows.filter((r) => wantIds.has(String(r.rfq_id))).length >= wantIds.size },
-        );
-        for (const r of raw) hist.push(r);
+        for (const st of ['cleared', 'canceled']) {
+          const raw = await this._getPaged(
+            (offset) => `/api/orders/v2?status=${st}&instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`,
+            { auth: true, stop: (rows) => rows.filter((r) => wantIds.has(String(r.rfq_id))).length >= wantIds.size },
+          );
+          for (const r of raw) hist.push(r);
+        }
       }
       historyById = new Map(hist.map(parseOrderRow).filter((r) => r?.rfqId).map((r) => [r.rfqId, r]));
     } catch (e) {
@@ -473,8 +524,15 @@ export class VariationalExchange extends EventEmitter {
     for (const t of gone) {
       const row = historyById.get(t.orderId);
       if (!row) {
-        if (!t.goneFirstAt) t.goneFirstAt = now;
-        else if (now - t.goneFirstAt >= RESOLVE_TIMEOUT_MS) {
+        if (!t.goneFirstAt) { t.goneFirstAt = now; continue; }
+        if (now - t.goneFirstAt < RESOLVE_TIMEOUT_MS) continue;
+        // Timed out with no terminal row. For forgotten/internal orders the bot no
+        // longer depends on them (level dropped / internal close) — stop tracking so
+        // they don't leak in _tracked forever. Only NORMAL grid orders raise a hole alert.
+        if (t.internal || t.forgotten) {
+          this._tracked.delete(t.orderId);
+          logger.warn('va', `${t.internal ? '平仓' : '已遗忘'}订单 ${t.orderId}（${t.side} @ ${t.price}）出簿 10 分钟仍无终态记录，停止跟踪。`);
+        } else {
           this.droppedLevels += 1;
           logger.warn('va', `⚠️ 订单 ${t.orderId}（${t.side} @ ${t.price}）出簿 10 分钟仍无法从 orders/v2 确认终态，档位可能空洞（累计 ${this.droppedLevels}），请核对交易所并考虑重启网格补齐。`);
           t.goneFirstAt = now; // re-arm to throttle

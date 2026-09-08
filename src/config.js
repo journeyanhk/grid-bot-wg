@@ -166,6 +166,8 @@ export function getConfig() {
     // Python transport worker and is the only mode that passes CF in prod.
     transport: (process.env.VA_TRANSPORT || 'bridge').toLowerCase() === 'node' ? 'node' : 'bridge',
     pythonPath: process.env.VA_PYTHON || '',
+    // 50 orders/instrument/order-type is a HARD server limit (probe-verified: 51st => HTTP 422).
+    maxOpenOrders: optionalNumber('VA_MAX_OPEN_ORDERS') || 50,
     leverage: Number.isFinite(vaLeverage) ? vaLeverage : null,
     instrument: {
       instrumentType: process.env.VA_INSTRUMENT_TYPE || 'perpetual_future',
