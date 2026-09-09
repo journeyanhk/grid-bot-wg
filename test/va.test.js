@@ -356,6 +356,27 @@ async function ready(http) {
   assert.ok(cancelCalls >= 4, `retried across rounds (saw ${cancelCalls} cancels)`);
 }
 
+// ⑮ benign cancel 400 (already gone / pending clearing) -> NOT a failure, no alarm
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 });
+  // The order is already gone server-side: cancel 400s, and it is NOT in pending.
+  http.pending = [];
+  const { VaHttpError } = await import('../src/exchange/va/httpclient.js');
+  http.post = async (path) => {
+    if (path.includes('orders/cancel')) {
+      throw new VaHttpError('Variational 接口错误 400: unable to cancel rfq', 400, { error_message: 'unable to cancel rfq, either rfq does not exist, is inactive, or is currently pending clearing' });
+    }
+    return null;
+  };
+  const one = await ex.cancelOrder(1, orderId);
+  assert.equal(one, true, 'a benign "does not exist" 400 counts as canceled, not a failure');
+  const all = await ex.cancelAll(1);
+  assert.equal(all, true, 'cancelAll succeeds when the only errors are benign already-gone 400s');
+  assert.equal(ev.errors.length, 0, 'benign cancel 400s raise no error/alarm');
+}
+
 // JWT exp decode is exercised implicitly (MockHttp has no token field -> null exp -> no throw).
 void Buffer;
 

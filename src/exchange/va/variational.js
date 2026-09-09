@@ -290,9 +290,23 @@ export class VariationalExchange extends EventEmitter {
     if (t) t.canceling = true;
     try { await this.http.post('/api/orders/cancel', { rfq_id: id }); return true; }
     catch (e) {
+      // Already gone / mid-clearing: the order is effectively canceled; keep
+      // canceling=true so _refreshOrders resolves a possible race fill. Don't alarm.
+      if (this._isBenignCancelError(e)) return true;
       this._logCancelError(id, e);
       this.emit('error', e); return false;
     }
+  }
+
+  // A cancel that 400s with "does not exist / is inactive / pending clearing" is
+  // BENIGN: the order is already gone (canceled/filled) or mid-clearing (the
+  // fill-vs-cancel race). Not a failure — cancelAll's re-read verifies the book is
+  // clear, and _refreshOrders adjudicates any race fill. Confirmed live: canceling
+  // an already-removed rfq returns exactly this 400.
+  _isBenignCancelError(e) {
+    if (!(e instanceof VaHttpError) || e.status !== 400) return false;
+    const msg = String(e?.data?.error_message || e?.message || '');
+    return /does not exist|is inactive|pending clearing/i.test(msg);
   }
 
   // Bounded (first 20) status+body log for a failed cancel — a systemic failure
@@ -321,10 +335,9 @@ export class VariationalExchange extends EventEmitter {
       for (const o of open) {
         try { await this.http.post('/api/orders/cancel', { rfq_id: String(o.orderId) }); }
         catch (e) {
-          if (e instanceof VaRateLimitError) { await sleep(e.retryAfterMs || 2000); }
-          else this._logCancelError(String(o.orderId), e); // same bounded status+body log as cancelOrder
-          // any other failure: leave it for the next round's re-read to adjudicate
-          this.emit('error', e);
+          if (e instanceof VaRateLimitError) { await sleep(e.retryAfterMs || 2000); this.emit('error', e); }
+          else if (this._isBenignCancelError(e)) { /* already gone / mid-clear: benign, verified by next re-read */ }
+          else { this._logCancelError(String(o.orderId), e); this.emit('error', e); } // real failure: log + surface
         }
       }
       residual = open;
