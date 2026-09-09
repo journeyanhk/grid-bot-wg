@@ -20,6 +20,8 @@ import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
 import { loadSnapshot, saveSnapshot } from './persist.js';
 import { createAiService } from './ai/service.js';
+import { notifier } from './notify.js';
+import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL } from './calendar/index.js';
 import { logger } from './log.js';
 
 // ── 启动配置 ─────────────────────────────────────────────────────────────────
@@ -101,15 +103,21 @@ const deExchange = createDeExchange(cfg.de);
 const exExchange = createExExchange(cfg.ex);
 const rsExchange = createRsExchange(cfg.rs);
 
-const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s) });
-const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s) });
-const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s) });
+const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s),
+  onAlert: (a) => notifier.send({ source: 'de', message: `[Decibel] ${a.message}`, level: a.level, key: a.key ? 'de:' + a.key : undefined }) });
+const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s),
+  onAlert: (a) => notifier.send({ source: 'ex', message: `[Extended] ${a.message}`, level: a.level, key: a.key ? 'ex:' + a.key : undefined }) });
+const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s),
+  onAlert: (a) => notifier.send({ source: 'rs', message: `[RISEx] ${a.message}`, level: a.level, key: a.key ? 'rs:' + a.key : undefined }) });
 const lrExchange = createLrExchange(cfg.lr);
-const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s) });
+const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s),
+  onAlert: (a) => notifier.send({ source: 'lr', message: `[RHC] ${a.message}`, level: a.level, key: a.key ? 'lr:' + a.key : undefined }) });
 const hlExchange = createHlExchange(cfg.hl);
-const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s) });
+const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s),
+  onAlert: (a) => notifier.send({ source: 'hl', message: `[Entropy] ${a.message}`, level: a.level, key: a.key ? 'hl:' + a.key : undefined }) });
 const vaExchange = createVaExchange(cfg.va);
-const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s) });
+const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
+  onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
 // Restore cumulative stats / config from the previous run (display continuity).
 // Trading does NOT auto-resume; stray-order cleanup happens after each exchange
@@ -133,6 +141,38 @@ const aiService = createAiService({
   exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
 });
 aiService.start();
+
+// ── 事件日历调度器：CPI/FOMC/非农 前后 ±window 分钟预警；可选自动暂停入场侧 ──
+const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot };
+let _calPrevTick = Date.now();
+const _calTimer = setInterval(() => {
+  try {
+    const { windowMin, autoPause } = getCalendarConfig();
+    const now = Date.now();
+    for (const { event, edge } of firingEdges(now, _calPrevTick, windowMin)) {
+      const label = TYPE_LABEL[event.type] || event.type;
+      const when = new Date(event.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+      if (edge === 'pre') {
+        notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + event.id + ':pre',
+          title: `事件预警 · ${label}`,
+          message: `⚠️ 约 ${windowMin} 分钟后：${event.title}（北京时间 ${when} 公布）。数据发布前后波动放大，注意单边风险。` });
+      } else {
+        notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + event.id + ':at',
+          title: `事件发布 · ${label}`,
+          message: `⚠️ ${event.title} 现已发布（北京时间 ${when}）。留意行情异动，未来约 ${windowMin} 分钟谨慎操作。` });
+      }
+    }
+    if (autoPause) {
+      const hit = activeWindow(now, windowMin);
+      if (hit) {
+        const until = hit.ts + windowMin * 60_000;
+        for (const b of Object.values(CAL_BOTS)) b.pauseOpening(until, `事件窗口：${hit.title}`);
+      }
+    }
+    _calPrevTick = now;
+  } catch (e) { logger.error('calendar', e?.message || String(e)); }
+}, 30_000);
+if (_calTimer.unref) _calTimer.unref();
 
 // SSE 客户端集合（按交易所分组）
 const deClients = new Set();
@@ -445,6 +485,18 @@ const server = http.createServer(async (request, res) => {
       return;
     }
 
+    // ── 事件日历 API ───────────────────────────────────────────────────────
+    if (p === '/api/calendar') {
+      const now = Date.now();
+      const { windowMin, autoPause } = getCalendarConfig();
+      return send(res, 200, {
+        now, config: { windowMin, autoPause },
+        events: getEvents(),
+        upcoming: upcomingEvents(now, 45),
+        active: activeWindow(now, windowMin),
+      });
+    }
+
     // ── AI 助手 API ───────────────────────────────────────────────────────
     if (p === '/api/ai/status') {
       return send(res, 200, aiService.status());
@@ -501,7 +553,7 @@ const server = http.createServer(async (request, res) => {
       try {
         const { key, value } = await readBody(request);
         const PROXY_KEYS = ['GLOBAL_PROXY','DECIBEL_PROXY','EXTENDED_PROXY','RISEX_PROXY','LIGHTER_PROXY'];
-        const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK'];
+        const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK','SERVERCHAN_SENDKEY','CALENDAR_ALERT_MINUTES','CALENDAR_AUTO_PAUSE'];
         if (!PROXY_KEYS.includes(key) && !AI_KEYS.includes(key)) return send(res, 400, { error: '不允许修改该字段: ' + key });
         // SECURITY: the value is written verbatim into .env. Reject anything that
         // could break out of a single KEY=VALUE line (newlines / control chars)
@@ -525,6 +577,10 @@ const server = http.createServer(async (request, res) => {
             if (!/^\d{1,2}$/.test(val) || Number(val) > 23) return send(res, 400, { error: '日报时间必须是 0-23 的整点小时。' });
           } else if (key === 'AI_BASE_URL' || key === 'NOTIFY_WEBHOOK') {
             if (!/^https?:\/\/\S+$/i.test(val)) return send(res, 400, { error: '必须是 http(s):// 开头的 URL。' });
+          } else if (key === 'CALENDAR_ALERT_MINUTES') {
+            if (!/^\d{1,4}$/.test(val) || Number(val) < 1) return send(res, 400, { error: '预警窗口必须是 ≥1 的分钟数。' });
+          } else if (key === 'CALENDAR_AUTO_PAUSE') {
+            if (!/^(on|off|1|0|true|false|yes|no)$/i.test(val)) return send(res, 400, { error: '自动暂停只能是 on / off。' });
           }
         }
         // 更新内存中的环境变量

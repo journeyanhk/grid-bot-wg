@@ -124,7 +124,12 @@ export class VariationalExchange extends EventEmitter {
     if (!exp) return;
     const msLeft = exp * 1000 - Date.now();
     if (msLeft <= 0) throw new VaHttpError('VARIATIONAL_TOKEN（vr-token）已过期，请重新获取会话 token 后重连。', 401);
-    if (msLeft < TOKEN_WARN_MS) logger.warn('va', `vr-token 将在约 ${Math.max(1, Math.round(msLeft / 3600_000))} 小时后过期，请及时更新 VARIATIONAL_TOKEN。`);
+    if (msLeft < TOKEN_WARN_MS) {
+      const hrs = Math.max(1, Math.round(msLeft / 3600_000));
+      logger.warn('va', `vr-token 将在约 ${hrs} 小时后过期，请及时更新 VARIATIONAL_TOKEN。`);
+      // 转发到告警环 / 通知总线（⚠️ 前缀→warn 级推送），让用户在手机上及时看到。
+      this.emit('error', new Error(`⚠️ Variational 会话 token 将在约 ${hrs} 小时后过期，请尽快更新 VARIATIONAL_TOKEN 并重连，否则实盘交易会中断。`));
+    }
   }
 
   async _loadMarkets() {

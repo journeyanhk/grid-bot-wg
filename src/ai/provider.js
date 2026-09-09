@@ -29,6 +29,7 @@ export function getAiConfig() {
     telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChat: process.env.TELEGRAM_CHAT_ID || '',
     webhook: process.env.NOTIFY_WEBHOOK || '',
+    serverchanKey: process.env.SERVERCHAN_SENDKEY || '',
   };
 }
 
@@ -122,23 +123,44 @@ export function extractJson(text) {
   return null;
 }
 
-/** 推送通知：Telegram + 通用 Webhook，配了哪个发哪个；失败只记日志绝不抛。 */
-export async function notify(text) {
+/**
+ * 推送通知：Telegram + 通用 Webhook + Server酱，配了哪个发哪个；失败只记日志绝不抛。
+ * @param {string} text 正文
+ * @param {{title?:string}} [opts] 可选标题（Server酱需要 title；Telegram/Webhook 会拼进正文）
+ */
+export async function notify(text, opts = {}) {
   const cfg = getAiConfig();
+  const body = String(text).slice(0, 3800);
+  const title = String(opts.title || body.split('\n')[0] || '网格机器人').slice(0, 60);
   const jobs = [];
   if (cfg.telegramToken && cfg.telegramChat) {
     jobs.push(fetch(`https://api.telegram.org/bot${cfg.telegramToken}/sendMessage`, {
       method: 'POST', signal: AbortSignal.timeout(15000),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: cfg.telegramChat, text: String(text).slice(0, 3800) }),
+      body: JSON.stringify({ chat_id: cfg.telegramChat, text: body }),
     }).then((r) => { if (!r.ok) logger.error('notify', 'Telegram 发送失败 HTTP ' + r.status); }));
   }
   if (cfg.webhook) {
     jobs.push(fetch(cfg.webhook, {
       method: 'POST', signal: AbortSignal.timeout(15000),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: String(text).slice(0, 3800) }),
+      body: JSON.stringify({ text: body, title }),
     }).then((r) => { if (!r.ok) logger.error('notify', 'Webhook 发送失败 HTTP ' + r.status); }));
+  }
+  // Server酱（sctapi.ftqq.com）：POST 表单 title + desp（desp 支持 markdown）。
+  if (cfg.serverchanKey) {
+    const form = new URLSearchParams({ title, desp: body });
+    // Server酱³（新版）sendkey 形如 sctp<uid>t...，走 <uid>.push.ft07.com；
+    // 经典 Turbo（SCT... 开头）走 sctapi.ftqq.com。
+    const sc3 = cfg.serverchanKey.match(/^sctp(\d+)t/i);
+    const scUrl = sc3
+      ? `https://${sc3[1]}.push.ft07.com/send/${cfg.serverchanKey}.send`
+      : `https://sctapi.ftqq.com/${cfg.serverchanKey}.send`;
+    jobs.push(fetch(scUrl, {
+      method: 'POST', signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    }).then((r) => { if (!r.ok) logger.error('notify', 'Server酱 发送失败 HTTP ' + r.status); }));
   }
   if (!jobs.length) return false;
   await Promise.allSettled(jobs);

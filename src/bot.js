@@ -35,6 +35,11 @@ export class GridBot {
     this._reconTimer = null;
     this.recovery = false;          // standalone reduce-only recovery mode
     this._onChange = typeof opts.onChange === 'function' ? opts.onChange : null; // persistence hook
+    this._onAlert = typeof opts.onAlert === 'function' ? opts.onAlert : null;   // 通知总线钩子（server 接线，含来源标签）
+    this._entryFillLog = [];         // 成交流哨兵：近 1h 入场成交 {t, side}（同向连续=单边启动）
+    this._lastTrendAlertAt = 0;      // 成交流哨兵推送去重
+    this._trendFillN = Number(process.env.TREND_FILL_N) || 8;   // 触发阈值：1h 内同向入场 ≥N 格
+    this._trendFillWindowMs = 60 * 60_000;
     this._onFill = (f) => this._handleFill(f);
     this._onPrice = (p) => this._handlePrice(p);
     // CRITICAL: an EventEmitter that emits 'error' with no listener crashes the
@@ -1117,6 +1122,9 @@ export class GridBot {
     }
     logger.info('bot', `成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName, closing });
 
+    // 成交流哨兵：仅统计【入场】成交（非回收、非平仓腿）。
+    if (!isRecovery && !closing) this._checkTrendFills(f.side);
+
     // Recovery-ladder fills are pure reduce-only EXITS of stranded inventory —
     // never re-quote a replacement for them.
     if (!isRecovery && this.grid) {
@@ -1619,11 +1627,52 @@ export class GridBot {
   }
   _stopReconcileTimer() { if (this._reconTimer) { clearInterval(this._reconTimer); this._reconTimer = null; } }
 
-  _alert(message) {
+  _alert(message, opts = {}) {
     this.alerts.unshift({ t: Date.now(), message });
     if (this.alerts.length > 30) this.alerts.pop();
     // 同步写入结构化日志（审计追溯），失败不影响主流程
     logger.warn('bot', String(message));
+    // 转发到通知总线（server 注入来源标签 + 多渠道推送 + 防疲劳）。
+    // level/key 可由调用点显式指定，否则由总线从 ⚠️/❌ 文本推断。失败绝不影响交易。
+    try { this._onAlert?.({ t: Date.now(), message: String(message), level: opts.level, key: opts.key }); }
+    catch { /* 通知失败不影响主流程 */ }
+  }
+
+  /**
+   * 外部（事件日历）请求暂停【入场侧】到某时刻：出场/减仓腿不受影响，窗口过后
+   * _refillPausedUntil 自然过期即恢复。幂等——只在真正延长暂停时告警一次。
+   */
+  pauseOpening(untilTs, reason = '') {
+    if (!this.running || !(untilTs > Date.now())) return;
+    if (untilTs > this._refillPausedUntil) {
+      this._refillPausedUntil = untilTs;
+      const t = new Date(untilTs).toLocaleTimeString('zh-CN');
+      this._alert(`⏸ 已暂停入场侧至 ${t}${reason ? '（' + reason + '）' : ''}；出场/减仓腿照常，窗口结束自动恢复。`, { level: 'warn', key: 'calendar-pause' });
+    }
+  }
+
+  /**
+   * 成交流哨兵（文档力荐、回测正期望的免费传感器）：连续同向【入场】成交 = 价格
+   * 正在切穿梯子。1h 内同向入场 ≥N 格 → 只发通知不碰订单（动作型在 BTC 网格上负期望）。
+   */
+  _checkTrendFills(side) {
+    const now = Date.now();
+    this._entryFillLog.push({ t: now, side });
+    this._entryFillLog = this._entryFillLog.filter((e) => now - e.t < this._trendFillWindowMs);
+    // 统计末尾连续同向段长度
+    let run = 0;
+    for (let i = this._entryFillLog.length - 1; i >= 0; i--) {
+      if (this._entryFillLog[i].side === side) run++; else break;
+    }
+    if (run >= this._trendFillN && now - this._lastTrendAlertAt > 30 * 60_000) {
+      this._lastTrendAlertAt = now;
+      const dir = side === 'buy' ? '下跌' : '上涨';
+      this._alert(
+        `⚠️ 成交流哨兵：1 小时内连续 ${run} 格同向${side === 'buy' ? '买入' : '卖出'}入场且无回补，`
+        + `${this.config?.displayName || ''} 疑似单边${dir}启动。请复核是否需要停止/平仓/撤单（本提醒不自动动手）。`,
+        { level: 'warn', key: 'trend-fills' },
+      );
+    }
   }
 
   /** 记录一次自动停机（供冷静门自动重启）。仅动态网格启用时记录。 */

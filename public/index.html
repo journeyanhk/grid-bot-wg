@@ -325,6 +325,22 @@ details.dyn input[type=number] { width: 100%; }
 details.dyn .row { gap: 8px; margin-top: 6px; }
 .dynstat { font-size: 11px; color: var(--mut2); margin-top: 2px; }
 
+.cal-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px; }
+.cal-nav { display:flex; gap:6px; align-items:center; }
+.cal-nav button { padding:4px 10px; font-size:13px; border:1px solid var(--border2); background:var(--panel); color:var(--txt); border-radius:6px; cursor:pointer; font-family:inherit; }
+.cal-nav button:hover { border-color:var(--pur); }
+.cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+.cal-dow { text-align:center; font-size:11px; color:var(--mut); padding:4px 0; }
+.cal-cell { min-height:56px; border:1px solid var(--border); border-radius:6px; padding:4px; background:var(--panel2); display:flex; flex-direction:column; gap:2px; }
+.cal-cell.other { visibility:hidden; }
+.cal-cell.today { border-color:var(--pur); box-shadow:0 0 0 1px var(--pur) inset; }
+.cal-date { font-size:11px; color:var(--mut2); }
+.cal-ev { font-size:10px; padding:1px 4px; border-radius:4px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:default; }
+.cal-ev.CPI { background:#d97706; }
+.cal-ev.FOMC { background:#dc2626; }
+.cal-ev.NFP { background:#2563eb; }
+.cal-legend { display:flex; gap:14px; font-size:11px; color:var(--mut2); margin-top:10px; flex-wrap:wrap; }
+.cal-dot { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; vertical-align:middle; }
 /* ── IP Config panel ── */
 .ip-section { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg2); margin-bottom: 10px; }
 .ip-section-title { font-size: 11px; font-weight: 700; color: var(--mut2); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 8px; }
@@ -457,6 +473,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
   <button class="tab-btn" onclick="switchTab('hl')"><span class="dot-hl">●</span> Entropy</button>
   <button class="tab-btn" onclick="switchTab('va')"><span class="dot-va">●</span> Variational</button>
   <button class="tab-btn" onclick="switchTab('ai')">🤖 AI助手</button>
+  <button class="tab-btn" onclick="switchTab('calendar')">📅 事件</button>
   <button class="tab-btn" onclick="switchTab('settings')">⚙ IP配置</button>
 </div>
 
@@ -1576,6 +1593,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div><label>Telegram Bot Token（推送用，可选）</label><input id="ai-tg-token" type="password" placeholder="123456:ABC-..."></div>
       <div><label>Telegram Chat ID（可选）</label><input id="ai-tg-chat" placeholder="例：123456789"></div>
       <div><label>通用 Webhook（可选，POST {"text":...}）</label><input id="ai-webhook" placeholder="https://..."></div>
+      <div><label>Server酱 SendKey（可选，微信推送）</label><input id="ai-serverchan" type="password" placeholder="SCT... 或 sctp..."></div>
     </div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn btn-smart" style="margin:0;width:auto;padding:8px 22px" onclick="aiSaveConfig(this)">保存配置</button>
@@ -1620,6 +1638,58 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <input id="ai-chat-input" placeholder="例：三个所现在整体情况怎么样？ / 把 Extended 上边界调到 66000" style="flex:1" onkeydown="if(event.key==='Enter')aiChatSend()">
       <button class="btn btn-smart" style="margin:0;width:auto;padding:8px 18px" onclick="aiChatSend()">发送</button>
     </div>
+  </div>
+</div>
+</div>
+
+<!-- TAB: 事件日历 -->
+<div id="tab-calendar" class="tab-panel">
+<div class="wrap" style="max-width:900px">
+  <div class="panel" style="margin-top:4px">
+    <div class="panel-title">📅 事件日历（CPI / FOMC / 非农）</div>
+    <p class="muted" style="margin-bottom:12px;line-height:1.6">
+      这三类经济数据时间表提前公布、零误报，是网格最该盯的「可提前预警」信号。数据发布前后波动放大，
+      系统会在事件<b>前后各 N 分钟</b>推送提醒（可选自动暂停入场侧）。<br>
+      时间为你本地时区显示；数据为 2026 全年预填，请每年（或遇改期）核对官方日程。
+    </p>
+    <div class="cal-head">
+      <div class="cal-nav">
+        <button onclick="calPrevMonth()">‹ 上月</button>
+        <b id="cal-title" style="min-width:110px;text-align:center">—</b>
+        <button onclick="calNextMonth()">下月 ›</button>
+        <button onclick="calToday()">今天</button>
+      </div>
+      <div id="cal-active" style="color:var(--red,#dc2626);font-size:12px"></div>
+    </div>
+    <div class="cal-grid" id="cal-dow-row"></div>
+    <div class="cal-grid" id="cal-grid" style="margin-top:4px"></div>
+    <div class="cal-legend">
+      <span><i class="cal-dot" style="background:#dc2626"></i>FOMC 利率决议</span>
+      <span><i class="cal-dot" style="background:#d97706"></i>CPI 通胀数据</span>
+      <span><i class="cal-dot" style="background:#2563eb"></i>非农就业报告</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">⏰ 预警设置</div>
+    <div class="ai-grid">
+      <div><label>预警窗口（事件前后各多少分钟）</label><input id="cal-window" type="number" min="1" placeholder="30"></div>
+      <div><label>窗口内自动暂停入场侧</label>
+        <select id="cal-autopause"><option value="off">否 · 仅通知（推荐）</option><option value="on">是 · 暂停开仓（保留出场腿）</option></select></div>
+    </div>
+    <p class="muted" style="margin-top:8px;font-size:12px;line-height:1.6">
+      按回测判决，BTC 网格上「自动动手」是负期望，默认仅通知。若你想在数据发布窗口更保守，可开自动暂停：
+      窗口内只暂停开仓、保留出场/减仓腿，窗口结束自动恢复。
+    </p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-smart" style="margin:0;width:auto;padding:8px 22px" onclick="calSaveConfig(this)">保存设置</button>
+    </div>
+    <div id="cal-cfg-status" class="muted" style="margin-top:8px;font-size:12px">—</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">🔜 未来事件</div>
+    <div id="cal-upcoming" class="muted">加载中…</div>
   </div>
 </div>
 </div>
@@ -1883,8 +1953,9 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   $('tab-' + name).classList.add('active');
-  document.querySelectorAll('.tab-btn')[['overview','de','ex','rs','lr','hl','va','ai','settings'].indexOf(name)].classList.add('active');
+  document.querySelectorAll('.tab-btn')[['overview','de','ex','rs','lr','hl','va','ai','calendar','settings'].indexOf(name)].classList.add('active');
   if (name === 'ai') aiRefreshStatus();
+  if (name === 'calendar') calLoad();
 }
 
 // ── 时钟 ────────────────────────────────────────────────────────────────────
@@ -2628,12 +2699,90 @@ async function loadProxyConfig() {
 }
 loadProxyConfig();
 
+// ══ 事件日历 ═══════════════════════════════════════════════════════════════
+const CAL_TYPE_LABEL = { CPI:'CPI', FOMC:'FOMC', NFP:'非农' };
+const CAL_DOW = ['日','一','二','三','四','五','六'];
+let calState = { events:[], upcoming:[], active:null, config:{windowMin:30,autoPause:false}, now:Date.now(), viewY:null, viewM:null };
+
+function calColor(t){ return t==='FOMC'?'#dc2626':t==='CPI'?'#d97706':'#2563eb'; }
+
+async function calLoad(){
+  try{
+    const r = await apiFetch('/api/calendar'); const d = await r.json();
+    calState.events = d.events||[]; calState.upcoming = d.upcoming||[];
+    calState.active = d.active||null; calState.config = d.config||calState.config; calState.now = d.now||Date.now();
+    if (calState.viewY==null){ const n=new Date(calState.now); calState.viewY=n.getFullYear(); calState.viewM=n.getMonth()+1; }
+    $('cal-window').value = calState.config.windowMin;
+    $('cal-autopause').value = calState.config.autoPause ? 'on' : 'off';
+    $('cal-active').textContent = calState.active ? ('⚠ 当前处于事件窗口：'+calState.active.title) : '';
+    calRenderDow(); calRenderMonth(); calRenderUpcoming();
+  }catch(e){ const b=$('cal-upcoming'); if(b) b.textContent='加载失败：'+(e.message||e); }
+}
+function calRenderDow(){
+  const row=$('cal-dow-row'); if(!row) return; row.innerHTML='';
+  for(const d of CAL_DOW){ const c=document.createElement('div'); c.className='cal-dow'; c.textContent=d; row.appendChild(c); }
+}
+function calRenderMonth(){
+  const y=calState.viewY, m=calState.viewM;
+  $('cal-title').textContent = y+' 年 '+m+' 月';
+  const startDow=new Date(y,m-1,1).getDay();
+  const daysInMonth=new Date(y,m,0).getDate();
+  const evByDay={};
+  for(const ev of calState.events){ const d=new Date(ev.ts); if(d.getFullYear()===y && d.getMonth()+1===m){ (evByDay[d.getDate()]=evByDay[d.getDate()]||[]).push(ev); } }
+  const grid=$('cal-grid'); grid.innerHTML='';
+  const tod=new Date(calState.now);
+  for(let i=0;i<startDow;i++){ const c=document.createElement('div'); c.className='cal-cell other'; grid.appendChild(c); }
+  for(let day=1;day<=daysInMonth;day++){
+    const c=document.createElement('div'); c.className='cal-cell';
+    if(tod.getFullYear()===y && tod.getMonth()+1===m && tod.getDate()===day) c.classList.add('today');
+    const dd=document.createElement('div'); dd.className='cal-date'; dd.textContent=day; c.appendChild(dd);
+    for(const ev of (evByDay[day]||[])){
+      const e=document.createElement('div'); e.className='cal-ev '+ev.type;
+      const t=new Date(ev.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+      e.textContent=(CAL_TYPE_LABEL[ev.type]||ev.type)+' '+t;
+      e.title=ev.title+' · '+new Date(ev.ts).toLocaleString('zh-CN');
+      c.appendChild(e);
+    }
+    grid.appendChild(c);
+  }
+}
+function calRenderUpcoming(){
+  const box=$('cal-upcoming'); if(!box) return;
+  if(!calState.upcoming.length){ box.textContent='未来 45 天内无 CPI/FOMC/非农事件。'; return; }
+  box.innerHTML = calState.upcoming.map(ev=>{
+    const dt=new Date(ev.ts); const days=Math.round((ev.ts-calState.now)/86400000);
+    const when=dt.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+    const rel=days<=0?'今天':(days+' 天后');
+    return '<div style="padding:5px 0;border-bottom:1px solid var(--border);font-size:12px"><span class="cal-dot" style="background:'+calColor(ev.type)+'"></span>'
+      + when+' · '+ev.title+' <span class="muted">（'+rel+'）</span></div>';
+  }).join('');
+}
+function calPrevMonth(){ if(--calState.viewM<1){calState.viewM=12;calState.viewY--;} calRenderMonth(); }
+function calNextMonth(){ if(++calState.viewM>12){calState.viewM=1;calState.viewY++;} calRenderMonth(); }
+function calToday(){ const n=new Date(calState.now); calState.viewY=n.getFullYear(); calState.viewM=n.getMonth()+1; calRenderMonth(); }
+async function calSaveConfig(btn){
+  if(btn) btn.disabled=true;
+  try{
+    const items=[['CALENDAR_ALERT_MINUTES', String($('cal-window').value||'30').trim()],
+                 ['CALENDAR_AUTO_PAUSE', $('cal-autopause').value]];
+    for(const [key,value] of items){
+      const r=await apiFetch('/api/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})});
+      const j=await r.json();
+      if(j.error){ $('cal-cfg-status').textContent='❌ '+key+'：'+j.error; if(btn) btn.disabled=false; return; }
+    }
+    $('cal-cfg-status').textContent='✅ 已保存并立即生效（已写入 .env）';
+    calLoad();
+  }catch(e){ $('cal-cfg-status').textContent='❌ 保存失败：'+(e.message||e); }
+  if(btn) btn.disabled=false;
+}
+
+
 // ══ AI 助手 ═══════════════════════════════════════════════════════════════
 const AI_ENV_MAP = {
   'ai-baseurl':'AI_BASE_URL', 'ai-key':'AI_API_KEY',
   'ai-model':'AI_MODEL', 'ai-model-small':'AI_MODEL_SMALL',
   'ai-sentinel-min':'AI_SENTINEL_MINUTES', 'ai-report-hour':'AI_REPORT_HOUR',
-  'ai-tg-token':'TELEGRAM_BOT_TOKEN', 'ai-tg-chat':'TELEGRAM_CHAT_ID', 'ai-webhook':'NOTIFY_WEBHOOK',
+  'ai-tg-token':'TELEGRAM_BOT_TOKEN', 'ai-tg-chat':'TELEGRAM_CHAT_ID', 'ai-webhook':'NOTIFY_WEBHOOK', 'ai-serverchan':'SERVERCHAN_SENDKEY',
 };
 // 服务商预设：proto=后端协议（openai 兼容 / anthropic / gemini），base=接口地址，
 // models=常用模型（datalist 下拉，可手动输入任意新模型），main/small=选中后自动填的默认值
