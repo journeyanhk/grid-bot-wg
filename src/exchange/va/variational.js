@@ -290,14 +290,19 @@ export class VariationalExchange extends EventEmitter {
     if (t) t.canceling = true;
     try { await this.http.post('/api/orders/cancel', { rfq_id: id }); return true; }
     catch (e) {
-      // Log the real status+body a bounded number of times so a systemic cancel
-      // failure (e.g. cancelAll returning non-2xx en masse) is visible in logs.
-      if ((this._cancelErrLogged = (this._cancelErrLogged || 0) + 1) <= 20) {
-        const st = e instanceof VaHttpError ? e.status : 0;
-        logger.warn('va', `撤单失败 rfq=${id} status=${st}：${String(e?.message || e).slice(0, 200)}`);
-      }
+      this._logCancelError(id, e);
       this.emit('error', e); return false;
     }
+  }
+
+  // Bounded (first 20) status+body log for a failed cancel — a systemic failure
+  // (cancelAll returning non-2xx en masse, or a "zombie" order) is otherwise
+  // invisible. Shared by cancelOrder and cancelAll so both paths log identically.
+  _logCancelError(id, e) {
+    if ((this._cancelErrLogged = (this._cancelErrLogged || 0) + 1) > 20) return;
+    const st = e instanceof VaHttpError ? e.status : 0;
+    const body = e?.data != null ? ` body=${String(JSON.stringify(e.data)).slice(0, 200)}` : '';
+    logger.warn('va', `撤单失败 rfq=${id} status=${st}：${String(e?.message || e).slice(0, 200)}${body}`);
   }
 
   async cancelAll(marketId) {
@@ -317,6 +322,7 @@ export class VariationalExchange extends EventEmitter {
         try { await this.http.post('/api/orders/cancel', { rfq_id: String(o.orderId) }); }
         catch (e) {
           if (e instanceof VaRateLimitError) { await sleep(e.retryAfterMs || 2000); }
+          else this._logCancelError(String(o.orderId), e); // same bounded status+body log as cancelOrder
           // any other failure: leave it for the next round's re-read to adjudicate
           this.emit('error', e);
         }
