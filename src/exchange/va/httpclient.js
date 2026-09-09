@@ -81,7 +81,8 @@ export class VaHttpClient {
   }
 
   // Shared Cloudflare-challenge + error shaping for BOTH transports.
-  _process(status, text, getHeader) {
+  _process(status, text, getHeader, method = '', path = '') {
+    const where = method || path ? ` (${method} ${path})` : '';
     const cfMitigated = getHeader('cf-mitigated');
     const looksChallenge = /just a moment|challenge-platform|cf-chl|enable javascript and cookies/i.test(text || '');
     if ((status === 403 || status === 503) && (cfMitigated || looksChallenge)) {
@@ -90,7 +91,7 @@ export class VaHttpClient {
     if (status === 429) {
       const ra = Number(getHeader('retry-after'));
       const retryAfterMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 2000;
-      throw new VaRateLimitError(`Variational 限速（HTTP 429），${Math.round(retryAfterMs / 1000)}s 后重试。`, retryAfterMs);
+      throw new VaRateLimitError(`Variational 限速（HTTP 429）${where}，${Math.round(retryAfterMs / 1000)}s 后重试。`, retryAfterMs);
     }
     let data;
     // Omni returns bare `null` on a successful cancel (HTTP 2xx). JSON.parse('null')
@@ -99,7 +100,12 @@ export class VaHttpClient {
     catch { data = { _raw: String(text).slice(0, 500) }; }
     if (status < 200 || status >= 300) {
       const detail = data?.error_message || data?.message || data?.error || data?._raw || `HTTP ${status}`;
-      throw new VaHttpError(`Variational 接口错误 ${status}: ${detail}`, status, data);
+      const err = new VaHttpError(`Variational 接口错误 ${status}${where}: ${detail}`, status, data);
+      // 5xx and network-layer (status 0) failures are TRANSIENT: the next poll
+      // clears them. Only 4xx is a sticky, caller-actionable error. Without this
+      // an Omni 503 blip leaves the dashboard stuck on "异常" until manual reconnect.
+      err.transient = status >= 500 || status === 0;
+      throw err;
     }
     return data;
   }
@@ -110,12 +116,12 @@ export class VaHttpClient {
       try {
         res = await this.transport.request(method, path, { body, auth, token: this.token, address: this.address });
       } catch (e) {
-        throw new VaHttpError(`连接 Variational 失败（传输层）：${e?.message || e}`, 0);
+        { const err = new VaHttpError(`连接 Variational 失败（传输层）：${e?.message || e}`, 0); err.transient = true; throw err; }
       }
       // MockHttp (tests) may already return parsed data instead of {status,text}.
       if (res && typeof res === 'object' && 'status' in res && ('text' in res || 'headers' in res)) {
         const headers = res.headers || {};
-        return this._process(Number(res.status), res.text ?? '', (k) => headers[String(k).toLowerCase()]);
+        return this._process(Number(res.status), res.text ?? '', (k) => headers[String(k).toLowerCase()], method, path);
       }
       return res;
     }
@@ -130,10 +136,10 @@ export class VaHttpClient {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
-      throw new VaHttpError(`连接 Variational 失败：${e?.message || e}`, 0);
+      { const err = new VaHttpError(`连接 Variational 失败：${e?.message || e}`, 0); err.transient = true; throw err; }
     }
     const text = await res.text();
-    return this._process(res.status, text, (k) => res.headers.get(k));
+    return this._process(res.status, text, (k) => res.headers.get(k), method, path);
   }
 
   get(path, { auth = false } = {}) { return this._fetch('GET', path, { auth }); }

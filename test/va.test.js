@@ -377,6 +377,31 @@ async function ready(http) {
   assert.equal(ev.errors.length, 0, 'benign cancel 400s raise no error/alarm');
 }
 
+// ⑯ transient flagging: 5xx / network(0) are transient (auto-clear), 4xx is sticky
+{
+  const { VaHttpClient, VaHttpError } = await import('../src/exchange/va/httpclient.js');
+  const mkClient = (status, text = '', headers = {}) => new VaHttpClient({
+    token: 't', transport: { async request() { return { status, text, headers }; } },
+  });
+  // 503 -> transient
+  await assert.rejects(mkClient(503).get('/api/orders/v2'), (e) => {
+    assert.ok(e instanceof VaHttpError && e.status === 503 && e.transient === true, '503 is transient');
+    assert.ok(/GET \/api\/orders\/v2/.test(e.message), '503 message carries method+path');
+    return true;
+  });
+  // 400 -> NOT transient
+  await assert.rejects(mkClient(400, JSON.stringify({ error_message: 'bad' })).get('/api/x'), (e) => {
+    assert.ok(e instanceof VaHttpError && e.status === 400 && e.transient !== true, '400 is sticky');
+    return true;
+  });
+  // transport throw (network) -> status 0, transient
+  const netClient = new VaHttpClient({ token: 't', transport: { async request() { throw new Error('ECONNRESET'); } } });
+  await assert.rejects(netClient.get('/api/x'), (e) => {
+    assert.ok(e instanceof VaHttpError && e.status === 0 && e.transient === true, 'network error is transient');
+    return true;
+  });
+}
+
 // JWT exp decode is exercised implicitly (MockHttp has no token field -> null exp -> no throw).
 void Buffer;
 
