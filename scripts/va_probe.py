@@ -14,6 +14,7 @@ vr-token 贴进环境变量就能在服务器上跑，把三份剩余硬样本�
     python3 scripts/va_probe.py tick --run       # 价格精度
     python3 scripts/va_probe.py rate             # 限速（只读，120s）
     python3 scripts/va_probe.py cancel-one --run  # 撤单机制体检：新挂一张再撤，轮询确认
+    python3 scripts/va_probe.py cancel-id <rfq...> --run  # 定向撤残留单（复现 UI 单张撤单）
     python3 scripts/va_probe.py cancel-all --run  # 多轮撤单可靠性样本（1.1s 间隔，最多 5 轮）
     python3 scripts/va_probe.py reject-trigger --run  # 硬触发风控拒单（临时改杠杆=1）
     python3 scripts/va_probe.py cancel-filled <rfq_id> --run
@@ -73,9 +74,11 @@ def call(method, path, body=None, auth=True):
         if not TOKEN:
             raise RuntimeError("缺少 VARIATIONAL_TOKEN")
         h["Cookie"] = f"vr-token={TOKEN}" + (f"; vr-connected-address={ADDR}" if ADDR else "")
-        h["Referer"] = f"{BASE}/portfolio"
+        # 抓包显示 UI 下单/撤单用的是 /perpetual/BTC 这个 Referer（不是 /portfolio）；
+        # 写请求对齐 UI，读请求仍用 /portfolio。
+        h["Referer"] = f"{BASE}/perpetual/{INSTRUMENT['underlying']}" if path.startswith("/api/orders") else f"{BASE}/portfolio"
     else:
-        h["Referer"] = f"{BASE}/perpetual/BTC"
+        h["Referer"] = f"{BASE}/perpetual/{INSTRUMENT['underlying']}"
     kwargs = {"headers": h, "timeout": 15}
     if body is not None:
         kwargs["json"] = body
@@ -144,17 +147,22 @@ def cancel_all_pending(max_rounds=5, record=None):
     remaining = None
     for rnd in range(max_rounds):
         st, rows = list_pending()
-        ids = [r.get("rfq_id") for r in rows if r.get("order_type") == "limit"]
-        print(f"[round {rnd}] pending 限价单 {len(ids)} 张，逐张撤…")
+        # 撤 ALL pending（不再只挑 order_type==limit）——之前只撤 limit，若残留单是别的
+        # 类型会被静默跳过、看起来像"撤不掉"。这里连 order_type 一起记录，一目了然。
+        targets = [(r.get("rfq_id"), r.get("order_type")) for r in rows if r.get("rfq_id")]
+        types = {}
+        for _, ot in targets:
+            types[ot] = types.get(ot, 0) + 1
+        print(f"[round {rnd}] pending {len(targets)} 张（类型分布 {types}），逐张撤…")
         resp = []
-        for rid in ids:
+        for rid, ot in targets:
             s, _, body = cancel(rid)
-            resp.append({"rfq_id": rid, "status": s, "body": body})
+            resp.append({"rfq_id": rid, "order_type": ot, "status": s, "body": body})
             time.sleep(1.1)
-        rounds.append({"round": rnd, "before": len(ids), "responses": resp})
+        rounds.append({"round": rnd, "before": len(targets), "types": types, "responses": resp})
         time.sleep(1.5)
         _, rows2 = list_pending()
-        remaining = [r.get("rfq_id") for r in rows2 if r.get("order_type") == "limit"]
+        remaining = [r.get("rfq_id") for r in rows2 if r.get("rfq_id")]
         print(f"[round {rnd}] 撤后剩 {len(remaining)}")
         if not remaining:
             break
@@ -279,6 +287,48 @@ def cmd_ws(_args):
     dump("ws", {"note": "skipped", "hint": "wss://…/portfolio，发 {\"claims\": token}"})
 
 
+def cmd_cancel_id(args):
+    """定向撤指定 rfq_id（复现 UI 的单张撤单）。用法：cancel-id <rfq1> [rfq2 ...]
+    对每个 id：撤 → 每秒轮询 10 次看是否变 canceled / 从 pending 消失。落盘全过程。
+    抓包证明 UI 撤这些残留单能成功；本命令用与 UI 完全相同的请求逐张复现。"""
+    if not args:
+        print("用法：cancel-id <rfq_id> [rfq_id ...]", file=sys.stderr)
+        raise SystemExit(2)
+    out = {"targets": args, "results": []}
+    if DRY:
+        print(f"[dry] 将逐张撤 {len(args)} 个 rfq 并轮询确认")
+        dump("cancel-id", out)
+        return
+    for rfq in args:
+        rec = {"rfq_id": rfq}
+        _, pend0 = list_pending()
+        rec["in_pending_before"] = any(r.get("rfq_id") == rfq for r in pend0)
+        cs, ch, cbody = cancel(rfq)
+        rec["cancel"] = {"status": cs, "headers": {k: ch.get(k) for k in ("cf-ray", "cf-mitigated", "retry-after")}, "body": cbody}
+        polls = []
+        for i in range(10):
+            time.sleep(1.0)
+            ps, _, prows = call("GET", f"/api/orders/v2?status=canceled&instrument={INSTRUMENT_KEY}&limit=10&order_by=created_at&order=desc")
+            row = None
+            if isinstance(prows, dict):
+                for r in prows.get("result", []):
+                    if r.get("rfq_id") == rfq:
+                        row = r
+                        break
+            _, pend = list_pending()
+            polls.append({"i": i, "status": ps, "canceled_row_status": (row or {}).get("status"),
+                          "cancel_reason": (row or {}).get("cancel_reason"),
+                          "still_in_pending": any(r.get("rfq_id") == rfq for r in pend)})
+            if row and (row.get("status") or "").lower() == "canceled":
+                break
+        rec["polls"] = polls
+        rec["result"] = "canceled" if any(p["canceled_row_status"] and p["canceled_row_status"].lower() == "canceled" for p in polls) else "still_open_or_unknown"
+        print(f"cancel-id {rfq} → {rec['result']}")
+        out["results"].append(rec)
+        time.sleep(1.1)
+    dump("cancel-id", out)
+
+
 def cmd_cancel_one(_args):
     """撤单机制体检（review5 第2步）：挂 1 张 0.0001 BTC @ 现价−20% → 确认在 pending →
     撤 → 每秒轮询 10 次看它是否变 canceled / 从 pending 消失。落盘全过程含 cf-ray/cf-mitigated。
@@ -379,7 +429,8 @@ def cmd_reject_trigger(_args):
 
 COMMANDS = {
     "caps": cmd_caps, "tick": cmd_tick, "ladder": cmd_ladder, "reject": cmd_reject,
-    "reject-trigger": cmd_reject_trigger, "cancel-all": cmd_cancel_all, "cancel-one": cmd_cancel_one,
+    "reject-trigger": cmd_reject_trigger, "cancel-all": cmd_cancel_all,
+    "cancel-one": cmd_cancel_one, "cancel-id": cmd_cancel_id,
     "cancel-filled": cmd_cancel_filled, "rate": cmd_rate, "ws": cmd_ws,
 }
 

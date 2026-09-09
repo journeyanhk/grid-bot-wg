@@ -75,7 +75,9 @@ def _do_request(session, req: dict) -> dict:
         if address:
             cookie += f"; vr-connected-address={address}"
         headers["Cookie"] = cookie
-        headers["Referer"] = f"{BASE_URL}/portfolio"
+        # 抓包显示 UI 的下单/撤单请求带的是 /perpetual/BTC 这个 Referer（不是 /portfolio）。
+        # 写请求（/api/orders/*）对齐 UI，其它 authed 读请求仍用 /portfolio。
+        headers["Referer"] = f"{BASE_URL}/perpetual/BTC" if path.startswith("/api/orders") else f"{BASE_URL}/portfolio"
     else:
         headers["Referer"] = f"{BASE_URL}/perpetual/BTC"
 
