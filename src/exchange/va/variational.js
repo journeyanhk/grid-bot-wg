@@ -140,6 +140,7 @@ export class VariationalExchange extends EventEmitter {
         stepSize: this.precision.stepSize, stepPrice: this.precision.stepPrice,
         minOrderSize: this.precision.minOrderSize,
         maxLeverage: snap.maxLeverage || this.precision.maxLeverage,
+        currentLeverage: null, // 账户当前杠杆（indicative 回显填充，仅展示，不用于钳制）
         maxNotional: null, maxOpenOrders: this.maxOpenOrders,
         instrumentType: snap.instrumentType, marketStatus: snap.marketStatus,
         isCloseOnly: snap.isCloseOnly,
@@ -157,11 +158,13 @@ export class VariationalExchange extends EventEmitter {
       if (!ind) continue;
       if (ind.minQtyTick) m.stepSize = ind.minQtyTick;
       if (ind.minQty) m.minOrderSize = ind.minQty;
-      if (ind.maxLeverage) m.maxLeverage = ind.maxLeverage;
+      // indicative 只回显【当前】杠杆，不覆盖 maxLeverage（真实上限来自
+      // supported_assets.max_leverage 或默认 50），否则填 10x 会被静默压回当前值。
+      if (ind.currentLeverage) m.currentLeverage = ind.currentLeverage;
       if (ind.markPrice) { m.lastPrice = ind.markPrice; this._prices.set(marketId, ind.markPrice); }
       m.maxNotional = ind.maxNotionalBid ?? ind.maxNotionalAsk ?? m.maxNotional;
       this.maxNotional = m.maxNotional;
-      logger.info('va', `${m.underlying} 合约精度：step=${m.stepSize} min=${m.minOrderSize} maxLev=${m.maxLeverage} maxNotional≈${m.maxNotional ?? '?'}`);
+      logger.info('va', `${m.underlying} 合约精度：step=${m.stepSize} min=${m.minOrderSize} maxLev=${m.maxLeverage} curLev=${m.currentLeverage ?? '?'} maxNotional≈${m.maxNotional ?? '?'}`);
     }
   }
 

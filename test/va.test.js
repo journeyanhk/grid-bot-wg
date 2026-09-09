@@ -121,7 +121,8 @@ const pendRow = (rfq, extra = {}) => ({ rfq_id: rfq, order_type: 'limit', side: 
   const ind = parseIndicative({ quote_id: 'x', bid: '10', ask: '11', mark_price: '10.5', qty_limits: { bid: { min_qty_tick: '0.000001', min_qty: '0.000002' } }, margin_params: { params: { asset_params: { BTC: { futures_initial_margin: '0.02' } } } }, margin_requirements: { bid_max_notional_delta: '6900' } });
   assert.equal(ind.quoteId, 'x');
   assert.equal(ind.minQty, 0.000002);
-  assert.equal(ind.maxLeverage, 50, '1/0.02 = 50x');
+  assert.equal(ind.currentLeverage, 50, '1/0.02 = 当前 50x（当前杠杆，非合约上限）');
+  assert.equal(ind.maxLeverage, undefined, 'parseIndicative 不再输出 maxLeverage 字段');
   assert.equal(ind.maxNotionalBid, 6900);
 }
 {
@@ -400,6 +401,18 @@ async function ready(http) {
     assert.ok(e instanceof VaHttpError && e.status === 0 && e.transient === true, 'network error is transient');
     return true;
   });
+}
+
+// ⑰ 杠杆语义：indicative 只反映【当前】杠杆，不得覆盖合约 maxLeverage。
+// 复现实盘 bug：账户当前 5x（fim=0.2），但 supported_assets 报 max_leverage=50。
+// 期望 market.maxLeverage 保持 50（否则 bot._start 会把目标 10x 静默压回 5x）。
+{
+  const http = new MockHttp();
+  http.indicative.margin_params.params.asset_params.BTC.futures_initial_margin = '0.2'; // 1/0.2 = 当前 5x
+  const { ex } = await ready(http);
+  const m = ex.getMarket(1);
+  assert.equal(m.maxLeverage, 50, 'maxLeverage 保持合约上限 50，不被当前杠杆覆盖');
+  assert.equal(m.currentLeverage, 5, 'currentLeverage 反映账户当前 5x');
 }
 
 // JWT exp decode is exercised implicitly (MockHttp has no token field -> null exp -> no throw).

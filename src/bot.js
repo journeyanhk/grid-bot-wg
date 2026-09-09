@@ -848,6 +848,11 @@ export class GridBot {
       if (r?.orderId) {
         this.active.set(String(r.orderId), { levelIndex: lvl, side: o.side, price: o.price, sizeBase, opening, recovery: !!o.recovery, placedAt: Date.now() });
         this._markPlacementConfirmed(o);
+        // 补单/铺单成功后立即落盘：_handleFill 里 _place 是 fire-and-forget，
+        // 末尾的 _changed() 早于本次成功执行，快照会漏掉这张新单，重启时只能靠
+        // 对账启发式接管（opening/levelIndex 从价格反推）。这里补一次持久化，
+        // 让重启接管拿到真实的 opening/levelIndex/placedAt。对六个交易所都生效。
+        this._changed();
       }
     } finally {
       this._pendingLevels.delete(lvl);

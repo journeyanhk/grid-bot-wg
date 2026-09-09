@@ -263,7 +263,9 @@ export function parseIndicative(json) {
     minQtyTick: numOrNull(bidLim.min_qty_tick) ?? numOrNull(askLim.min_qty_tick),
     minQty: numOrNull(bidLim.min_qty) ?? numOrNull(askLim.min_qty),
     maxQty: numOrNull(bidLim.max_qty) ?? numOrNull(askLim.max_qty),
-    maxLeverage: fim && fim > 0 ? Math.floor(1 / fim) : null,
+    // 注意：futures_initial_margin 是账户【当前】杠杆（随 set_leverage 变化），
+    // 不是合约最大杠杆。命名为 currentLeverage，避免被当成上限去钳制目标杠杆。
+    currentLeverage: fim && fim > 0 ? Math.floor(1 / fim) : null,
     maxNotionalBid: numOrNull(mr.bid_max_notional_delta),
     maxNotionalAsk: numOrNull(mr.ask_max_notional_delta),
     liqPrice: numOrNull(mr.estimated_liquidation_price_bid),
