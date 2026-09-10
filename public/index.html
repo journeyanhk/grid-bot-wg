@@ -1546,6 +1546,14 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div class="kv" id="va-st-issue" style="display:none"></div>
       <button class="btn btn-ghost" id="va-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
       <button class="btn btn-ghost" id="va-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
+        <div class="muted" style="font-size:12px;margin-bottom:6px">会话令牌（vr-token）· 自动登录被 Cloudflare 拦截时手动热切换（无需重启）</div>
+        <textarea id="va-token-input" rows="2" placeholder="粘贴新的 vr-token（7 天有效）后点应用" style="width:100%;box-sizing:border-box;font-size:12px;font-family:monospace;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+          <button class="btn btn-ghost" style="margin:0;font-size:12px" onclick="adoptVaToken(this)">应用令牌</button>
+          <span id="va-token-msg" class="muted" style="font-size:12px"></span>
+        </div>
+      </div>
     </div>
     <div class="panel" style="margin-bottom:14px">
       <div class="panel-title">价格 / 网格</div>
@@ -2512,6 +2520,31 @@ async function reconnectEx(p, btn) {
     alert(`${p.toUpperCase()} 重连失败：${e.message}`);
   }
   if (btn) { btn.textContent = orig; btn.disabled = false; }
+}
+
+// VA 会话令牌热切换：粘贴新 vr-token，后端校验+落缓存+portfolio 验证后恢复交易（无需重启）。
+async function adoptVaToken(btn) {
+  const ta = $('va-token-input');
+  const msg = $('va-token-msg');
+  const token = (ta && ta.value || '').trim();
+  if (!token) { if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '请先粘贴 token'; } return; }
+  if (btn) btn.disabled = true;
+  if (msg) { msg.style.color = ''; msg.textContent = '应用中…'; }
+  try {
+    const r = await apiFetch('/api/va/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    if (ta) ta.value = '';
+    const hrs = j.exp ? Math.max(1, Math.round((j.exp * 1000 - Date.now()) / 3600000)) : null;
+    if (msg) {
+      msg.style.color = '#22c55e';
+      msg.textContent = '已应用' + (hrs ? `，有效约 ${hrs} 小时` : '') + (j.tradingReady ? '，交易已恢复' : '');
+    }
+  } catch (e) {
+    if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '失败：' + e.message; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function setExHealth(p, h, connected) {

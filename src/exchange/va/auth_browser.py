@@ -8,7 +8,7 @@ cf_clearance），curl_cffi 过不去。本探针用 Playwright 起一个真实�
 
 用法（在你的服务器上跑，先装依赖）：
     pip install -r requirements-va-browser.txt
-    playwright install chromium            # 无头
+    playwright install --with-deps chromium   # 浏览器+系统库(libatk 等)，缺库会 TargetClosedError
     # 若无头过不去，装虚拟显示后用有头（managed challenge 有头通过率高很多）：
     #   apt-get install -y xvfb
     #   xvfb-run -a python src/exchange/va/auth_browser.py --headful
@@ -75,7 +75,7 @@ def run(headful: bool, profile: str, out_path: str, keep: bool) -> int:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # noqa: BLE001
         log("FATAL", f"未安装 playwright（{exc}）。请 pip install -r requirements-va-browser.txt "
-                     "并 playwright install chromium。")
+                     "并 playwright install --with-deps chromium。")
         return 2
 
     os.makedirs(profile, exist_ok=True)

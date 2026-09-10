@@ -142,4 +142,19 @@ function makeHttp(login) {
   assert.ok(logins >= 1, '至少首登一次');
 }
 
+// ⑩ adopt：空/过期拒绝；有效 token 接纳并落缓存 + setToken
+{
+  const http = makeHttp(async () => ({ token: jwt(inHours(168)) }));
+  const cache = path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const a = new VaAuth({ http, address: '0xA', cachePath: cache });
+  assert.throws(() => a.adopt(''), /为空/, '空 token 应拒绝');
+  assert.throws(() => a.adopt(jwt(inHours(-1))), /过期/, '过期 token 应拒绝');
+  const good = jwt(inHours(100));
+  const info = a.adopt(good);
+  assert.equal(http.token, good, 'adopt 后 http 拿到新 token');
+  assert.ok(info.hrs >= 90 && info.hrs <= 100, 'adopt 返回剩余小时数');
+  assert.equal(JSON.parse(fs.readFileSync(cache, 'utf8')).token, good, 'adopt 落缓存');
+  fs.unlinkSync(cache);
+}
+
 console.log('✓ va-auth.test.js 全部通过');

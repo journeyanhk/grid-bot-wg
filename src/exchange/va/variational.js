@@ -124,6 +124,26 @@ export class VariationalExchange extends EventEmitter {
     return this.init();
   }
 
+  /**
+   * 仪表盘热切换：接纳一枚粘贴的 vr-token，立即用 portfolio 验证并恢复交易。
+   * 自动登录被 Cloudflare 挑战拦截时的人工兜底（token 7 天有效，每周一次一分钟）。
+   */
+  async adoptToken(token) {
+    const info = this.auth.adopt(token);       // 空/过期直接抛错
+    try {
+      await this._refreshAccount();            // portfolio 打通才算 token 真的可用
+      this._tradingReady = true;
+      this.operationalIssue = null;
+      this.lastError = null;
+      this.lastOkAt = Date.now();
+      return { ok: true, exp: info.exp, tradingReady: true };
+    } catch (e) {
+      // token 已落库但没验过：可能仍无效（如粘错/已吊销）。
+      this._tradingReady = false;
+      throw new Error(`token 已接纳但校验失败：${e?.message || e}`, { cause: e });
+    }
+  }
+
   _checkTokenLife() {
     const exp = decodeJwtExp(this.http.token);
     if (!exp) return;

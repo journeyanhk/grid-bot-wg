@@ -3,7 +3,7 @@
 # 强加 ~300MB 的 Chromium。
 #
 #   pip install -r requirements-va-browser.txt
-#   playwright install chromium
+#   playwright install --with-deps chromium   # 浏览器 + 系统库(libatk 等)一起装
 #   # 无头过不去时（managed challenge 常检测 headless），装 xvfb 用有头：
 #   #   apt-get install -y xvfb   &&   xvfb-run -a python src/exchange/va/auth_browser.py --headful
 playwright>=1.47

@@ -637,6 +637,16 @@ const server = http.createServer(async (request, res) => {
     if (p.startsWith('/api/hl/')) {
       return await hlHandler(request, res, p.slice('/api/hl'.length), url);
     }
+    // VA 会话令牌热切换：自动登录被 Cloudflare 挑战拦截时，粘贴新 vr-token 免重启恢复。
+    if (p === '/api/va/token' && request.method === 'POST') {
+      try {
+        if (typeof vaExchange.adoptToken !== 'function') {
+          return send(res, 400, { error: 'Variational 当前非实盘会话，无需粘贴 token。' });
+        }
+        const { token } = await readBody(request);
+        return send(res, 200, await vaExchange.adoptToken(token));
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
     if (p.startsWith('/api/va/')) {
       return await vaHandler(request, res, p.slice('/api/va'.length), url);
     }

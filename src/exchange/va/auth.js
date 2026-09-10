@@ -83,6 +83,24 @@ export class VaAuth {
   }
 
   /**
+   * 仪表盘热切换：接纳一枚手动粘贴的 vr-token（自动登录被 Cloudflare 挑战拦时的兜底）。
+   * 校验 JWT exp → setToken → 落缓存 → 清失败计数。返回 { exp, hrs }；空/过期抛错。
+   * 注意：这里只保证 token 结构有效；能否真正访问账户由调用方随后用 portfolio 验证。
+   */
+  adopt(token) {
+    const t = String(token || '').trim();
+    if (!t) throw new Error('token 为空。');
+    const exp = decodeJwtExp(t);
+    if (exp != null && exp * 1000 <= Date.now()) throw new Error('该 vr-token 已过期，请粘贴一枚新的。');
+    this._use(t);
+    this._writeCache(t);
+    this._failStreak = 0;
+    const hrs = exp ? Math.max(1, Math.round((exp * 1000 - Date.now()) / HOUR)) : null;
+    logger.info('va', `已接纳手动粘贴的 vr-token${hrs ? `，有效约 ${hrs} 小时` : ''}。`);
+    return { exp, hrs };
+  }
+
+  /**
    * 确保 token 健康：缺失或剩余 < 24h 且可自签 → 续签。
    * @param {{force?:boolean, boot?:boolean}} o force=401 立即续签（绕过健康判断，仍受节流）
    * @returns {Promise<boolean>} 结束时是否持有有效 token
