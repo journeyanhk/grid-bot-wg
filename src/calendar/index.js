@@ -100,3 +100,10 @@ export function activeWindow(now, windowMin = 30) {
   const w = windowMin * 60_000;
   return EVENTS.find((e) => now >= e.ts - w && now <= e.ts + w) || null;
 }
+
+/** 距静态事件表耗尽（最后一个事件）还有多少天。用于年度更新兜底提醒。 */
+export function daysUntilExhausted(now = Date.now()) {
+  if (!EVENTS.length) return 0;
+  const last = EVENTS[EVENTS.length - 1].ts;
+  return Math.max(0, Math.floor((last - now) / 86_400_000));
+}

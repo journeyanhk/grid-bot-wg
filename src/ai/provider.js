@@ -131,7 +131,7 @@ export function extractJson(text) {
 export async function notify(text, opts = {}) {
   const cfg = getAiConfig();
   const body = String(text).slice(0, 3800);
-  const title = String(opts.title || body.split('\n')[0] || '网格机器人').slice(0, 60);
+  const title = String(opts.title || body.split('\n')[0] || '网格机器人').slice(0, 32); // Server酱 Turbo title 上限 32 字
   const jobs = [];
   if (cfg.telegramToken && cfg.telegramChat) {
     jobs.push(fetch(`https://api.telegram.org/bot${cfg.telegramToken}/sendMessage`, {
@@ -160,7 +160,16 @@ export async function notify(text, opts = {}) {
       method: 'POST', signal: AbortSignal.timeout(15000),
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
-    }).then((r) => { if (!r.ok) logger.error('notify', 'Server酱 发送失败 HTTP ' + r.status); }));
+    }).then(async (r) => {
+      // 两代 API 都是 HTTP 200 + JSON {code:N}，code!==0 才是真失败，仅记日志不抛。
+      if (!r.ok) { logger.error('notify', 'Server酱 发送失败 HTTP ' + r.status); return; }
+      try {
+        const j = await r.json();
+        if (j && j.code !== 0 && j.code !== undefined) {
+          logger.error('notify', `Server酱 发送失败 code=${j.code} ${j.message || j.info || ''}`.trim());
+        }
+      } catch { /* 非 JSON 响应：HTTP 200 视为已投递 */ }
+    }));
   }
   if (!jobs.length) return false;
   await Promise.allSettled(jobs);

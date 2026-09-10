@@ -21,7 +21,7 @@ import { setupProxies, checkProxy } from './proxy.js';
 import { loadSnapshot, saveSnapshot } from './persist.js';
 import { createAiService } from './ai/service.js';
 import { notifier } from './notify.js';
-import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL } from './calendar/index.js';
+import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
 
 // ── 启动配置 ─────────────────────────────────────────────────────────────────
@@ -173,6 +173,25 @@ const _calTimer = setInterval(() => {
   } catch (e) { logger.error('calendar', e?.message || String(e)); }
 }, 30_000);
 if (_calTimer.unref) _calTimer.unref();
+
+// 启动自检：①事件表 60 天内耗尽 → 年度更新兜底提醒；②若当前正落在事件窗口内 → 补发一条。
+{
+  const _now = Date.now();
+  const _daysLeft = daysUntilExhausted(_now);
+  if (_daysLeft < 60) {
+    notifier.send({ source: 'calendar', level: 'warn', key: 'cal:exhaust',
+      title: '事件日历即将耗尽',
+      message: `⚠️ 事件日历仅剩约 ${_daysLeft} 天数据，最后一个事件后将静默失效。请更新 src/calendar/index.js 的年度事件表。`,
+      cooldownMs: 24 * 60 * 60_000 });
+  }
+  const _hit = activeWindow(_now, getCalendarConfig().windowMin);
+  if (_hit) {
+    const _when = new Date(_hit.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + _hit.id + ':boot',
+      title: `事件窗口 · ${TYPE_LABEL[_hit.type] || _hit.type}`,
+      message: `⚠️ 当前正处于事件窗口：${_hit.title}（北京时间 ${_when}）。行情波动可能放大，注意单边风险。` });
+  }
+}
 
 // SSE 客户端集合（按交易所分组）
 const deClients = new Set();

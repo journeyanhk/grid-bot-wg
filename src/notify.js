@@ -19,9 +19,17 @@ const RATE_WINDOW_MS = 10 * 60_000;
 const RATE_MAX = 6;
 const DIGEST_FLUSH_MS = 60_000;
 
-/** 从消息文本推断级别：❌ → critical，⚠️ → warn，其余 → info。 */
+/**
+ * 从消息文本推断级别：
+ *   1) 动作类失败（下单/撤单/平仓/保证金/强平/止损）→ critical；
+ *   2) 传输层/网络抖动（可自愈的短暂问题）→ warn，避免每次抖动都 critical 刷屏；
+ *   3) 其余含「严重/失败/❌」→ critical；含「⚠」→ warn；否则 info。
+ * 注意顺序：传输层判定必须在通用「失败」之前，否则「连接…失败（传输层）」会被误判 critical。
+ */
 export function inferLevel(message) {
   const m = String(message || '');
+  // 传输层/网络抖动：可自愈，warn 即可（这类文案往往也含「失败」，故须先于通用规则命中）
+  if (/传输层|传输请求|连接\s*Variational\s*失败|网络|超时|timeout|断线|ECONN|ETIMEDOUT/i.test(m)) return 'warn';
   if (m.includes('❌') || /严重|强平|止损|已过期|崩溃|失败/.test(m)) return 'critical';
   if (m.includes('⚠')) return 'warn';
   return 'info';
@@ -54,7 +62,7 @@ class Notifier {
    * @param {string} [o.title] 推送标题（Server酱用）
    * @returns {boolean} 是否放行推送（被抑制/合并/info 返回 false）
    */
-  send({ source = 'bot', message, level, key, title } = {}) {
+  send({ source = 'bot', message, level, key, title, cooldownMs } = {}) {
     if (!message) return false;
     const lv = level || inferLevel(message);
     if (LEVELS[lv] === undefined) return false;
@@ -63,9 +71,13 @@ class Notifier {
 
     const k = key || deriveKey(source, message);
     const now = Date.now();
+    // 顺手回收 >24h 的去重条目，避免长期运行 _seen 无限增长。
+    this._pruneSeen(now);
     const prev = this._seen.get(k);
+    // 冷却窗：调用方可用 cooldownMs 覆盖（如 token 临期「每 6 小时提醒一次」）。
+    const cd = Number.isFinite(cooldownMs) ? cooldownMs : (COOLDOWN_MS[lv] || 0);
     // 冷却窗内、且级别没有升级 → 抑制
-    if (prev && now - prev.at < (COOLDOWN_MS[lv] || 0) && LEVELS[lv] <= LEVELS[prev.level]) {
+    if (prev && now - prev.at < cd && LEVELS[lv] <= LEVELS[prev.level]) {
       this._stats.suppressed++;
       return false;
     }
@@ -83,6 +95,12 @@ class Notifier {
     this._stats.sent++;
     this._dispatch(this._format(lv, source, message), title);
     return true;
+  }
+
+  /** 回收 >24h 的去重条目，防止 _seen 长期增长。 */
+  _pruneSeen(now) {
+    const TTL = 24 * 60 * 60_000;
+    for (const [k, v] of this._seen) if (now - v.at > TTL) this._seen.delete(k);
   }
 
   _format(lv, source, message) {

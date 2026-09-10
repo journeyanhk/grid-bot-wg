@@ -36,9 +36,10 @@ export class GridBot {
     this.recovery = false;          // standalone reduce-only recovery mode
     this._onChange = typeof opts.onChange === 'function' ? opts.onChange : null; // persistence hook
     this._onAlert = typeof opts.onAlert === 'function' ? opts.onAlert : null;   // 通知总线钩子（server 接线，含来源标签）
-    this._entryFillLog = [];         // 成交流哨兵：近 1h 入场成交 {t, side}（同向连续=单边启动）
+    this._fillLog = [];              // 成交流哨兵：近 1h 全部成交 {t, side, levelIndex, closing}
     this._lastTrendAlertAt = 0;      // 成交流哨兵推送去重
-    this._trendFillN = Number(process.env.TREND_FILL_N) || 8;   // 触发阈值：1h 内同向入场 ≥N 格
+    // 触发阈值：显式设 TREND_FILL_N 则用之，否则按格数相对取值 max(5, round(格数×0.4))。
+    this._trendFillN = Number(process.env.TREND_FILL_N) || 0;
     this._trendFillWindowMs = 60 * 60_000;
     this._onFill = (f) => this._handleFill(f);
     this._onPrice = (p) => this._handlePrice(p);
@@ -1122,8 +1123,9 @@ export class GridBot {
     }
     logger.info('bot', `成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName, closing });
 
-    // 成交流哨兵：仅统计【入场】成交（非回收、非平仓腿）。
-    if (!isRecovery && !closing) this._checkTrendFills(f.side);
+    // 成交流哨兵：所有成交进日志（含平仓腿/回收），由 _checkTrendFills 判定连续入场段。
+    // 关键修复：平仓腿必须进日志，否则中性网格健康震荡（买入场→卖平仓→…）会被误判为单边。
+    this._checkTrendFills({ side: f.side, levelIndex, closing });
 
     // Recovery-ladder fills are pure reduce-only EXITS of stranded inventory —
     // never re-quote a replacement for them.
@@ -1655,21 +1657,43 @@ export class GridBot {
    * 成交流哨兵（文档力荐、回测正期望的免费传感器）：连续同向【入场】成交 = 价格
    * 正在切穿梯子。1h 内同向入场 ≥N 格 → 只发通知不碰订单（动作型在 BTC 网格上负期望）。
    */
-  _checkTrendFills(side) {
+  _checkTrendFills({ side, levelIndex, closing }) {
     const now = Date.now();
-    this._entryFillLog.push({ t: now, side });
-    this._entryFillLog = this._entryFillLog.filter((e) => now - e.t < this._trendFillWindowMs);
-    // 统计末尾连续同向段长度
+    this._fillLog.push({ t: now, side, levelIndex, closing });
+    this._fillLog = this._fillLog.filter((e) => now - e.t < this._trendFillWindowMs);
+    // 末尾若是平仓腿，本次成交不构成入场信号，直接返回。
+    const last = this._fillLog[this._fillLog.length - 1];
+    if (!last || last.closing) return;
+    const dirSide = last.side;
+    // 从末尾（最新）回溯：任何反向成交（含平仓）打断连续段；同向平仓跳过（不计数也不打断）；
+    // 入场档位必须单调推进（买越买越低=index 递增回看；卖越卖越高=index 递减回看）才算“切穿梯子”。
     let run = 0;
-    for (let i = this._entryFillLog.length - 1; i >= 0; i--) {
-      if (this._entryFillLog[i].side === side) run++; else break;
+    let lastLvl = null;
+    for (let i = this._fillLog.length - 1; i >= 0; i--) {
+      const e = this._fillLog[i];
+      if (e.side !== dirSide) break;
+      if (e.closing) continue;
+      if (e.levelIndex != null && lastLvl != null) {
+        const monotonic = dirSide === 'buy' ? e.levelIndex > lastLvl : e.levelIndex < lastLvl;
+        if (!monotonic) break;
+      }
+      if (e.levelIndex != null) lastLvl = e.levelIndex;
+      run++;
     }
-    if (run >= this._trendFillN && now - this._lastTrendAlertAt > 30 * 60_000) {
+    // 阈值：显式 TREND_FILL_N 优先，否则相对格数 max(5, round(格数×0.4))。
+    const threshold = this._trendFillN > 0
+      ? this._trendFillN
+      : Math.max(5, Math.round((this.grid?.count || 20) * 0.4));
+    if (run >= threshold && now - this._lastTrendAlertAt > 30 * 60_000) {
       this._lastTrendAlertAt = now;
-      const dir = side === 'buy' ? '下跌' : '上涨';
+      const dir = dirSide === 'buy' ? '下跌' : '上涨';
+      const sp = this.grid?.spacing ?? this.config.spacing ?? 0;
+      const px = this.lastPrice || 0;
+      const travelPct = (sp > 0 && px > 0) ? round2((run * sp / px) * 100) : null;
       this._alert(
-        `⚠️ 成交流哨兵：1 小时内连续 ${run} 格同向${side === 'buy' ? '买入' : '卖出'}入场且无回补，`
-        + `${this.config?.displayName || ''} 疑似单边${dir}启动。请复核是否需要停止/平仓/撤单（本提醒不自动动手）。`,
+        `⚠️ 成交流哨兵：1 小时内连续 ${run} 格同向${dirSide === 'buy' ? '买入' : '卖出'}入场且档位单调推进`
+        + (travelPct != null ? `（约 ${travelPct}% 行程）` : '')
+        + `，${this.config?.displayName || ''} 疑似单边${dir}启动。请复核是否需要停止/平仓/撤单（本提醒不自动动手）。`,
         { level: 'warn', key: 'trend-fills' },
       );
     }
