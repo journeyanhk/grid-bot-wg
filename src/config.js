@@ -161,6 +161,9 @@ export function getConfig() {
     underlyings: vaUnderlyings.length ? vaUnderlyings : ['BTC'],
     token: process.env.VARIATIONAL_TOKEN || '',
     address: process.env.VA_ADDRESS || '',
+    // 独立热钱包自动登录（SIWE）：配了私钥即可无人值守续签 vr-token；贴 token 仍优先。
+    privateKey: process.env.VA_WALLET_PRIVATE_KEY || '',
+    tokenCachePath: process.env.VA_TOKEN_CACHE || '.runtime/va_token.json',
     slippageLimit: process.env.VA_SLIPPAGE_LIMIT || '0.005',
     // Cloudflare: Node fetch -> 403, curl_cffi(Chrome) -> 200. 'bridge' spawns the
     // Python transport worker and is the only mode that passes CF in prod.

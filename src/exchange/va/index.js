@@ -6,8 +6,8 @@ import { PaperExchange } from './paper.js';
 // endpoints, so it always works.
 export function createExchange(cfg = {}) {
   if (cfg.mode === 'live') {
-    if (!cfg.token) {
-      throw new Error('VA LIVE 模式需要 VARIATIONAL_TOKEN（vr-token cookie）。');
+    if (!cfg.token && !cfg.privateKey) {
+      throw new Error('VA LIVE 模式需要 VARIATIONAL_TOKEN（贴 token）或 VA_WALLET_PRIVATE_KEY（自动登录）之一。');
     }
     return new VariationalExchange({
       underlyings: cfg.underlyings,
@@ -20,6 +20,8 @@ export function createExchange(cfg = {}) {
       baseUrl: cfg.baseUrl,
       address: cfg.address,
       token: cfg.token,
+      privateKey: cfg.privateKey,
+      tokenCachePath: cfg.tokenCachePath,
       transport: cfg.transport,
       pythonPath: cfg.pythonPath,
       maxOpenOrders: cfg.maxOpenOrders,

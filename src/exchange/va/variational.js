@@ -18,10 +18,10 @@
 //
 // HTTP + Cloudflare (curl_cffi bridge) live entirely in VaHttpClient; this file
 // is pure strategy plumbing.
-import { Buffer } from 'node:buffer';
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
 import { CloudflareError, VaHttpClient, VaHttpError, VaRateLimitError } from './httpclient.js';
+import { VaAuth, decodeJwtExp } from './auth.js';
 import {
   DEFAULT_PRECISION, candlePeriod, formatStep, instrumentFor, instrumentKey,
   isCanceled, isFilled, nextPageOf, parseCandles, parseIndicative, parseOrderRow,
@@ -34,17 +34,6 @@ const HISTORY_BUFFER_MS = 5 * 60_000;   // look-back padding when querying termi
 const RESOLVE_TIMEOUT_MS = 10 * 60_000; // a gone order unresolved this long -> loud dropped-level warning
 const MAX_PAGES = 5;                     // pagination cap for orders/v2 + trades (100/page)
 const TOKEN_WARN_MS = 24 * 3600_000;     // warn when the vr-token JWT has < 24h left
-
-/** Decode a JWT's `exp` (seconds) WITHOUT verifying the signature. */
-function decodeJwtExp(token) {
-  try {
-    const parts = String(token).split('.');
-    if (parts.length < 2) return null;
-    const json = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
-    const exp = Number(JSON.parse(json).exp);
-    return Number.isFinite(exp) ? exp : null;
-  } catch { return null; }
-}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -81,6 +70,17 @@ export class VariationalExchange extends EventEmitter {
       baseUrl: opts.baseUrl, address: opts.address, token: opts.token,
       transportMode: opts.transport, pythonPath: opts.pythonPath,
     });
+    // 会话生命周期：贴 token 优先，配了私钥则自动续签（SIWE）。
+    this.auth = new VaAuth({
+      http: this.http,
+      address: opts.address,
+      envToken: opts.token,
+      privateKey: opts.privateKey,
+      cachePath: opts.tokenCachePath,
+      // 续签成功=info（仅仪表盘，不推手机）；连续失败=❌（经告警环推手机）。
+      onNotice: (m) => logger.info('va', m),
+      onAlert: (m) => this.emit('error', new Error(m)),
+    });
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -88,15 +88,19 @@ export class VariationalExchange extends EventEmitter {
     this._tradingReady = false;
     try {
       await this._loadMarkets();
+      // 会话解析：VARIATIONAL_TOKEN(有效) → 缓存 → 私钥自动登录 → 无。
+      await this.auth.init().catch((e) => logger.warn('va', `会话初始化异常：${e?.message || e}`));
       if (this.http.hasToken()) {
-        this._checkTokenLife();               // decode JWT exp; reject if expired, warn if < 24h
+        this._checkTokenLife();               // decode JWT exp; warn if < 24h；仅在不可自签时对过期抛错
         await this._refreshAccount();          // validates the vr-token cookie
         await this._initInstrumentCaps().catch((e) => logger.warn('va', `读取合约精度/杠杆失败，沿用默认值：${e?.message || e}`));
         await this._preflightInstrument();     // throws (blocks trading) on instrument-identity mismatch
         await this._refreshOrders().catch(() => {});
         this._tradingReady = true;
+      } else if (this.auth.canRefresh()) {
+        logger.warn('va', 'vr-token 自动登录暂未成功：仅行情可用，实盘交易锁定，将在轮询中重试续签。');
       } else {
-        logger.warn('va', '未配置 VARIATIONAL_TOKEN：仅行情可用，实盘交易被锁定，请贴入 7 天会话 token。');
+        logger.warn('va', '未配置 VARIATIONAL_TOKEN 且无 VA_WALLET_PRIVATE_KEY：仅行情可用，实盘交易被锁定。');
       }
       // NOTE: leverage is intentionally NOT set here — the bot sets it in its
       // own _start (setting leverage while holding a position can be rejected or
@@ -123,8 +127,13 @@ export class VariationalExchange extends EventEmitter {
     const exp = decodeJwtExp(this.http.token);
     if (!exp) return;
     const msLeft = exp * 1000 - Date.now();
-    if (msLeft <= 0) throw new VaHttpError('VARIATIONAL_TOKEN（vr-token）已过期，请重新获取会话 token 后重连。', 401);
-    if (msLeft < TOKEN_WARN_MS) {
+    if (msLeft <= 0) {
+      // 配了私钥可自动续签时，过期不阻断连接——交给 auth.ensure 在轮询里重登。
+      if (this.auth.canRefresh()) { logger.warn('va', 'vr-token 已过期，将尝试用私钥自动续签。'); return; }
+      throw new VaHttpError('VARIATIONAL_TOKEN（vr-token）已过期，请重新获取会话 token 后重连。', 401);
+    }
+    // 可自签时临期无需打扰用户（auth 会在 <24h 自动续签）。
+    if (msLeft < TOKEN_WARN_MS && !this.auth.canRefresh()) {
       const hrs = Math.max(1, Math.round(msLeft / 3600_000));
       logger.warn('va', `vr-token 将在约 ${hrs} 小时后过期，请及时更新 VARIATIONAL_TOKEN。`);
       // 转发到告警环 / 通知总线（⚠️ 前缀→warn 级推送），让用户在手机上及时看到。
@@ -451,6 +460,11 @@ export class VariationalExchange extends EventEmitter {
   async _poll() {
     if (this._polling) return; this._polling = true;
     try {
+      // 会话保活：token 缺失或 <24h 且可自签 → 续签（内部有节流，廉价）。
+      if (this.auth.canRefresh()) {
+        const ok = await this.auth.ensure().catch(() => false);
+        if (ok && !this._tradingReady && this.http.hasToken()) this._tradingReady = true;
+      }
       await this._refreshPrices();
       if (this._tradingReady) {
         await this._refreshAccount();
@@ -460,8 +474,14 @@ export class VariationalExchange extends EventEmitter {
       if (this.operationalIssue?.transient) this.operationalIssue = null;
     } catch (e) {
       this.lastError = e?.message || String(e);
-      if (e?.status === 401) { this._tradingReady = false; this._setIssue(e); this.operationalIssue.title = 'Variational vr-token 失效'; }
-      else this._setIssue(e, !!e?.transient);
+      if (e?.status === 401) {
+        this._tradingReady = false; this._setIssue(e); this.operationalIssue.title = 'Variational vr-token 失效';
+        // 401 立即强制续签（受 5min 节流 + 每小时上限约束）；成功则下一轮恢复交易。
+        if (this.auth.canRefresh()) {
+          const ok = await this.auth.ensure({ force: true }).catch(() => false);
+          if (ok && this.http.hasToken()) { this._tradingReady = true; this.operationalIssue = null; }
+        }
+      } else this._setIssue(e, !!e?.transient);
     } finally { this._polling = false; }
   }
 

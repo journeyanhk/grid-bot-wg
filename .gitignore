@@ -27,3 +27,6 @@ WGALL-ZJ005 - OPEN-SOURCE-CLEAN/
 __pycache__/
 *.pyc
 .hl-venv/
+
+# 运行期产物：自动登录 token 缓存等
+.runtime/

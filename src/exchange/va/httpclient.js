@@ -64,6 +64,17 @@ export class VaHttpClient {
 
   setToken(token) { this.token = token || ''; }
   hasToken() { return !!this.token; }
+
+  /**
+   * SIWE 自动登录（仅 bridge 传输可用；node/plain-fetch 过不了 Cloudflare）。
+   * 返回 { status, token, exp }；私钥在 Python worker 环境里，Node 侧不接触。
+   */
+  async login(address = '') {
+    if (!this.transport?.login) {
+      throw new VaHttpError('当前传输层不支持自动登录（需 VA_TRANSPORT=bridge）。', 0);
+    }
+    return this.transport.login(address || this.address);
+  }
   async close() { if (this.transport?.stop) await this.transport.stop(); }
 
   _headers(extra = {}, { auth = false } = {}) {

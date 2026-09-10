@@ -60,7 +60,7 @@ logger.info('server', `启动 v${APP_VERSION}`);
     if (!cfg.hl.agentPrivateKey && !cfg.hl.agentPrivateKeyFile) missing.push(['Entropy ', 'HL_AGENT_PRIVATE_KEY(_FILE)', 'agent 钱包私钥或私钥文件路径']);
   }
   if (cfg.va.mode === 'live') {
-    if (!cfg.va.token) missing.push(['Variational', 'VARIATIONAL_TOKEN', 'Omni 登录后的 vr-token cookie（贴 token 优先）']);
+    if (!cfg.va.token && !cfg.va.privateKey) missing.push(['Variational', 'VARIATIONAL_TOKEN 或 VA_WALLET_PRIVATE_KEY', '贴 token 或独立热钱包私钥（SIWE 自动登录）之一']);
   }
   if (missing.length) {
     console.error('\n[启动失败] 有交易所被设为 live 实盘模式，但 .env 里还缺以下凭据：\n');

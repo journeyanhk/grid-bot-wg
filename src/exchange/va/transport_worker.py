@@ -8,6 +8,9 @@ Protocol (identical shape to hl/signer_worker.py): JSON-lines on stdin/stdout.
   ready handshake:  {"ready": true}  |  {"ready": false, "error": "..."}
   request  (stdin): {"id":N,"command":"request","method":"GET","path":"/api/...",
                      "body":{...}|null,"auth":true|false,"token":"...","address":"..."}
+  login    (stdin): {"id":N,"command":"login","address":"0x..."}
+                    → 用 env 里的 VA_WALLET_PRIVATE_KEY 完成 SIWE 登录，返回
+                      {"status":200,"token":"...","exp":<秒>}。私钥【绝不】经 stdio。
   response (stdout):{"id":N,"ok":true,"result":{"status":200,"text":"...","headers":{...}}}
                     {"id":N,"ok":false,"error":"..."}
 
@@ -33,6 +36,8 @@ except Exception as exc:  # pragma: no cover - exercised by the JS bridge
     )}), flush=True)
     raise SystemExit(2)
 
+
+import va_siwe  # SIWE 登录共享逻辑（与 login_probe.py 同源）
 
 BASE_URL = os.environ.get("VA_BASE_URL", "https://omni.variational.io").rstrip("/")
 IMPERSONATE = os.environ.get("VA_IMPERSONATE", "chrome")
@@ -92,12 +97,36 @@ def _do_request(session, req: dict) -> dict:
     }
 
 
+def _do_login(session, req: dict) -> dict:
+    """SIWE 自动登录：generate→sign→login 一次性完成（消息 60s 过期，必须原子）。
+
+    地址来自 Node 帧（req.address）或 env VA_ADDRESS；私钥【只】从 env 读，永不经 stdio、
+    永不进日志。返回 {status, token, exp}。
+    """
+    address = str(req.get("address") or os.environ.get("VA_ADDRESS") or "").strip()
+    pk = os.environ.get("VA_WALLET_PRIVATE_KEY", "").strip()
+    if not pk:
+        raise RuntimeError("未配置 VA_WALLET_PRIVATE_KEY，无法自动登录")
+
+    def post_json(path: str, body: dict):
+        headers = dict(BROWSER_HEADERS)
+        headers["content-type"] = "application/json"
+        headers["Referer"] = f"{BASE_URL}/perpetual/BTC"
+        r = session.request("POST", BASE_URL + path, headers=headers, json=body, timeout=TIMEOUT_S)
+        return r.status_code, r.text
+
+    out = va_siwe.do_login(post_json, address, pk)  # 抛错信息已脱敏
+    return {"status": 200, "token": out["token"], "exp": out.get("exp")}
+
+
 def _handle(session, req: dict):
     command = req.get("command")
     if command == "health":
         return {"ok": True, "profile": "variational", "base": BASE_URL, "impersonate": IMPERSONATE}
     if command == "request":
         return _do_request(session, req)
+    if command == "login":
+        return _do_login(session, req)
     raise RuntimeError(f"不支持的传输命令: {command}")
 
 

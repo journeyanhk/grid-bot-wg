@@ -121,6 +121,30 @@ export class VaTransport {
     });
   }
 
+  /**
+   * SIWE 自动登录：向 worker 发 login 命令，私钥在 worker 环境里，Node 侧不接触。
+   * 返回 { status, token, exp }。消息 60s 过期，worker 内部一次性 generate→sign→login。
+   */
+  async login(address = '') {
+    await this.start();
+    if (!this.child?.stdin?.writable) throw new Error('Variational 传输层未运行。');
+    const id = ++this.seq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error('Variational 自动登录超时。'));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      const frame = JSON.stringify({ id, command: 'login', address }) + '\n';
+      this.child.stdin.write(frame, (err) => {
+        if (!err) return;
+        const item = this.pending.get(id);
+        if (!item) return;
+        this.pending.delete(id); clearTimeout(timer); reject(err);
+      });
+    });
+  }
+
   async stop() {
     const child = this.child;
     this.child = null;
