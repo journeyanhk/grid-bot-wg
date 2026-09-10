@@ -128,7 +128,12 @@ export class VaAuth {
     } catch (e) {
       this._failStreak++;
       const msg = e?.message || String(e);
-      if (this._failStreak >= 2) {
+      // Cloudflare 对 /api/auth/login 设了 managed challenge（需浏览器执行 JS 拿
+      // cf_clearance），curl_cffi 过不去、重试无意义 → 直接给出可操作提示（贴 token 兜底）。
+      const challenged = /just a moment|challenge-platform|cf-chl|enable javascript|cloudflare/i.test(msg);
+      if (challenged) {
+        this.onAlert?.('❌ Variational 自动登录被 Cloudflare 挑战拦截（/api/auth/login 需浏览器验证）。请粘贴一枚新的 vr-token（仪表盘或 .env 的 VARIATIONAL_TOKEN）以继续实盘交易。');
+      } else if (this._failStreak >= 2) {
         this.onAlert?.(`❌ Variational 自动登录连续 ${this._failStreak} 次失败：${msg}。实盘交易可能中断，请检查 VA_WALLET_PRIVATE_KEY / 网络。`);
       } else {
         logger.warn('va', `自动登录失败（第 ${this._failStreak} 次）：${msg}`);

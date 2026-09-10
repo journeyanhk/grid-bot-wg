@@ -1,0 +1,10 @@
+# 方案 B（浏览器登录）依赖——仅当 /api/auth/login 被 Cloudflare managed challenge
+# 拦截、curl_cffi 过不去时才需要。故意与 requirements-va.txt 分开，避免给默认安装
+# 强加 ~300MB 的 Chromium。
+#
+#   pip install -r requirements-va-browser.txt
+#   playwright install chromium
+#   # 无头过不去时（managed challenge 常检测 headless），装 xvfb 用有头：
+#   #   apt-get install -y xvfb   &&   xvfb-run -a python src/exchange/va/auth_browser.py --headful
+playwright>=1.47
+eth-account>=0.11
