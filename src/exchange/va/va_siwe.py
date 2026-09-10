@@ -46,26 +46,64 @@ def extract_message(payload):
     return None
 
 
+EXPECTED_DOMAIN = "omni.variational.io"
+
+
 def assert_siwe(msg: str, address: str) -> list:
-    """签名前校验 SIWE 消息。返回问题列表（空=通过）。"""
+    """签名前校验 SIWE 消息。返回问题列表（空=通过）。
+
+    精确校验（不用子串包含，否则 evil.omni.variational.io.attacker.net 也会过）：
+      · 首行域名 == omni.variational.io（容忍带/不带 https:// 前缀）；
+      · 第二行 == 目标地址；
+      · URI 以 https://omni.variational.io[/...] 开头；
+      · Chain ID / Nonce / Expiration Time；
+      · Issued At 与本机时钟偏差 > 5 分钟也报（提前暴露时钟漂移——那会让 60s 窗口莫名失败）。
+    """
+    from datetime import datetime, timezone
     problems = []
-    low = msg.lower()
-    if "omni.variational.io" not in low:
-        problems.append("消息中未出现 omni.variational.io（域名/URI 不符）")
+    lines = [ln.rstrip() for ln in msg.splitlines()]
+
+    # 首行：'<domain> wants you to sign in with your Ethereum account:'
+    first = lines[0] if lines else ""
+    m = re.match(r"^(\S+) wants you to sign in with your Ethereum account:\s*$", first)
+    domain = m.group(1) if m else None
+    if domain not in (EXPECTED_DOMAIN, f"https://{EXPECTED_DOMAIN}"):
+        problems.append(f"SIWE 首行域名不符：{first!r}")
+
+    # 第二行：目标地址（SIWE 里是 EIP-55 校验和，比对时转小写）
+    if len(lines) < 2 or lines[1].strip().lower() != address.lower():
+        problems.append(f"SIWE 第二行地址不符（期望 {mask(address, 10)}）")
+
+    # URI：必须精确指向本域
+    uri = parse_field(msg, "URI")
+    if not uri or not (uri == f"https://{EXPECTED_DOMAIN}" or uri.startswith(f"https://{EXPECTED_DOMAIN}/")):
+        problems.append(f"URI 不符：{uri!r}")
+
     chain = parse_field(msg, "Chain ID")
     if chain is None or chain.strip() != str(EXPECTED_CHAIN_ID):
         problems.append(f"Chain ID 期望 {EXPECTED_CHAIN_ID}，实际 {chain!r}")
-    if address.lower() not in low:
-        problems.append("消息中未包含目标地址（可能被塞了别的地址）")
+
+    if not parse_field(msg, "Nonce"):
+        problems.append("缺少 Nonce")
+
     exp = parse_field(msg, "Expiration Time")
     if exp:
         try:
-            from datetime import datetime, timezone
             t = datetime.fromisoformat(exp.replace("Z", "+00:00"))
             if t <= datetime.now(timezone.utc):
                 problems.append(f"消息 Expiration Time 已过期：{exp}")
         except Exception:  # noqa: BLE001
             problems.append(f"无法解析 Expiration Time：{exp!r}")
+
+    issued = parse_field(msg, "Issued At")
+    if issued:
+        try:
+            t = datetime.fromisoformat(issued.replace("Z", "+00:00"))
+            skew = abs((datetime.now(timezone.utc) - t).total_seconds())
+            if skew > 300:
+                problems.append(f"Issued At 与本机时钟偏差 {int(skew)}s（>5min），可能时钟漂移，60s 窗口会失败")
+        except Exception:  # noqa: BLE001
+            pass  # Issued At 解析失败不阻断（Expiration 已兜底）
     return problems
 
 

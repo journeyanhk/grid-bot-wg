@@ -51,11 +51,13 @@ def _looks_like_cloudflare(status: int, text: str) -> bool:
     return status in (403, 503) and ("cloudflare" in t or "cf-ray" in t or "just a moment" in t or "attention required" in t)
 
 
-def _make_post(session):
+def _make_post(session, address: str = ""):
     def post_json(path: str, body: dict):
         headers = dict(BROWSER_HEADERS)
         headers["content-type"] = "application/json"
         headers["Referer"] = f"{BASE_URL}/perpetual/BTC"
+        if address:
+            headers["vr-connected-address"] = address  # 与 worker 一致：auth 请求都带
         r = session.request("POST", BASE_URL + path, headers=headers, json=body, timeout=TIMEOUT_S)
         return r.status_code, r.text
     return post_json
@@ -68,7 +70,7 @@ def run(dry_run: bool) -> int:
         return 2
 
     session = cffi_requests.Session(impersonate=IMPERSONATE)
-    post_json = _make_post(session)
+    post_json = _make_post(session, address)
 
     # ── 步骤 1：generate_signing_data（这一步就能验 Cloudflare）──
     print(f"[1/3] POST /api/auth/generate_signing_data  address={va_siwe.mask(address, 10)}")

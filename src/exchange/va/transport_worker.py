@@ -112,6 +112,8 @@ def _do_login(session, req: dict) -> dict:
         headers = dict(BROWSER_HEADERS)
         headers["content-type"] = "application/json"
         headers["Referer"] = f"{BASE_URL}/perpetual/BTC"
+        if address:
+            headers["vr-connected-address"] = address  # 抓包里 auth 请求都带，WAF 会看
         r = session.request("POST", BASE_URL + path, headers=headers, json=body, timeout=TIMEOUT_S)
         return r.status_code, r.text
 

@@ -23,7 +23,7 @@ function makeHttp(login) {
 {
   let logins = 0;
   const http = makeHttp(async () => { logins++; return { token: jwt(inHours(168)) }; });
-  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(48)), privateKey: '0xpk' });
+  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(48)), hasPrivateKey: true });
   await a.init();
   assert.equal(logins, 0, 'env token 有效时不应登录');
   assert.equal(http.token, jwt(inHours(48)), 'http 用上 env token');
@@ -35,7 +35,7 @@ function makeHttp(login) {
   const tok = jwt(inHours(168));
   const http = makeHttp(async () => { logins++; return { token: tok }; });
   const cache = path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-  const a = new VaAuth({ http, address: '0xA', privateKey: '0xpk', cachePath: cache });
+  const a = new VaAuth({ http, address: '0xA', hasPrivateKey: true, cachePath: cache });
   await a.init();
   assert.equal(logins, 1, '无 token 有私钥应登录一次');
   assert.equal(http.token, tok, '登录后 http 拿到新 token');
@@ -53,7 +53,7 @@ function makeHttp(login) {
   const cache = path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   fs.writeFileSync(cache, JSON.stringify({ token: cacheTok }));
   const http = makeHttp(async () => { logins++; return { token: jwt(inHours(168)) }; });
-  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(-1)), privateKey: '0xpk', cachePath: cache });
+  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(-1)), hasPrivateKey: true, cachePath: cache });
   await a.init();
   assert.equal(logins, 0, 'env 过期但缓存有效 → 不登录');
   assert.equal(http.token, cacheTok, '用缓存 token');
@@ -64,7 +64,7 @@ function makeHttp(login) {
 {
   let logins = 0;
   const http = makeHttp(async () => { logins++; return { token: jwt(inHours(168)) }; });
-  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(48)), privateKey: '0xpk' });
+  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(48)), hasPrivateKey: true });
   await a.init();               // 48h 健康
   await a.ensure();
   assert.equal(logins, 0, '健康 token 不续签');
@@ -75,19 +75,22 @@ function makeHttp(login) {
   assert.equal(logins, 1, '剩余 <24h 应续签一次');
 }
 
-// ⑤ 节流：throttle 窗内不重复登录；force 绕过；每小时上限
+// ⑤ 节流：健康 5min 窗不重复；force 也有 60s 下限；每小时上限 6
 {
   let logins = 0;
   const http = makeHttp(async () => { logins++; return { token: jwt(inHours(1)) }; });
-  const a = new VaAuth({ http, address: '0xA', privateKey: '0xpk' });
+  const a = new VaAuth({ http, address: '0xA', hasPrivateKey: true });
   await a.init();               // 首登（boot）→ logins=1，且 token 只剩 1h
   assert.equal(logins, 1);
-  await a.ensure();             // 距上次 <5min → 节流，不登录
-  assert.equal(logins, 1, '节流窗内不重复登录');
-  await a.ensure({ force: true }); // force 绕过节流
-  assert.equal(logins, 2, 'force 绕过节流');
-  // 每小时上限：已 2 次，再灌到 6 次后应停
-  for (let i = 0; i < 10; i++) await a.ensure({ force: true });
+  await a.ensure();             // 距上次 <5min → 健康节流，不登录
+  assert.equal(logins, 1, '健康节流窗内不重复登录');
+  await a.ensure({ force: true }); // 距上次 <60s → force 也被节流
+  assert.equal(logins, 1, 'force 仍受 60s 下限约束');
+  a._lastLoginAt = Date.now() - 61_000; // 模拟已过 60s
+  await a.ensure({ force: true });       // force 且已过 60s → 续签
+  assert.equal(logins, 2, 'force 且过 60s 后续签');
+  // 每小时上限：清 60s 节流后连灌，到 6 次应停
+  for (let i = 0; i < 10; i++) { a._lastLoginAt = 0; await a.ensure({ force: true }); }
   assert.ok(logins <= 6, `每小时上限 6，实际 ${logins}`);
 }
 
@@ -95,7 +98,7 @@ function makeHttp(login) {
 {
   const alerts = [];
   const http = makeHttp(async () => { throw new Error('boom'); });
-  const a = new VaAuth({ http, address: '0xA', privateKey: '0xpk', onAlert: (m) => alerts.push(m) });
+  const a = new VaAuth({ http, address: '0xA', hasPrivateKey: true, onAlert: (m) => alerts.push(m) });
   await a.init();                 // 第 1 次失败（仅日志）
   a._lastLoginAt = 0;
   await a.ensure({ force: true }); // 第 2 次失败 → 告警
@@ -111,6 +114,32 @@ function makeHttp(login) {
   assert.equal(a.canRefresh(), false);
   await a.init();
   assert.equal(logins, 0, '无私钥不登录');
+}
+
+// ⑧ env 5h + 缓存 6d → _pickSeed 按 exp 取最新（用缓存），不登录
+{
+  let logins = 0;
+  const cacheTok = jwt(inHours(6 * 24));      // 6 天
+  const cache = path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(cache, JSON.stringify({ token: cacheTok }));
+  const http = makeHttp(async () => { logins++; return { token: jwt(inHours(168)) }; });
+  const a = new VaAuth({ http, address: '0xA', envToken: jwt(inHours(5)), hasPrivateKey: true, cachePath: cache });
+  await a.init();
+  assert.equal(http.token, cacheTok, 'env 5h vs 缓存 6d → 选缓存（exp 更晚）');
+  assert.equal(logins, 0, '缓存更新鲜，无需登录');
+  fs.unlinkSync(cache);
+}
+
+// ⑨ 401 风暴：连续 20 轮 force 续签，受 60s 节流 + 每小时上限约束 → 登录次数 <=6
+{
+  let logins = 0;
+  const http = makeHttp(async () => { logins++; return { token: jwt(inHours(1)) }; });
+  const a = new VaAuth({ http, address: '0xA', hasPrivateKey: true });
+  await a.init();                              // boot 首登 → logins=1
+  // 每轮清掉 60s 节流，只留每小时上限把关 → 20 轮 401 仍 <=6 次登录
+  for (let i = 0; i < 20; i++) { a._lastLoginAt = 0; await a.ensure({ force: true }); }
+  assert.ok(logins <= 6, `401 风暴下登录应 <=6，实际 ${logins}`);
+  assert.ok(logins >= 1, '至少首登一次');
 }
 
 console.log('✓ va-auth.test.js 全部通过');

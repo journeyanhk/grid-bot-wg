@@ -16,6 +16,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../../log.js';
+import { sanitizedEnv } from '../secret-env.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..', '..');
@@ -43,6 +44,9 @@ export class VaTransport {
     this.python = opts.pythonPath || process.env.VA_PYTHON || defaultPython();
     this.worker = opts.workerPath || path.join(HERE, 'transport_worker.py');
     this.baseUrl = opts.baseUrl || process.env.VA_BASE_URL || 'https://omni.variational.io';
+    // 私钥仅用于注入 worker 环境（SIWE 登录），Node 侧不经 stdio 传给 worker。
+    this.privateKey = opts.privateKey || '';
+    this.address = opts.address || '';
     this.child = null;
     this.pending = new Map();
     this.seq = 0;
@@ -57,7 +61,13 @@ export class VaTransport {
         cwd: ROOT,
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, VA_BASE_URL: this.baseUrl, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+        env: {
+          ...sanitizedEnv(),
+          VA_BASE_URL: this.baseUrl,
+          VA_WALLET_PRIVATE_KEY: this.privateKey,
+          VA_ADDRESS: this.address || process.env.VA_ADDRESS || '',
+          PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
+        },
       });
       this.child = child;
       let settled = false;

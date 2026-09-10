@@ -69,13 +69,14 @@ export class VariationalExchange extends EventEmitter {
     this.http = opts.http || new VaHttpClient({
       baseUrl: opts.baseUrl, address: opts.address, token: opts.token,
       transportMode: opts.transport, pythonPath: opts.pythonPath,
+      privateKey: opts.privateKey,   // 仅透传给传输层注入 worker 环境，Node 侧不留存
     });
     // 会话生命周期：贴 token 优先，配了私钥则自动续签（SIWE）。
     this.auth = new VaAuth({
       http: this.http,
       address: opts.address,
       envToken: opts.token,
-      privateKey: opts.privateKey,
+      hasPrivateKey: !!opts.privateKey,   // Node 侧只需知道能否自签，私钥只在 worker 环境
       cachePath: opts.tokenCachePath,
       // 续签成功=info（仅仪表盘，不推手机）；连续失败=❌（经告警环推手机）。
       onNotice: (m) => logger.info('va', m),
@@ -479,7 +480,11 @@ export class VariationalExchange extends EventEmitter {
         // 401 立即强制续签（受 5min 节流 + 每小时上限约束）；成功则下一轮恢复交易。
         if (this.auth.canRefresh()) {
           const ok = await this.auth.ensure({ force: true }).catch(() => false);
-          if (ok && this.http.hasToken()) { this._tradingReady = true; this.operationalIssue = null; }
+          if (ok && this.http.hasToken()) {
+            // 新 token 先用 portfolio 验一次再放行，避免\"登录成功→立刻又 401→再登录\"空转。
+            try { await this._refreshAccount(); this._tradingReady = true; this.operationalIssue = null; }
+            catch { /* 新 token 仍不可用：保持锁定，下轮受 60s force 节流约束再试 */ }
+          }
         }
       } else this._setIssue(e, !!e?.transient);
     } finally { this._polling = false; }

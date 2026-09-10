@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { sanitizedEnv } from '../secret-env.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..', '..');
@@ -39,7 +40,7 @@ export class LighterSignerBridge {
         cwd: ROOT,
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...this.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+        env: { ...sanitizedEnv(), ...this.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       });
       this.child = child;
       let settled = false;

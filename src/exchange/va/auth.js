@@ -10,7 +10,8 @@ import { logger } from '../../log.js';
 
 const HOUR = 3600_000;
 const REFRESH_BELOW_MS = 24 * HOUR;      // 剩余低于此值且可自签 → 续签
-const RELOGIN_THROTTLE_MS = 5 * 60_000;  // 两次登录最小间隔
+const RELOGIN_THROTTLE_MS = 5 * 60_000;  // 两次登录最小间隔（健康续签）
+const RELOGIN_FORCE_THROTTLE_MS = 60_000; // 401 强制续签的最小间隔（防 401 风暴打爆登录）
 const RELOGIN_MAX_PER_HOUR = 6;
 
 /** 解码 JWT 的 exp（秒），不验签。无法解析返回 null。 */
@@ -26,11 +27,11 @@ export function decodeJwtExp(token) {
 }
 
 export class VaAuth {
-  constructor({ http, address, envToken, privateKey, cachePath, onNotice, onAlert } = {}) {
+  constructor({ http, address, envToken, hasPrivateKey, cachePath, onNotice, onAlert } = {}) {
     this.http = http || null;
     this.address = address || '';
     this.envToken = envToken || '';
-    this.privateKey = privateKey || '';
+    this.hasPrivateKey = !!hasPrivateKey;   // 私钥本身只在 Python worker 环境里，Node 不持有
     this.cachePath = cachePath || '';
     this.onNotice = typeof onNotice === 'function' ? onNotice : null;
     this.onAlert = typeof onAlert === 'function' ? onAlert : null;
@@ -43,7 +44,7 @@ export class VaAuth {
   }
 
   /** 是否具备私钥自动续签能力（需私钥 + bridge 传输）。 */
-  canRefresh() { return !!(this.privateKey && this.http?.login); }
+  canRefresh() { return !!(this.hasPrivateKey && this.http?.login); }
   hasToken() { return !!this.token; }
   /** 当前 token 剩余毫秒；无 exp 但有 token 视为 Infinity（贴 token 无法判断的场景）。 */
   msLeft() { return this.exp ? this.exp * 1000 - Date.now() : (this.token ? Infinity : 0); }
@@ -62,16 +63,21 @@ export class VaAuth {
   }
 
   _pickSeed() {
-    if (this._valid(this.envToken, HOUR)) return this.envToken;
-    const c = this._readCache();
-    if (c?.token && this._valid(c.token, HOUR)) return c.token;
-    return '';
+    // 候选：env 贴 token 与缓存 token；都取"仍有 >1h 余量"的，再按 exp 选最新一枚。
+    // 这样贴 token 优先仍成立（缓存为空/更旧时用它），但自动登录跑起来后重启不会倒退。
+    const cands = [this.envToken, this._readCache()?.token].filter((t) => this._valid(t, HOUR));
+    cands.sort((a, b) => (decodeJwtExp(b) || 0) - (decodeJwtExp(a) || 0));
+    return cands[0] || '';
   }
 
   /** 启动解析 + 必要时首登。返回最终 token（可能为空=只读）。 */
   async init() {
     const seed = this._pickSeed();
     if (seed) this._use(seed);
+    // .env 里贴了 token 但已失效，且我们改用了缓存/自动登录 → 提醒用户清空，避免误解。
+    if (this.envToken && !this._valid(this.envToken, 0) && seed !== this.envToken) {
+      logger.warn('va', '.env 中的 VARIATIONAL_TOKEN 已失效，已改用缓存/自动登录；可清空该项。');
+    }
     await this.ensure({ boot: true });
     return this.token;
   }
@@ -91,7 +97,12 @@ export class VaAuth {
     }
     const now = Date.now();
     this._loginTimes = this._loginTimes.filter((t) => now - t < HOUR);
-    if (!force && !boot && now - this._lastLoginAt < RELOGIN_THROTTLE_MS) return this.hasToken();
+    // 节流：健康续签 5min；force（401 恢复）仍保留 60s 下限，避免持续 401 在十几秒内
+    // 烧光每小时配额后整点无法再续签。仅 boot 首登不节流。
+    if (!boot) {
+      const gap = force ? RELOGIN_FORCE_THROTTLE_MS : RELOGIN_THROTTLE_MS;
+      if (now - this._lastLoginAt < gap) return this.hasToken();
+    }
     if (this._loginTimes.length >= RELOGIN_MAX_PER_HOUR) {
       logger.warn('va', '自动登录已达每小时上限（6 次），暂缓续签。');
       return this.hasToken();

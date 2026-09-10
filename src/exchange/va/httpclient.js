@@ -54,7 +54,7 @@ export class VaHttpClient {
     if (opts.transport && typeof opts.transport === 'object') {
       this.transport = opts.transport;
     } else if (this.transportMode === 'bridge') {
-      this.transport = new VaTransport({ baseUrl: this.baseUrl, pythonPath: opts.pythonPath });
+      this.transport = new VaTransport({ baseUrl: this.baseUrl, pythonPath: opts.pythonPath, privateKey: opts.privateKey, address: this.address });
     } else {
       this.transport = null; // plain-fetch path
     }
