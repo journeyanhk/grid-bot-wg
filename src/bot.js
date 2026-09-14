@@ -66,6 +66,11 @@ export class GridBot {
     this._lastDynActionAt = 0;
     this._lastCalmDeniedAt = 0;
     this._lastShadowGateLogAt = 0; // 动态影子：库存门拦截日志节流
+    // 动态动作记录（分支A/B，含影子'本应'）：毕业评审唯一数据源；进快照、封顶 200。
+    this._dynLog = [];
+    // 门拦截计数（每门每小时最多累加一次，近似'多少个小时窗内该门拦下了本应发生的动作'）。
+    this._dynGateBlocked = { inventory: 0, calm: 0, cooldown: 0 };
+    this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
     this._auditNeedsRebase = false; // 恢复路径缺省既无基线又无锚点时，首次观测重校准
     this._autoStopped = null;        // { at, reason:'breakout'|'maxloss', config } 自动停机记录 → 冷静门重启
     this._lastVanishAlertAt = 0;
@@ -120,6 +125,8 @@ export class GridBot {
       invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
       auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
       auditSellsBase: this._auditSellsBase ?? 0,
+      dynLog: this._dynLog,             // 动态动作记录（毕业评审数据源）
+      dynGateBlocked: this._dynGateBlocked, // 门拦截计数
     };
   }
 
@@ -136,6 +143,10 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
+    this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : []; // 动态动作记录（毕业评审）
+    this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
+      ? { inventory: 0, calm: 0, cooldown: 0, ...snap.dynGateBlocked } : { inventory: 0, calm: 0, cooldown: 0 };
+    this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线
     this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0); // 审计锚点（旧快照缺省=从现在重新对账）
     this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
@@ -176,6 +187,10 @@ export class GridBot {
     this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
     if (!Number.isFinite(Number(snap.auditBuysBase)) || !Number.isFinite(Number(snap.invBase))) this._auditNeedsRebase = true; // 基线/锚点同步（Review13）
     this.outOfRange = !!snap.outOfRange;
+    this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : [];
+    this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
+      ? { inventory: 0, calm: 0, cooldown: 0, ...snap.dynGateBlocked } : { inventory: 0, calm: 0, cooldown: 0 };
+    this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
     this.lastPrice = snap.lastPrice ?? null;
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
     this._recomputeRisk();
@@ -1738,6 +1753,37 @@ export class GridBot {
   }
   _stopDynTimer() { if (this._dynTimer) { clearInterval(this._dynTimer); this._dynTimer = null; } }
 
+  /** 记录一次动态动作（分支A/B；影子模式记 shadow=true 的'本应'）。回填字段留给核账任务。 */
+  _recordDynAction(entry) {
+    if (!Array.isArray(this._dynLog)) this._dynLog = [];
+    this._dynLog.push({ t: Date.now(), pnlAfter: null, rungsAfter: null, realizedAtAction: null, ...entry });
+    if (this._dynLog.length > 200) this._dynLog.splice(0, this._dynLog.length - 200);
+    this._changed();
+  }
+
+  /** 门拦截计数：每门每小时最多累加一次（避免 60s 节拍把持续拦截刷成天文数字）。 */
+  _noteDynGate(gate) {
+    const now = Date.now();
+    if (!this._dynGateBlocked) this._dynGateBlocked = { inventory: 0, calm: 0, cooldown: 0 };
+    if (!this._dynGateLastAt) this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
+    if (now - (this._dynGateLastAt[gate] || 0) < 60 * 60_000) return;
+    this._dynGateLastAt[gate] = now;
+    this._dynGateBlocked[gate] = (this._dynGateBlocked[gate] || 0) + 1;
+    this._changed();
+  }
+
+  /** 动态动作的 before 快照（现价/库存格数/浮盈/累计格利）——核账任务据此回填 3 日/48h 结果。 */
+  _dynBefore(price, pos) {
+    const perGrid = this.config?.sizeBase || 1;
+    return {
+      lower: this.config.lower, upper: this.config.upper, price: round2(price),
+      invGrids: pos ? round2((Number(pos.sizeBase) || 0) / perGrid) : 0,
+      uPnl: pos && Number.isFinite(Number(pos.unrealizedPnl)) ? round2(Number(pos.unrealizedPnl)) : null,
+      completedRungs: this.stats.completedRungs || 0,
+      gridProfit: round2(this.stats.gridProfit || 0),
+    };
+  }
+
   /**
    * 动态网格监督器（60s 节拍，串行互斥）：
    *  - 分支 B（价值主体）：破界/止损自动停机后，冷静门满足才自动重启（区间以现价居中）
@@ -1780,6 +1826,7 @@ export class GridBot {
         const invGate = !pos || Math.abs(Number(pos.sizeBase) || 0) <= (dyn.invGateGrids ?? 2) * (cfg.sizeBase || 0);
         const cooldownOk = Date.now() - this._lastDynActionAt >= (dyn.recenterCooldownMin ?? 360) * 60_000;
         if (drift && !invGate) {
+          this._noteDynGate('inventory');
           // Review14 待办 1：影子期门拦截的负样本——"正确的静默"对第 7 天评审无帮助，
           // 输出节流的门拦截日志（每小时一条），让影子期产出可评审记录。
           if (Date.now() - (this._lastShadowGateLogAt || 0) > 60 * 60_000) {
@@ -1788,16 +1835,23 @@ export class GridBot {
             this._alert(`[动态·影子] 漂移已达标但被库存门拦截（库存 ${round2(inv)} 格 > 门限 ${dyn.invGateGrids ?? 2} 格）：未重定区间（带重仓追涨重定正是回测里的亏损死法）。`);
           }
         }
+        if (drift && invGate && !calm) this._noteDynGate('calm');
+        if (drift && invGate && calm && !cooldownOk) this._noteDynGate('cooldown');
         if (drift && invGate && calm && cooldownOk) {
           this._lastDynActionAt = Date.now();
           const lo = alignToStep(price - width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
           const hi = alignToStep(price + width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
+          const beforeA = this._dynBefore(price, pos); const afterA = { lower: lo, upper: hi };
           if (dyn.shadow) {
             this._alert(`[动态·影子] 本应漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)} 偏心 ${round2(Math.abs(price - mid))}，库存 ${pos?.sizeBase ?? 0}）；影子模式不执行。`);
+            this._recordDynAction({ branch: 'A', reason: 'drift', shadow: true, before: beforeA, after: afterA });
           } else {
             logger.info('bot', `[动态] 漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)}）`);
-            try { await this.adjustRange({ lower: lo, upper: hi }); this.stats.recenters++; this._changed(); }
-            catch (e) { this._alert(`[动态] 漂移重定失败：${e?.message || e}`); }
+            try {
+              await this.adjustRange({ lower: lo, upper: hi }); this.stats.recenters++;
+              this._recordDynAction({ branch: 'A', reason: 'drift', shadow: false, before: beforeA, after: afterA });
+              this._changed();
+            } catch (e) { this._alert(`[动态] 漂移重定失败：${e?.message || e}`); }
           }
         }
         return;
@@ -1807,8 +1861,9 @@ export class GridBot {
       if (dyn.restartEnabled && this._autoStopped) {
         const as = this._autoStopped;
         const cooldownMs = (dyn.restartCooldownMin ?? 120) * 60_000;
-        if (Date.now() - as.at < cooldownMs) return;
+        if (Date.now() - as.at < cooldownMs) { this._noteDynGate('cooldown'); return; }
         if (!calm) {
+          this._noteDynGate('calm');
           if (Date.now() - this._lastCalmDeniedAt > 30 * 60_000) {
             this._lastCalmDeniedAt = Date.now();
             this._alert(`[动态] 自动重启被冷静门拦截（动量 ${movePct != null ? round2(movePct) + '%' : '未知'} > ${dyn.calmMaxMovePct}%），${as.reason} 后暂不回场。`);
@@ -1821,8 +1876,10 @@ export class GridBot {
         const widthB = as.config.upper - as.config.lower;
         const lo = alignToStep(price - widthB / 2, as.config.stepPrice || 0.01); // buildGrid 会重算 spacing，此处仅按 stepPrice 对齐
         const hi = alignToStep(price + widthB / 2, as.config.stepPrice || 0.01);
+        const beforeB = this._dynBefore(price, this.ex.getPosition?.(mId)); const afterB = { lower: lo, upper: hi };
         if (dyn.shadow) {
           this._alert(`[动态·影子] 本应自动重启网格至 [${lo}, ${hi}]（${as.reason} 后冷静门满足）；影子模式不执行。`);
+          this._recordDynAction({ branch: 'B', reason: 'restart', shadow: true, before: beforeB, after: afterB });
           return;
         }
         logger.info('bot', `[动态] 自动重启网格至 [${lo}, ${hi}]（${as.reason} 后冷静门满足）`);
@@ -1831,6 +1888,7 @@ export class GridBot {
           await this.start({ ...as.config, lower: lo, upper: hi, dynamic: dyn });
           this.stats.autoRestarts++;
           this._autoStopped = null;
+          this._recordDynAction({ branch: 'B', reason: 'restart', shadow: false, before: beforeB, after: afterB });
           this._changed();
         } catch (e) {
           this._alert(`[动态] 自动重启失败：${e?.message || e}（保留自动停机状态，下轮再试）`);
@@ -1909,6 +1967,9 @@ export class GridBot {
         autoRestarts: this.stats.autoRestarts || 0,
         shadow: !!(this.config?.dynamic?.shadow),
         enabled: !!(this.config?.dynamic?.enabled),
+        gateBlocked: this._dynGateBlocked || { inventory: 0, calm: 0, cooldown: 0 },
+        logCount: Array.isArray(this._dynLog) ? this._dynLog.length : 0,
+        log: Array.isArray(this._dynLog) ? this._dynLog.slice(-20) : [],
       },
       openOrders: this.active.size,
       exchangeOpenOrders: this._exchangeOpenOrders,
