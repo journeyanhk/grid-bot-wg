@@ -127,7 +127,8 @@ test('自动停机记录：破界 stop 前 _noteAutoStop(reason=breakout)', asyn
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
   await bot.start({ ...CFG, outOfRangeAction: 'close', dynamic: { enabled: true, shadow: false } });
   bot.lastPrice = 150;
-  bot._handlePrice({ marketId: 1, price: 205 }); // 突破上边界
+  bot._handlePrice({ marketId: 1, price: 210 }); // 第 1 拍越界（>upper+半格 205）：去抖计数
+  bot._handlePrice({ marketId: 1, price: 210 }); // 第 2 拍：触发破界 close
   await sleep(120);
   assert.equal(bot.running, false, '破界 close 停止');
   assert.ok(bot._autoStopped, '应记录自动停机');

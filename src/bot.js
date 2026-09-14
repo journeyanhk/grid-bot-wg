@@ -23,6 +23,7 @@ export class GridBot {
     this.startBalance = null;
     this.lastPrice = null;
     this.outOfRange = false;
+    this._outTicks = 0;             // recover 迟滞：连续越过外侧半格的价格拍数（进破界需 ≥2 拍）
     this.risk = null;
     this._stopping = false;         // re-entrancy guard for auto-stop
     this._coidSeq = 0;              // monotonic client-order-id counter
@@ -398,6 +399,9 @@ export class GridBot {
       // 破界出口纪律：recover 模式下若未实现亏损达到该上限（USDC），强制撤单+市价平仓+停止
       // （recover 本身不止损，此值给单边行情一条硬退出线；0/缺省 = 不启用）
       recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
+      // recover 破界迟滞：进/出破界都以「边界 ± recoverHystFrac 格」为缓冲带，配合连续 2 拍确认，
+      // 避免价格贴边抖动反复切换模式（默认半格）。0 = 仅保留 2 拍去抖、无空间缓冲。
+      recoverHystFrac: (Number.isFinite(cfg.recoverHystFrac) && Number(cfg.recoverHystFrac) >= 0) ? Number(cfg.recoverHystFrac) : 0.5,
       minOrderSize: market.minOrderSize || 0,   // 尘埃仓守卫用：部分成交低于最小下单量时跳过补挂对腿
       // 动态网格：核心是"冷静门控自动重启"（破界止损后只在市场平静时回场），
       // 另有"漂移重定"（默认影子模式）。所有动作只复用 start/adjustRange，无新增下单路径。
@@ -420,6 +424,7 @@ export class GridBot {
     this._retryQueue = []; this._noPosStreak = 0;
     this._placementProgress = null;
     this.recovery = false;
+    this._outTicks = 0;
 
     // record the starting equity up front (margin pre-check, returnPct, recovery)
     // 库存基线：保留持仓重启时，把启用时刻的已有持仓记为基线，库存漂移审计减去它，
@@ -617,6 +622,7 @@ export class GridBot {
     this.grid = newGrid;
     this._recomputeRisk();
     this.outOfRange = Number.isFinite(price) ? (price < lo || price > hi) : false;
+    this._outTicks = 0; // 新区间：清空迟滞去抖计数
     this._resumeTradingRuntime();
     if (!this.outOfRange && Number.isFinite(price) && price > 0) {
       const seeds = seedOrders({ levels: newGrid.levels, price, mode: this.config.mode, spacing: newGrid.spacing });
@@ -1154,7 +1160,14 @@ export class GridBot {
     this._checkMaxLoss();
     this._drainRetryQueue().catch(() => {});
     if (this.recovery) { this._manageRecoveryStandalone(); return; }
-    const out = p.price < this.config.lower || p.price > this.config.upper;
+    // recover 迟滞去抖：进破界要求越过外侧半格且连续 2 拍（适配器 ~2.5s/拍 ≈ 5s），
+    // 出破界要求价格回到内侧半格。避免贴边单拍抖动反复切换模式（见 _placeRecoveryLadder 首档 L∓2 格）。
+    const sp = this.grid?.spacing || this.config.spacing || 0;
+    const h = (this.config.recoverHystFrac ?? 0.5) * sp;
+    const beyond = p.price < this.config.lower - h || p.price > this.config.upper + h;
+    const inside = p.price > this.config.lower + h && p.price < this.config.upper - h;
+    this._outTicks = beyond ? this._outTicks + 1 : 0;
+    const out = this.outOfRange ? !inside : this._outTicks >= 2;
     const action = this.config.outOfRangeAction || 'close';
     if (out && !this.outOfRange) {
       this.outOfRange = true;
@@ -1242,16 +1255,16 @@ export class GridBot {
     let placed = 0;
     const room = () => existing.size + placed < maxRungs;
     if (long && price < L) {
-      // 跌破下边界、手里是多头：在「现价 ↔ 下边界」之间挂 reduce-only 卖单
-      for (let lv = L - sp; lv > price && room(); lv -= sp) {
+      // 跌破下边界、手里是多头：从「下边界 − 2 格」向现价挂 reduce-only 卖单（首档留 2 格缓冲，避免刚破界就减仓）
+      for (let lv = L - 2 * sp; lv > price && room(); lv -= sp) {
         const idx = Math.round((lv - lvl0) / sp);
         if (existing.has(idx)) continue;
         this._place({ levelIndex: idx, side: 'sell', price: lv, reduceOnly: true, recovery: true, opening: false });
         placed++;
       }
     } else if (!long && price > U) {
-      // 突破上边界、手里是空头：在「上边界 ↔ 现价」之间挂 reduce-only 买单
-      for (let lv = U + sp; lv < price && room(); lv += sp) {
+      // 突破上边界、手里是空头：从「上边界 + 2 格」向现价挂 reduce-only 买单（首档留 2 格缓冲，避免刚破界就减仓）
+      for (let lv = U + 2 * sp; lv < price && room(); lv += sp) {
         const idx = Math.round((lv - lvl0) / sp);
         if (existing.has(idx)) continue;
         this._place({ levelIndex: idx, side: 'buy', price: lv, reduceOnly: true, recovery: true, opening: false });

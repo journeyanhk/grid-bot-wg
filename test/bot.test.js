@@ -184,7 +184,10 @@ test('成交补单链：买单成交 -> 相邻上一格挂卖单；卖单成交 
 
 test('出区间风控(close)：价格突破上边界 -> 撤单 + 平仓 + 停止', async () => {
   const { ex, bot } = await makeBot();
-  ex.setPrice(1, 205);
+  ex.setPrice(1, 210); // 第 1 拍越界（>upper+半格=205）：仅去抖计数，不触发
+  await sleep(10);
+  assert.equal(bot.running, true, '单拍越界不触发（2 拍确认去抖）');
+  ex.setPrice(1, 210); // 第 2 拍越界：触发
   await sleep(100); // 等待异步 auto-stop 完成
   assert.equal(bot.running, false, '自动停止');
   assert.equal(ex.closeCalls, 1, '已发送平仓');
@@ -197,7 +200,10 @@ test('出区间风控(recover)：空头突破上边界 -> 挂只减仓回收阶�
   ex.fill(idOf(bot, sell160));
   await sleep(10);
   assert.equal(bot.ex.getPosition(1).sizeBase, -1, '空头持仓 -1');
-  ex.setPrice(1, 250);
+  ex.setPrice(1, 250); // 第 1 拍越界：去抖计数
+  await sleep(10);
+  assert.equal(bot.outOfRange, false, '单拍越界不进破界');
+  ex.setPrice(1, 250); // 第 2 拍：进破界
   await sleep(50);
   const ladders = [...bot.active.values()].filter((a) => a.recovery);
   assert.ok(ladders.length >= 2, '应挂出回收阶梯单，实际 ' + ladders.length);
@@ -206,6 +212,45 @@ test('出区间风控(recover)：空头突破上边界 -> 挂只减仓回收阶�
   ex.setPrice(1, 150);
   await sleep(50);
   assert.equal(bot.outOfRange, false);
+  assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, '阶梯已撤销');
+});
+
+test('recover 迟滞：越外侧半格且连续 2 拍才进破界；回内侧半格才退出；阶梯首档 L−2 格', async () => {
+  // CFG：lower=100 upper=200 gridCount=10 → 格距 sp=10，半格 h=5 → 外侧 95、内侧 105
+  const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover' });
+  const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
+  ex.fill(idOf(bot, buy140));
+  await sleep(10);
+  assert.ok(bot.ex.getPosition(1).sizeBase > 0, '应有多头库存');
+
+  // 半格缓冲带内抖动：97(=L−0.3格) 与 102(=L+0.2格) 都不进破界
+  ex.setPrice(1, 97); await sleep(10);
+  ex.setPrice(1, 102); await sleep(10);
+  assert.equal(bot.outOfRange, false, '半格缓冲带内不进破界');
+  assert.equal(bot._outTicks, 0, '带内不累计越界拍数');
+
+  // 越过外侧半格但仅 1 拍：不进破界（2 拍确认去抖）
+  ex.setPrice(1, 94); await sleep(10);
+  assert.equal(bot.outOfRange, false, '单拍越界不进破界');
+  assert.equal(bot._outTicks, 1, '越界拍数累计 1');
+
+  // 连续第 2 拍越界（79 同时低于 L−2格=80）：进破界并挂阶梯，首档落在 80
+  ex.setPrice(1, 79); await sleep(50);
+  assert.equal(bot.outOfRange, true, '连续 2 拍越界进破界');
+  const ladders = [...bot.active.values()].filter((a) => a.recovery);
+  assert.ok(ladders.length >= 1, '应挂出回收阶梯单，实际 ' + ladders.length);
+  assert.ok(ladders.every((a) => a.side === 'sell' && a.recovery), '多头破下界挂 reduce-only 卖单（recovery=true 即 reduce-only）');
+  assert.ok(ladders.some((a) => a.price === 80), '阶梯首档 = L − 2 格 = 80');
+  assert.ok(ladders.every((a) => a.price <= 80), '所有阶梯档不高于 L−2 格（首档留 2 格缓冲）');
+
+  // 回到迟滞带内（102 = L+0.2格 < 内侧半格 105）：不撤阶梯
+  ex.setPrice(1, 102); await sleep(50);
+  assert.equal(bot.outOfRange, true, '回到迟滞带内仍保持破界');
+  assert.ok([...bot.active.values()].some((a) => a.recovery), '带内不撤阶梯');
+
+  // 回到内侧半格之内（106 > 105）：撤阶梯、恢复正常
+  ex.setPrice(1, 106); await sleep(50);
+  assert.equal(bot.outOfRange, false, '回内侧半格退出破界');
   assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, '阶梯已撤销');
 });
 
