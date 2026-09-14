@@ -415,7 +415,57 @@ async function ready(http) {
   assert.equal(m.currentLeverage, 5, 'currentLeverage 反映账户当前 5x');
 }
 
-// JWT exp decode is exercised implicitly (MockHttp has no token field -> null exp -> no throw).
-void Buffer;
+// ⑱ vr-token 寿命三档预警（手动 token 模式；配了私钥能自签则整体跳过）。
+// 构造一个带 exp 的假 JWT，驱动 _checkTokenLife，断言各档级别 / key / cooldown。
+{
+  const mkJwt = (msFromNow) => {
+    const exp = Math.floor((Date.now() + msFromNow) / 1000);
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+    return `${b64({ alg: 'none' })}.${b64({ exp })}.sig`;
+  };
+  const mkTokEx = (msFromNow) => {
+    const http = new MockHttp();
+    http.token = mkJwt(msFromNow);           // 让 decodeJwtExp 拿到寿命
+    const ex = new VariationalExchange({ underlyings: ['BTC'], leverage: 0, http });
+    assert.equal(ex.auth.canRefresh(), false, '无私钥 → 手动 token 模式（canRefresh=false）');
+    const out = [];
+    ex.onNotify = (p) => out.push(p);
+    return { ex, out };
+  };
+
+  // >72h：完全静默（连 info 都不发）。
+  { const { ex, out } = mkTokEx(80 * 3600_000); ex._checkTokenLife(); assert.equal(out.length, 0, '>72h 不预警'); }
+
+  // <72h：info（仅面板/日志），无 cooldownMs。
+  { const { ex, out } = mkTokEx(50 * 3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'info');
+    assert.equal(out[0].key, 'token-expiry'); assert.equal(out[0].cooldownMs, undefined, 'info 档不设 cooldown'); }
+
+  // <24h：warn（推手机，6h 冷却）。
+  { const { ex, out } = mkTokEx(10 * 3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'warn');
+    assert.equal(out[0].cooldownMs, 6 * 3600_000, 'warn 档 6h 冷却'); }
+
+  // <2h：critical（推手机，30min 冷却）。
+  { const { ex, out } = mkTokEx(1 * 3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'critical');
+    assert.equal(out[0].cooldownMs, 30 * 60_000, 'critical 档 30min 冷却'); }
+
+  // 已过期：critical（交易锁定，去面板重贴 token）。
+  { const { ex, out } = mkTokEx(-3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'critical');
+    assert.ok(/已过期/.test(out[0].message)); }
+
+  // 轮询节流：throttle=true 时，30min 内第二次调用不重复计算/推送。
+  { const { ex, out } = mkTokEx(1 * 3600_000);
+    ex._checkTokenLife({ throttle: true }); ex._checkTokenLife({ throttle: true });
+    assert.equal(out.length, 1, '30min 内节流，只发一次'); }
+
+  // 无 exp 的 token：判不了寿命，静默跳过（不误报）。
+  { const http = new MockHttp(); http.token = 'not-a-jwt';
+    const ex = new VariationalExchange({ underlyings: ['BTC'], leverage: 0, http });
+    const out = []; ex.onNotify = (p) => out.push(p); ex._checkTokenLife();
+    assert.equal(out.length, 0, '无 exp 不预警'); }
+}
 
 console.log('✓ va.test.js 全部通过');

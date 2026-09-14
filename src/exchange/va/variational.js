@@ -33,7 +33,11 @@ const POLL_MS = 2500;
 const HISTORY_BUFFER_MS = 5 * 60_000;   // look-back padding when querying terminal rows
 const RESOLVE_TIMEOUT_MS = 10 * 60_000; // a gone order unresolved this long -> loud dropped-level warning
 const MAX_PAGES = 5;                     // pagination cap for orders/v2 + trades (100/page)
-const TOKEN_WARN_MS = 24 * 3600_000;     // warn when the vr-token JWT has < 24h left
+// vr-token 寿命三档预警（手动 token 模式；配了私钥可自签则整体跳过）：
+const TOKEN_TIER_INFO_MS = 72 * 3600_000;   // <72h：info（仅面板/日志，不推手机）
+const TOKEN_TIER_WARN_MS = 24 * 3600_000;   // <24h：warn（推手机，6h 冷却）
+const TOKEN_TIER_CRIT_MS = 2 * 3600_000;    // <2h ：critical（推手机，30min 冷却）
+const TOKEN_CHECK_THROTTLE_MS = 30 * 60_000; // 轮询里每 30 分钟才真正算一次，别每 2.5s 都算
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -65,6 +69,8 @@ export class VariationalExchange extends EventEmitter {
     this._tracked = new Map();       // rfqId -> {orderId, marketId, side, price, sizeBase, levelIndex, reduceOnly, createdAt, seen, placedAt, goneFirstAt, canceling, forgotten, internal}
     this._timer = null; this._polling = false; this._tradingReady = false;
     this._lastAlertAt = 0;
+    this.onNotify = null;          // server 注入：(payload)=>notifier.send(...)；带 level/key/cooldown 语义
+    this._lastTokenCheckAt = 0;    // token 寿命检查的轮询内节流时间戳
     this._placementPausedUntil = 0; // set on a 50-order-cap 422; refuse new opens until it passes
     this.http = opts.http || new VaHttpClient({
       baseUrl: opts.baseUrl, address: opts.address, token: opts.token,
@@ -144,21 +150,50 @@ export class VariationalExchange extends EventEmitter {
     }
   }
 
-  _checkTokenLife() {
-    const exp = decodeJwtExp(this.http.token);
-    if (!exp) return;
-    const msLeft = exp * 1000 - Date.now();
-    if (msLeft <= 0) {
-      // 配了私钥可自动续签时，过期不阻断连接——交给 auth.ensure 在轮询里重登。
-      if (this.auth.canRefresh()) { logger.warn('va', 'vr-token 已过期，将尝试用私钥自动续签。'); return; }
-      throw new VaHttpError('VARIATIONAL_TOKEN（vr-token）已过期，请重新获取会话 token 后重连。', 401);
+  // 统一通知出口：优先走 server 注入的 onNotify（带 level/key/cooldown，进通知总线），
+  // 缺省（单测/独立实例）时回落——info 只记日志，warn/critical 走 error 事件。
+  _notify(payload) {
+    if (payload.level === 'info') logger.info('va', payload.message);
+    if (typeof this.onNotify === 'function') {
+      try { this.onNotify(payload); } catch { /* 通知失败绝不影响交易主流程 */ }
+      return;
     }
-    // 可自签时临期无需打扰用户（auth 会在 <24h 自动续签）。
-    if (msLeft < TOKEN_WARN_MS && !this.auth.canRefresh()) {
-      const hrs = Math.max(1, Math.round(msLeft / 3600_000));
-      logger.warn('va', `vr-token 将在约 ${hrs} 小时后过期，请及时更新 VARIATIONAL_TOKEN。`);
-      // 转发到告警环 / 通知总线（⚠️ 前缀→warn 级推送），让用户在手机上及时看到。
-      this.emit('error', new Error(`⚠️ Variational 会话 token 将在约 ${hrs} 小时后过期，请尽快更新 VARIATIONAL_TOKEN 并重连，否则实盘交易会中断。`));
+    if (payload.level !== 'info') this.emit('error', new Error(payload.message));
+  }
+
+  // vr-token 寿命三档预警。手动 token 模式专用——配了私钥能自签时整体跳过（auth 自动续签）。
+  // 从 init 调一次（throttle=false），之后由 _poll 每轮调（throttle=true，内部 30min 节流）。
+  // 同一 key 'token-expiry' 随剩余时间递减而级别升级（info→warn→critical），
+  // 通知总线对升级立即放行，档内则按各自 cooldown 去重，既不漏也不刷屏。
+  _checkTokenLife({ throttle = false } = {}) {
+    const now = Date.now();
+    if (throttle && now - this._lastTokenCheckAt < TOKEN_CHECK_THROTTLE_MS) return;
+    this._lastTokenCheckAt = now;
+    // 可自签（配了私钥）时无需打扰用户——auth 会在 <24h 自动续签。
+    if (this.auth.canRefresh()) return;
+    const exp = decodeJwtExp(this.http.token);
+    if (!exp) return;   // 无 exp 字段的 token 判不了寿命，跳过
+    const msLeft = exp * 1000 - now;
+    if (msLeft <= 0) {
+      this._notify({ source: 'va', level: 'critical', key: 'token-expiry', cooldownMs: 30 * 60_000,
+        title: 'Variational token 已过期',
+        message: '🔴 Variational 会话 token 已过期，实盘交易已锁定。请在仪表盘 VA 面板重新粘贴 7 天有效的 vr-token 后恢复交易。' });
+      return;
+    }
+    const hrs = Math.max(1, Math.round(msLeft / 3600_000));
+    if (msLeft < TOKEN_TIER_CRIT_MS) {
+      this._notify({ source: 'va', level: 'critical', key: 'token-expiry', cooldownMs: 30 * 60_000,
+        title: 'Variational token 即将过期',
+        message: `🔴 Variational token 约 ${hrs} 小时后过期！请立即在仪表盘 VA 面板粘贴新 token，否则实盘交易将中断。` });
+    } else if (msLeft < TOKEN_TIER_WARN_MS) {
+      this._notify({ source: 'va', level: 'warn', key: 'token-expiry', cooldownMs: 6 * 3600_000,
+        title: 'Variational token 临期',
+        message: `⚠️ Variational token 约 ${hrs} 小时后过期，请尽快在仪表盘 VA 面板更新 token。` });
+    } else if (msLeft < TOKEN_TIER_INFO_MS) {
+      const days = Math.max(1, Math.round(msLeft / 86400_000));
+      this._notify({ source: 'va', level: 'info', key: 'token-expiry',
+        title: 'Variational token 提醒',
+        message: `Variational token 约 ${days} 天后过期，记得届时在仪表盘 VA 面板更新（一键粘贴即可）。` });
     }
   }
 
@@ -486,6 +521,8 @@ export class VariationalExchange extends EventEmitter {
         const ok = await this.auth.ensure().catch(() => false);
         if (ok && !this._tradingReady && this.http.hasToken()) this._tradingReady = true;
       }
+      // token 寿命三档预警（手动 token 模式；内部 30min 节流，可自签则整体跳过）。
+      this._checkTokenLife({ throttle: true });
       await this._refreshPrices();
       if (this._tradingReady) {
         await this._refreshAccount();

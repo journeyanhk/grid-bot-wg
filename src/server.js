@@ -116,6 +116,11 @@ const hlExchange = createHlExchange(cfg.hl);
 const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s),
   onAlert: (a) => notifier.send({ source: 'hl', message: `[Entropy] ${a.message}`, level: a.level, key: a.key ? 'hl:' + a.key : undefined }) });
 const vaExchange = createVaExchange(cfg.va);
+// VA 会话 token 三档寿命预警：交易所内部判寿命，经通知总线按级别推送（info 仅面板，warn/critical 推手机）。
+vaExchange.onNotify = (p) => notifier.send({
+  source: p.source || 'va', level: p.level, message: p.message, title: p.title,
+  key: p.key ? 'va:' + p.key : undefined, cooldownMs: p.cooldownMs,
+});
 const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
   onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
@@ -192,6 +197,46 @@ if (_calTimer.unref) _calTimer.unref();
       message: `⚠️ 当前正处于事件窗口：${_hit.title}（北京时间 ${_when}）。行情波动可能放大，注意单边风险。` });
   }
 }
+
+// ── 存活看门狗（第二层）────────────────────────────────────────────────────
+// systemd 的 OnFailure 只能抓「进程整体崩溃」。但传输层子进程退出、轮询长时间
+// 卡死时，主进程还活着，systemd 一无所知——这半边由这里兜底。
+// 判据：交易所为 live 实盘、机器人在跑、已成功拉过一次数据（lastOkAt>0），
+// 但最近一次成功已超过 5 分钟 → 判定失联，critical 推送（30 分钟冷却）。
+// 恢复后补一条 info（仅面板，不打扰手机）。
+const LIVENESS_STALE_MS = 5 * 60_000;
+const _livenessStale = new Set();
+const _LIVENESS_TARGETS = [
+  { prefix: 'va', name: 'Variational', ex: vaExchange, bot: vaBot },
+  { prefix: 'de', name: 'Decibel', ex: deExchange, bot: deBot },
+  { prefix: 'ex', name: 'Extended', ex: exExchange, bot: exBot },
+  { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
+  { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
+  { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
+];
+const _wdTimer = setInterval(() => {
+  const now = Date.now();
+  for (const { prefix, name, ex, bot } of _LIVENESS_TARGETS) {
+    try {
+      const watched = ex?.mode === 'live' && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
+      if (!watched) { _livenessStale.delete(prefix); continue; }
+      const ageMs = now - ex.lastOkAt;
+      if (ageMs > LIVENESS_STALE_MS) {
+        _livenessStale.add(prefix);
+        const mins = Math.round(ageMs / 60_000);
+        notifier.send({ source: prefix, level: 'critical', key: 'liveness:' + prefix, cooldownMs: 30 * 60_000,
+          title: `${name} 失联`,
+          message: `🔴 ${name} 已 ${mins} 分钟未拉到交易所数据（进程仍在跑，systemd 无法察觉）。挂单可能处于无人监管状态，请立即检查 token/网络/子进程。` });
+      } else if (_livenessStale.has(prefix)) {
+        _livenessStale.delete(prefix);
+        notifier.send({ source: prefix, level: 'info', key: 'liveness:' + prefix + ':ok',
+          title: `${name} 已恢复`,
+          message: `✅ ${name} 数据连接已恢复正常。` });
+      }
+    } catch (e) { logger.error('watchdog', e?.message || String(e)); }
+  }
+}, 60_000);
+if (_wdTimer.unref) _wdTimer.unref();
 
 // SSE 客户端集合（按交易所分组）
 const deClients = new Set();
