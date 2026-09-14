@@ -474,7 +474,10 @@ export class GridBot {
     if (this.lastPrice < this.config.lower * 0.5 || this.lastPrice > this.config.upper * 2) {
       throw new Error(`最新价 ${this.lastPrice} 与网格区间 [${this.config.lower}, ${this.config.upper}] 偏离过大，已取消启动。请刷新行情后重设区间。`);
     }
-    this.outOfRange = this.lastPrice < this.config.lower || this.lastPrice > this.config.upper;
+    // 与运行时迟滞一致：启动也按「边界 ± 半格」判定破界，避免恰好贴边启动时
+    // 以 outOfRange=true 空转、直到价格回到内侧半格才铺单（P2-1）。
+    const h0 = (this.config.recoverHystFrac ?? 0.5) * (this.grid?.spacing || 0);
+    this.outOfRange = this.lastPrice < this.config.lower - h0 || this.lastPrice > this.config.upper + h0;
 
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);

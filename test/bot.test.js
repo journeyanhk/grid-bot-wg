@@ -254,6 +254,20 @@ test('recover 迟滞：越外侧半格且连续 2 拍才进破界；回内侧半
   assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, '阶梯已撤销');
 });
 
+test('recover 迟滞：启动价落在边界外侧半格内 → 不判破界、正常铺单（P2-1）', async () => {
+  // lower=100 sp=10 h=5 → 外侧半格 95；起始价 97 在 [95,100) 缓冲带内
+  const mkt = { marketId: 1, name: 'BTC-USD', displayName: 'BTC-USD', symbol: 'BTC',
+    stepSize: 0.00001, stepPrice: 1, maxLeverage: 50, minOrderSize: 0.0001, lastPrice: 97 };
+  const { bot } = await makeBot({ markets: [mkt] }, { ...CFG, outOfRangeAction: 'recover' });
+  assert.equal(bot.outOfRange, false, '外侧半格内启动不判破界（避免"已铺单+补单暂停"的怪状态）');
+  assert.ok(bot.active.size > 0, '正常铺单');
+
+  // 对照：起始价 94（< 95 外侧半格）应判破界起步
+  const mkt2 = { ...mkt, lastPrice: 94 };
+  const { bot: bot2 } = await makeBot({ markets: [mkt2] }, { ...CFG, outOfRangeAction: 'recover' });
+  assert.equal(bot2.outOfRange, true, '越过外侧半格启动仍判破界');
+});
+
 test('对账 prune：交易所消失的挂单连续两轮确认后清理', async () => {
   const { ex, bot } = await makeBot();
   const victimId = [...bot.active][0][0];
