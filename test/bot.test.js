@@ -270,7 +270,8 @@ test('recoverLadderOffsetGrids：off=1 首档落在 L−1 格；off=∞ 不挂�
   // off=∞：破界后完全不挂回收阶梯（纯持有，靠硬退出线）
   {
     const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: Infinity });
-    assert.equal(bot.config.recoverLadderOffsetGrids, Infinity);
+    // 存字符串 'inf'（非 JS Infinity）——保证 JSON 快照往返不失真
+    assert.equal(bot.config.recoverLadderOffsetGrids, 'inf');
     const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
     ex.fill(idOf(bot, buy140)); await sleep(10);
     ex.setPrice(1, 94); await sleep(10);
@@ -278,6 +279,18 @@ test('recoverLadderOffsetGrids：off=1 首档落在 L−1 格；off=∞ 不挂�
     assert.equal(bot.outOfRange, true, '仍进破界（迟滞逻辑不受阶梯偏移影响）');
     assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, 'off=∞ 不挂任何回收阶梯');
   }
+});
+
+test('recoverLadderOffsetGrids：∞ 经 snapshot→JSON→restore 仍是"不挂阶梯"（P0 序列化回归）', async () => {
+  const { bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: Infinity });
+  // 真实持久化路径：snapshot → JSON 往返 → restore。若还存 JS Infinity，这一步会被吞成 null。
+  const snap = JSON.parse(JSON.stringify(bot.snapshot()));
+  assert.equal(snap.config.recoverLadderOffsetGrids, 'inf', '快照存可往返的 "inf" 字符串');
+
+  const { bot: fresh } = await makeBot({}, CFG);
+  fresh.running = false;
+  fresh.restore(snap);
+  assert.equal(fresh.config.recoverLadderOffsetGrids, 'inf', 'restore 后仍是 inf（不挂阶梯）');
 });
 
 test('recover 迟滞：启动价落在边界外侧半格内 → 不判破界、正常铺单（P2-1）', async () => {

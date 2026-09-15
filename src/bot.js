@@ -422,7 +422,9 @@ export class GridBot {
       // （破界后纯持有，只靠 recoverMaxLossUsd 硬退出）。回测结论出来前不默认 ∞。
       recoverLadderOffsetGrids: (() => {
         const v = cfg.recoverLadderOffsetGrids;
-        if (v === Infinity || v === 'inf' || v === 'infinity' || v === 'none') return Infinity;
+        // 存字符串 'inf' 而非 JS Infinity：JSON.stringify(Infinity)=null，重启 restore
+        // 后 Number(null)=0 会静默把"不挂阶梯"变成"从边界本身开始挂"（比默认还激进）。
+        if (v === Infinity || v === 'inf' || v === 'infinity' || v === 'none') return 'inf';
         return (Number.isFinite(Number(v)) && Number(v) >= 0) ? Number(v) : 2;
       })(),
       minOrderSize: market.minOrderSize || 0,   // 尘埃仓守卫用：部分成交低于最小下单量时跳过补挂对腿
@@ -1266,7 +1268,7 @@ export class GridBot {
     if (!Number.isFinite(price) || price <= 0) return;
     const pos = this.ex.getPosition?.(this.config.marketId);
     if (!pos || !pos.sizeBase) return; // 没有可减的持仓
-    const off = this.config.recoverLadderOffsetGrids ?? 2;
+    const off = ladderOffsetGrids(this.config.recoverLadderOffsetGrids);
     if (!Number.isFinite(off)) return; // 偏移=∞ → 不挂回收阶梯（破界后纯持有，靠硬退出线）
     const sp = this.grid.spacing, lvl0 = this.grid.levels[0];
     const L = this.config.lower, U = this.config.upper;
@@ -2015,6 +2017,13 @@ export class GridBot {
 function labelMode(m) { return m === 'long' ? '做多网格' : m === 'short' ? '做空网格' : '中性网格'; }
 
 function round2(x) { return Math.round(x * 100) / 100; }
+// 回收阶梯首档偏移的解析：'inf'/非有限 → Infinity（不挂阶梯）；有限且 ≥0 → 该值；
+// 其余（含重启后被 JSON 变成 null 的历史快照）→ 默认 2。永远不落到 0。
+function ladderOffsetGrids(v) {
+  if (v === 'inf' || v === 'infinity' || v === 'none' || v === Infinity) return Infinity;
+  const n = Number(v);
+  return (Number.isFinite(n) && n >= 0) ? n : 2;
+}
 function round6(x) { return Math.round(x * 1e6) / 1e6; }
 function round4(x) { return Math.round(x * 1e4) / 1e4; }
 function roundPrice(x) { return Number.isFinite(Number(x)) ? Math.round(Number(x) * 1e8) / 1e8 : null; }

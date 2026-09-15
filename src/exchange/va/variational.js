@@ -450,15 +450,17 @@ export class VariationalExchange extends EventEmitter {
   async fetchTradesWindow(sinceMs) {
     const since = new Date(Number(sinceMs) || 0).toISOString();
     const out = [];
+    let truncated = false;
     for (const m of this.markets.values()) {
       const key = instrumentKey(m.underlying, this.instrumentCfg);
       const raw = await this._getPaged(
         (offset) => `/api/trades?instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`,
         { auth: true },
       );
+      if (raw.length >= MAX_PAGES * 100) truncated = true; // 触及分页上限 → 数据可能不全
       for (const r of raw) { const tr = parseTrade(r); if (tr) out.push(tr); }
     }
-    return out;
+    return { trades: out, truncated };
   }
 
   /** RAW pending rows across all markets (ALL order types) — for the live set. */
