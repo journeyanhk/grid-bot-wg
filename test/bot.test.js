@@ -254,6 +254,32 @@ test('recover 迟滞：越外侧半格且连续 2 拍才进破界；回内侧半
   assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, '阶梯已撤销');
 });
 
+test('recoverLadderOffsetGrids：off=1 首档落在 L−1 格；off=∞ 不挂阶梯', async () => {
+  // off=1：格距 sp=10，首档应落在 L−1格=90（而非默认 L−2格=80）
+  {
+    const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: 1 });
+    assert.equal(bot.config.recoverLadderOffsetGrids, 1);
+    const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
+    ex.fill(idOf(bot, buy140)); await sleep(10);
+    ex.setPrice(1, 94); await sleep(10);   // 第 1 拍
+    ex.setPrice(1, 79); await sleep(50);   // 第 2 拍 → 破界挂阶梯
+    const ladders = [...bot.active.values()].filter((a) => a.recovery);
+    assert.ok(ladders.some((a) => a.price === 90), 'off=1 阶梯首档 = L − 1 格 = 90');
+    assert.ok(ladders.every((a) => a.price <= 90), '所有阶梯档不高于 L−1 格');
+  }
+  // off=∞：破界后完全不挂回收阶梯（纯持有，靠硬退出线）
+  {
+    const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: Infinity });
+    assert.equal(bot.config.recoverLadderOffsetGrids, Infinity);
+    const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
+    ex.fill(idOf(bot, buy140)); await sleep(10);
+    ex.setPrice(1, 94); await sleep(10);
+    ex.setPrice(1, 79); await sleep(50);
+    assert.equal(bot.outOfRange, true, '仍进破界（迟滞逻辑不受阶梯偏移影响）');
+    assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, 'off=∞ 不挂任何回收阶梯');
+  }
+});
+
 test('recover 迟滞：启动价落在边界外侧半格内 → 不判破界、正常铺单（P2-1）', async () => {
   // lower=100 sp=10 h=5 → 外侧半格 95；起始价 97 在 [95,100) 缓冲带内
   const mkt = { marketId: 1, name: 'BTC-USD', displayName: 'BTC-USD', symbol: 'BTC',

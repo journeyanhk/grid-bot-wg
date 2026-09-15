@@ -169,8 +169,10 @@ export class VariationalExchange extends EventEmitter {
     const now = Date.now();
     if (throttle && now - this._lastTokenCheckAt < TOKEN_CHECK_THROTTLE_MS) return;
     this._lastTokenCheckAt = now;
-    // 可自签（配了私钥）时无需打扰用户——auth 会在 <24h 自动续签。
-    if (this.auth.canRefresh()) return;
+    // 可自签（配了私钥）且自动登录尚未失败过时，无需打扰用户——auth 会在 <24h 自动续签。
+    // 但自动登录一旦失败过（如被 Cloudflare 挑战拦死），立即恢复人工 token 三档预警，
+    // 避免 .env 残留私钥导致预警全静默、续签又必然失败、第 7 天直接撞 401。
+    if (this.auth.canRefresh() && (this.auth._failStreak || 0) === 0) return;
     const exp = decodeJwtExp(this.http.token);
     if (!exp) return;   // 无 exp 字段的 token 判不了寿命，跳过
     const msLeft = exp * 1000 - now;
@@ -437,6 +439,26 @@ export class VariationalExchange extends EventEmitter {
       if (stop && stop(rows)) break;
     }
     return rows;
+  }
+
+  /**
+   * 核账用：拉取 sinceMs 之后的成交（跨所有 underlying），解析成
+   * [{ tradeId, rfqId, price, qty, side, role, status, ts, underlying }]。
+   * 复用 orders/v2 那套已探明可用的 created_at_gte + 分页；MAX_PAGES 封顶
+   * （低频网格足够）。失败抛错，交给调用方降级。
+   */
+  async fetchTradesWindow(sinceMs) {
+    const since = new Date(Number(sinceMs) || 0).toISOString();
+    const out = [];
+    for (const m of this.markets.values()) {
+      const key = instrumentKey(m.underlying, this.instrumentCfg);
+      const raw = await this._getPaged(
+        (offset) => `/api/trades?instrument=${encodeURIComponent(key)}&limit=100&offset=${offset}&order_by=created_at&order=desc&created_at_gte=${encodeURIComponent(since)}`,
+        { auth: true },
+      );
+      for (const r of raw) { const tr = parseTrade(r); if (tr) out.push(tr); }
+    }
+    return out;
   }
 
   /** RAW pending rows across all markets (ALL order types) — for the live set. */

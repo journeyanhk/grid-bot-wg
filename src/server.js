@@ -20,6 +20,7 @@ import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
 import { loadSnapshot, saveSnapshot } from './persist.js';
 import { createAiService } from './ai/service.js';
+import { createAuditService } from './audit.js';
 import { notifier } from './notify.js';
 import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
@@ -146,6 +147,10 @@ const aiService = createAiService({
   exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
 });
 aiService.start();
+
+// ── VA 核账服务：每日一次对账（FIFO 实现盈亏 + 计数器增量 + _dynLog 回填），
+// 无异常发 info（仅面板），有异常升级 warn/critical 推手机。仅 live 生效。────
+const vaAudit = createAuditService({ bot: vaBot, exchange: vaExchange, source: 'va' });
 
 // ── 事件日历调度器：CPI/FOMC/非农 前后 ±window 分钟预警；可选自动暂停入场侧 ──
 const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot };
@@ -691,6 +696,11 @@ const server = http.createServer(async (request, res) => {
         const { token } = await readBody(request);
         return send(res, 200, await vaExchange.adoptToken(token));
       } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    // 手动触发一次 VA 核账并返回报告（面板"立即核账"按钮 / 排查用）。
+    if (p === '/api/va/audit') {
+      try { return send(res, 200, await vaAudit.runNow()); }
+      catch (e) { return send(res, 500, { error: e.message }); }
     }
     if (p.startsWith('/api/va/')) {
       return await vaHandler(request, res, p.slice('/api/va'.length), url);
