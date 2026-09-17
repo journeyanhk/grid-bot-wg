@@ -127,6 +127,62 @@ export function getConfig() {
     proxy: process.env.LIGHTER_PROXY || globalProxy,
   };
 
+  // ── Hyperliquid (HL) / Entropy io dex ────────────────────────────────────
+  // 固定官方主网端点 + dex:"io" 命名空间（HIP-3 建设者市场，如 io:ANTH）。
+  // 签名器只持 agent wallet 私钥（可交易不可提现）。
+  const hl = {
+    mode: (process.env.HL_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    apiUrl: 'https://api.hyperliquid.xyz',
+    infoUrl: 'https://api.hyperliquid.xyz/info',
+    chainId: 42161,
+    dex: process.env.HL_DEX || 'io',
+    accountAddress: process.env.HL_ACCOUNT_ADDRESS || '',
+    agentPrivateKey: process.env.HL_AGENT_PRIVATE_KEY || '',
+    agentPrivateKeyFile: process.env.HL_AGENT_PRIVATE_KEY_FILE || '',
+    pythonPath: process.env.HL_PYTHON || '',
+    feeRate: Number(process.env.HL_FEE_RATE || 0.0005),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.HL_PROXY || globalProxy,
+  };
+
+  // ── Variational Omni (VA) ────────────────────────────────────────────────
+  // RFQ/OLP 报价模型（无订单簿），全有或全无限价单，零手续费（点差成本）。
+  // LIVE 鉴权用 vr-token cookie（VARIATIONAL_TOKEN，贴 token 优先）。
+  // 精度默认保守，未经实盘校验前不要放大下单量（见 market.js 说明）。
+  const vaUnderlyings = (process.env.VA_UNDERLYINGS || 'BTC')
+    .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+  const vaFundingInterval = optionalNumber('VA_FUNDING_INTERVAL_S');
+  const vaLeverage = optionalNumber('VA_LEVERAGE');
+  const va = {
+    mode: (process.env.VA_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    baseUrl: process.env.VA_BASE_URL || 'https://omni.variational.io',
+    underlyings: vaUnderlyings.length ? vaUnderlyings : ['BTC'],
+    token: process.env.VARIATIONAL_TOKEN || '',
+    address: process.env.VA_ADDRESS || '',
+    // 独立热钱包自动登录（SIWE）：配了私钥即可无人值守续签 vr-token；贴 token 仍优先。
+    privateKey: process.env.VA_WALLET_PRIVATE_KEY || '',
+    tokenCachePath: process.env.VA_TOKEN_CACHE || '.runtime/va_token.json',
+    slippageLimit: process.env.VA_SLIPPAGE_LIMIT || '0.005',
+    // Cloudflare: Node fetch -> 403, curl_cffi(Chrome) -> 200. 'bridge' spawns the
+    // Python transport worker and is the only mode that passes CF in prod.
+    transport: (process.env.VA_TRANSPORT || 'bridge').toLowerCase() === 'node' ? 'node' : 'bridge',
+    pythonPath: process.env.VA_PYTHON || '',
+    // 50 orders/instrument/order-type is a HARD server limit (probe-verified: 51st => HTTP 422).
+    maxOpenOrders: optionalNumber('VA_MAX_OPEN_ORDERS') || 50,
+    leverage: Number.isFinite(vaLeverage) ? vaLeverage : null,
+    instrument: {
+      instrumentType: process.env.VA_INSTRUMENT_TYPE || 'perpetual_future',
+      settlementAsset: process.env.VA_SETTLEMENT_ASSET || 'USDC',
+      fundingIntervalS: Number.isFinite(vaFundingInterval) ? vaFundingInterval : undefined,
+      kind: process.env.VA_KIND || '',
+    },
+    feeRate: Number(process.env.VA_FEE_RATE || 0.0001),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.VA_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
@@ -142,6 +198,8 @@ export function getConfig() {
     ex,
     rs,
     lr,
+    hl,
+    va,
   };
 }
 

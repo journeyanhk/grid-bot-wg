@@ -1,0 +1,9 @@
+# Variational Omni transport (curl_cffi) — required for VA_TRANSPORT=bridge.
+# Node fetch is blocked by Cloudflare (403); curl_cffi's Chrome TLS/JA3
+# impersonation passes (200). Also used by scripts/va_probe.py.
+#   pip install -r requirements-va.txt
+curl_cffi>=0.7
+
+# SIWE 自动登录（login_probe.py --run 与后续 worker login 命令）需要 eth-account 做
+# personal_sign。仅 --dry-run 验 Cloudflare 时不需要它。
+eth-account>=0.11

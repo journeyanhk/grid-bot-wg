@@ -6,6 +6,111 @@
 
 ## [Unreleased]
 
+## [1.6.6] - 2026-09-08
+
+### 修复（review4：429 治理——分级节拍 + 读取侧退避）
+- HL info 限额 ~1200 权重/分/IP，原 2s 全量轮询 ~1500 权重/分超支 -> 间歇 429
+- 分级节拍：每 2s 价格走 allMids（~2 权重，替代 metaAndAssetCtxs 取价）；每 5s 账户+挂单+成交（clearinghouseState/frontendOpenOrders/userFillsByTime）；每 60s 市场元数据（metaAndAssetCtxs）——预算 ~1500 -> ~585 权重/分
+- 读取侧 429 退避：2-5 秒 backoff + 抖动（原裸 250ms 重试）
+
+### 测试
+- hl.test.js 新增：allMids 价格更新（带 dex）、分级节拍（5s/60s 内不重复拉重端点）；npm test 9 项全绿 + lint 干净
+
+## [1.6.5] - 2026-09-08
+
+### 紧急修复（review3：14 单变 42 单事故）
+- frontendOpenOrders 补 dex:"io" 参数：HL 默认挂单查询不返回 builder-dex 订单 -> 快照恒空 -> 安全重试两次快照校验也被骗过 -> 按档位去重认为全空 -> 原样重挂 3 波（14x3=42 单），第 4 波被保证金预检拦停；撤单也因查不到 oid 而"无单可撤"
+- 纵深防御：bot.js _drainRetryQueueNow 加空快照守卫——期望有单（active+retryQueue>=10）但交易所返回 0 单视为快照不可信，本轮不重挂（宁可慢不可翻倍），四所通用（EX 空快照骗过 gone 判定、HL 骗过重试校验，同类欺骗补齐所有信任快照的地方）
+- HIP-3 铁律写入适配器文件头：每个按 user 查询的端点都要问"它认不认 dex 参数"
+
+### 测试
+- bot.test.js 新增重试空快照守卫测试（空快照轮不重挂/不新增挂单/重试项保留/发暂缓告警）；npm test 9 项全绿 + lint 干净
+
+## [1.6.4] - 2026-09-08
+
+### 修复（review2：钱在 spot 口袋里 + RHC 面板被误删）
+- HL clearinghouseState 查询补 dex:"io" 参数（hyperliquid.js:174）：HIP-3 建设者市场有独立清算账户，不带 dex 读的是核心 Perps -> io dex 的保证金/持仓永远显示 0（"当前可用 0 USDC" 的代码层根因之一）
+- 恢复 tab-lr 面板（上轮清理前端残骸时误删整段，switchTab('lr') 拿 null 崩在 1565 行）：从 dev004-dy 提取完整面板插回 tab-hl 之前
+
+### 变更
+- scripts/check-html.mjs 升级为四项核对：重复 id / 缺失面板（tab 数组前缀逐一验证面板+导航+控制台+徽章）/ P() 引用核对（面板内引用的 ${prefix}-* id 必须存在于 DOM）/ 残缺标签
+
+### 部署层说明（资金路径）
+- HL 资金三级口袋：链上钱包 -> 核心 Perps -> io dex（HIP-3 独立清算账户）
+- 用户需在 Entropy(io dex) 页面把资金从核心 Perps 划入 io dex，否则 io:ANTH 无保证金
+
+### 测试
+- npm test 8 套件 + check:html 四项全绿 + paper 冒烟（5 所 overview + RHC 路由正常）
+
+## [1.6.3] - 2026-09-08
+
+### 修复（review1：总览无数据 + 可用 0 USDC 诊断）
+- 前端残骸清除：index.html 628 行起残留整段残缺重复块（丢 < 的 ov-card lr + 未闭合 </div<，22 个重复 id）导致 DOM 错乱、总览渲染写入被打断的卡片 -> 删除残骸，保留完整 lr/hl 卡片
+- config.js hl 块 chainId 421614 -> 42161（v1.6.1 只改了 market.js，config 漏网；421614 是 Sepolia 测试网）
+
+### 变更
+- 新增 scripts/check-html.mjs（npm run check:html）：交叉核对重复 id/残缺标签/未闭合标签，并挂入 npm test 串联——v1.4.2 与 v1.6.0 两次前端插卡漏检事故的一劳永逸防线
+
+### 部署层说明（代码层已确认正常）
+- "当前可用 0 USDC" 是部署配置问题：新 VPS .env 显式写了 PAPER_BALANCE=0 或 HL 未配 live；总览"PAPER 徽标"= HL_MODE 未设 live
+- 正确配置：HL_MODE=live + HL_ACCOUNT_ADDRESS + HL_AGENT_PRIVATE_KEY（官网已 approve 的 agent 私钥）+ PAPER_BALANCE=10000 或删掉该行
+
+### 测试
+- npm test 8 套件 + check:html 全绿（9 项）+ paper 冒烟总览 5 所数据完整
+
+## [1.6.2] - 2026-09-07
+
+### 修复（review20：三颗"过得了 health、死在第一单"的运行时地雷）
+- ① Tif.Gtc 抛 AttributeError：Tif 是类型别名（Union[Literal['Alo'],'Ioc','Gtc']）非枚举 → 删 Tif 导入，limit_type 直接用字符串 "Gtc"/"Ioc"
+- ② bulk_cancel 签名不符：SDK 是 bulk_cancel(cancel_requests: List[CancelRequest])，元素 {"coin","oid"} 字典 → worker 侧把 (coin, oids) 转为字典列表
+- ③ Cloid 格式不匹配：Cloid.from_str 强制 0x+32 位 hex（16 字节），JS 生成的 g<base36> 字符串直接 TypeError → JS 侧改为 randomBytes(16) 生成合规 cloid，外部非法格式归一化；tracked 记录下单实际提交的 clientOrderId（与成交匹配同源），_refreshFills 增加 cloid 兜底匹配
+- 连带修复：cancelAll 里 market 变量被 lint 误删导致 ReferenceError（本评审自检发现）
+- 新增测试：cloid 合规生成/归一化/保留、cloid 成交匹配、bulk_cancel 请求结构
+
+### 验证
+- 签名器请求级冒烟（假 key 真实走 SDK）：place_order 带合规 cloid 签名上送成功（asset=200001 确认 io:ANTH 寻址）、非法 cloid 优雅报错不崩、bulk_cancel 字典列表上送、update_leverage 上送 —— 四命令全过
+- npm test 8 套件全绿 + lint 干净
+
+## [1.6.1] - 2026-09-07
+
+### 修复（review19：HL 外部契约实测校准）
+- P0 签名器五处 SDK 错误（实测 SDK 0.24.0 校准）：
+  - 移除不存在的 OrderSide/OrderTimeInForce 导入（改为 Cloid/Tif）
+  - Info/Exchange 构造加 perp_dexs=["io"]（实测正确解析 io 市场，asset id 偏移 200000）
+  - Exchange wallet 改为 eth_account.Account.from_key（不再传裸私钥字符串）
+  - order 改位置参数签名（实测 exchange.order(name,is_buy,sz,limit_px,order_type,...)）
+  - 无 cancel_all → 用 bulk_cancel；cancel oid 改 int；update_leverage 参数名 is_cross
+- P1 市场元数据四处（实测 metaAndAssetCtxs 返回数组 [meta, ctxs]）：
+  - parseMarkets 改数组解构；maxLeverage 从 universe 读取（SNDK 10x 不再被压到 6）
+  - stepPrice = 10**-(6-szDecimals)（无 pxDecimals 字段）+ 5 位有效数字报价取整校验
+  - 费率改 0.00015/0.00045（HL 基础档，deployerFeeScale 1.0）
+  - HL_MAINNET_CHAIN_ID 421614 → 42161（421614 是 Sepolia 测试网）
+- P2 逻辑：userFills 无 cursor → 改 userFillsByTime + startTime 增量；_filledSeen 环形上限 5000；closePosition 改 ±5% IOC；清理 _cloids 死代码
+- 新增 requirements-hl.txt 锁定 SDK 0.24.0
+- 实测探针结论：签名器真实启动成功（health 通过）、io:ANTH asset id=200001、metaAndAssetCtxs/candleSnapshot 结构确认
+
+### 测试
+- hl.test.js 同步更新（数组市场结构/费率/priceDecimals/游标推进/环形裁剪）；npm test 8 套件全绿 + lint 干净
+
+## [1.6.0] - 2026-09-07
+
+### 新增
+- 第5交易所 Entropy（Hyperliquid io dex，HIP-3 建设者市场）：`src/exchange/hl/` 六文件（market/signer_worker/signer/hyperliquid/paper/index）
+  - io:ANTH 美股网格试点（1,880-2,100 / 22 格 / $10 间距 / 0.005/格 / 3x 逐仓 / recover+$30 / $150 本金）
+  - 签名器用 agent wallet（可交易不可提现），命令面白名单（place/cancel/cancel_all/update_leverage isolated）
+  - userFills 游标为成交权威源，无需 EX/LR 的三层证据链与穿越推定
+  - 空快照守卫 + droppedLevels 死亡计数（对齐 EX 监控口径）
+- 总览页过滤：只展示有金额在运行的交易所（live + balance>0 + running），隐藏 paper/无资金/未运行卡片；汇总区动态化并顺带修复 tot-modes 漏 lr 的历史 bug
+- 前端/后端全链路接线：config.js hl 块、server.js 全触点、index.html 全套 hl 前缀（tab/面板/卡片/徽章/CSS/JS）
+
+### 变更
+- dev004-dy → dev005 分支承载全部开发
+- test/hl.test.js 加入 npm test 串联（现 8 套件）
+
+### 测试
+- hl 适配器单测：市场解析（io dex 过滤）/ 逐仓字段 / userFills 游标去重 / 空快照守卫
+- 全量 npm test 退出码 0 + lint 干净 + paper 冒烟（/api/overview 5 所、/api/hl/markets io:ANTH）
+
 ## [1.5.11] - 2026-09-05
 
 ### 修复（review18：动态网格零输出诊断）

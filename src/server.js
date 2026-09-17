@@ -13,11 +13,16 @@ import { createExchange as createDeExchange } from './exchange/de/index.js';
 import { createExchange as createExExchange } from './exchange/ex/index.js';
 import { createExchange as createRsExchange } from './exchange/rs/index.js';
 import { createExchange as createLrExchange } from './exchange/lr/index.js';
+import { createExchange as createHlExchange } from './exchange/hl/index.js';
+import { createExchange as createVaExchange } from './exchange/va/index.js';
 import { GridBot } from './bot.js';
 import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
 import { loadSnapshot, saveSnapshot } from './persist.js';
 import { createAiService } from './ai/service.js';
+import { createAuditService } from './audit.js';
+import { notifier } from './notify.js';
+import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
 
 // ── 启动配置 ─────────────────────────────────────────────────────────────────
@@ -51,6 +56,13 @@ logger.info('server', `启动 v${APP_VERSION}`);
     if (!Number.isInteger(cfg.lr.apiKeyIndex) || cfg.lr.apiKeyIndex < 4) missing.push(['RHC     ', 'LIGHTER_API_KEY_INDEX', 'RHC API Key 索引（4-254，0-3 平台保留）']);
     if (!cfg.lr.apiPrivateKey && !cfg.lr.apiPrivateKeyFile) missing.push(['RHC     ', 'LIGHTER_API_PRIVATE_KEY(_FILE)', 'RHC API 签名私钥或私钥文件路径']);
   }
+  if (cfg.hl.mode === 'live') {
+    if (!cfg.hl.accountAddress) missing.push(['Entropy ', 'HL_ACCOUNT_ADDRESS', 'agent 钱包地址（官网授权可交易不可提现）']);
+    if (!cfg.hl.agentPrivateKey && !cfg.hl.agentPrivateKeyFile) missing.push(['Entropy ', 'HL_AGENT_PRIVATE_KEY(_FILE)', 'agent 钱包私钥或私钥文件路径']);
+  }
+  if (cfg.va.mode === 'live') {
+    if (!cfg.va.token && !cfg.va.privateKey) missing.push(['Variational', 'VARIATIONAL_TOKEN 或 VA_WALLET_PRIVATE_KEY', '贴 token 或独立热钱包私钥（SIWE 自动登录）之一']);
+  }
   if (missing.length) {
     console.error('\n[启动失败] 有交易所被设为 live 实盘模式，但 .env 里还缺以下凭据：\n');
     for (const [ex, key, where] of missing) {
@@ -75,7 +87,7 @@ if (proxyResult.used) {
     console.log('[代理检测] ✓ 代理正常，当前出口 IP: ' + chk.ip);
   } else {
     console.error('[代理检测] ✗ 代理无法联网：' + chk.error);
-    const hasLive = cfg.de.mode === 'live' || cfg.ex.mode === 'live' || cfg.rs.mode === 'live' || cfg.lr.mode === 'live';
+    const hasLive = cfg.de.mode === 'live' || cfg.ex.mode === 'live' || cfg.rs.mode === 'live' || cfg.lr.mode === 'live' || cfg.hl.mode === 'live' || cfg.va.mode === 'live';
     if (hasLive) {
       console.error('  实盘模式已中止启动，以免在断网状态下运行造成挂单失控。');
       process.exit(1);
@@ -92,11 +104,26 @@ const deExchange = createDeExchange(cfg.de);
 const exExchange = createExExchange(cfg.ex);
 const rsExchange = createRsExchange(cfg.rs);
 
-const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s) });
-const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s) });
-const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s) });
+const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s),
+  onAlert: (a) => notifier.send({ source: 'de', message: `[Decibel] ${a.message}`, level: a.level, key: a.key ? 'de:' + a.key : undefined }) });
+const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s),
+  onAlert: (a) => notifier.send({ source: 'ex', message: `[Extended] ${a.message}`, level: a.level, key: a.key ? 'ex:' + a.key : undefined }) });
+const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s),
+  onAlert: (a) => notifier.send({ source: 'rs', message: `[RISEx] ${a.message}`, level: a.level, key: a.key ? 'rs:' + a.key : undefined }) });
 const lrExchange = createLrExchange(cfg.lr);
-const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s) });
+const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s),
+  onAlert: (a) => notifier.send({ source: 'lr', message: `[RHC] ${a.message}`, level: a.level, key: a.key ? 'lr:' + a.key : undefined }) });
+const hlExchange = createHlExchange(cfg.hl);
+const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s),
+  onAlert: (a) => notifier.send({ source: 'hl', message: `[Entropy] ${a.message}`, level: a.level, key: a.key ? 'hl:' + a.key : undefined }) });
+const vaExchange = createVaExchange(cfg.va);
+// VA 会话 token 三档寿命预警：交易所内部判寿命，经通知总线按级别推送（info 仅面板，warn/critical 推手机）。
+vaExchange.onNotify = (p) => notifier.send({
+  source: p.source || 'va', level: p.level, message: p.message, title: p.title,
+  key: p.key ? 'va:' + p.key : undefined, cooldownMs: p.cooldownMs,
+});
+const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
+  onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
 // Restore cumulative stats / config from the previous run (display continuity).
 // Trading does NOT auto-resume; stray-order cleanup happens after each exchange
@@ -105,25 +132,124 @@ deBot.restore(loadSnapshot('de'));
 exBot.restore(loadSnapshot('ex'));
 rsBot.restore(loadSnapshot('rs'));
 lrBot.restore(loadSnapshot('lr'));
+hlBot.restore(loadSnapshot('hl'));
+vaBot.restore(loadSnapshot('va'));
 
 // Belt-and-suspenders: ensure every exchange always has an 'error' listener so a
 // stray emit can never crash the process (the GridBot also attaches one).
-for (const ex of [deExchange, exExchange, rsExchange, lrExchange]) {
+for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange, vaExchange]) {
   ex.on('error', (e) => { logger.error('exchange', e?.message || String(e)); });
 }
 
 // ── AI 服务（哨兵/日报/分析/对话/出区间建议）────────────────────────────────
 const aiService = createAiService({
-  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot },
-  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange },
+  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
 });
 aiService.start();
+
+// ── VA 核账服务：每日一次对账（FIFO 实现盈亏 + 计数器增量 + _dynLog 回填），
+// 无异常发 info（仅面板），有异常升级 warn/critical 推手机。仅 live 生效。────
+const vaAudit = createAuditService({ bot: vaBot, exchange: vaExchange, source: 'va' });
+
+// ── 事件日历调度器：CPI/FOMC/非农 前后 ±window 分钟预警；可选自动暂停入场侧 ──
+const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot };
+let _calPrevTick = Date.now();
+const _calTimer = setInterval(() => {
+  try {
+    const { windowMin, autoPause } = getCalendarConfig();
+    const now = Date.now();
+    for (const { event, edge } of firingEdges(now, _calPrevTick, windowMin)) {
+      const label = TYPE_LABEL[event.type] || event.type;
+      const when = new Date(event.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+      if (edge === 'pre') {
+        notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + event.id + ':pre',
+          title: `事件预警 · ${label}`,
+          message: `⚠️ 约 ${windowMin} 分钟后：${event.title}（北京时间 ${when} 公布）。数据发布前后波动放大，注意单边风险。` });
+      } else {
+        notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + event.id + ':at',
+          title: `事件发布 · ${label}`,
+          message: `⚠️ ${event.title} 现已发布（北京时间 ${when}）。留意行情异动，未来约 ${windowMin} 分钟谨慎操作。` });
+      }
+    }
+    if (autoPause) {
+      const hit = activeWindow(now, windowMin);
+      if (hit) {
+        const until = hit.ts + windowMin * 60_000;
+        for (const b of Object.values(CAL_BOTS)) b.pauseOpening(until, `事件窗口：${hit.title}`);
+      }
+    }
+    _calPrevTick = now;
+  } catch (e) { logger.error('calendar', e?.message || String(e)); }
+}, 30_000);
+if (_calTimer.unref) _calTimer.unref();
+
+// 启动自检：①事件表 60 天内耗尽 → 年度更新兜底提醒；②若当前正落在事件窗口内 → 补发一条。
+{
+  const _now = Date.now();
+  const _daysLeft = daysUntilExhausted(_now);
+  if (_daysLeft < 60) {
+    notifier.send({ source: 'calendar', level: 'warn', key: 'cal:exhaust',
+      title: '事件日历即将耗尽',
+      message: `⚠️ 事件日历仅剩约 ${_daysLeft} 天数据，最后一个事件后将静默失效。请更新 src/calendar/index.js 的年度事件表。`,
+      cooldownMs: 24 * 60 * 60_000 });
+  }
+  const _hit = activeWindow(_now, getCalendarConfig().windowMin);
+  if (_hit) {
+    const _when = new Date(_hit.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + _hit.id + ':boot',
+      title: `事件窗口 · ${TYPE_LABEL[_hit.type] || _hit.type}`,
+      message: `⚠️ 当前正处于事件窗口：${_hit.title}（北京时间 ${_when}）。行情波动可能放大，注意单边风险。` });
+  }
+}
+
+// ── 存活看门狗（第二层）────────────────────────────────────────────────────
+// systemd 的 OnFailure 只能抓「进程整体崩溃」。但传输层子进程退出、轮询长时间
+// 卡死时，主进程还活着，systemd 一无所知——这半边由这里兜底。
+// 判据：交易所为 live 实盘、机器人在跑、已成功拉过一次数据（lastOkAt>0），
+// 但最近一次成功已超过 5 分钟 → 判定失联，critical 推送（30 分钟冷却）。
+// 恢复后补一条 info（仅面板，不打扰手机）。
+const LIVENESS_STALE_MS = 5 * 60_000;
+const _livenessStale = new Set();
+const _LIVENESS_TARGETS = [
+  { prefix: 'va', name: 'Variational', ex: vaExchange, bot: vaBot },
+  { prefix: 'de', name: 'Decibel', ex: deExchange, bot: deBot },
+  { prefix: 'ex', name: 'Extended', ex: exExchange, bot: exBot },
+  { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
+  { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
+  { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
+];
+const _wdTimer = setInterval(() => {
+  const now = Date.now();
+  for (const { prefix, name, ex, bot } of _LIVENESS_TARGETS) {
+    try {
+      const watched = ex?.mode === 'live' && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
+      if (!watched) { _livenessStale.delete(prefix); continue; }
+      const ageMs = now - ex.lastOkAt;
+      if (ageMs > LIVENESS_STALE_MS) {
+        _livenessStale.add(prefix);
+        const mins = Math.round(ageMs / 60_000);
+        notifier.send({ source: prefix, level: 'critical', key: 'liveness:' + prefix, cooldownMs: 30 * 60_000,
+          title: `${name} 失联`,
+          message: `🔴 ${name} 已 ${mins} 分钟未拉到交易所数据（进程仍在跑，systemd 无法察觉）。挂单可能处于无人监管状态，请立即检查 token/网络/子进程。` });
+      } else if (_livenessStale.has(prefix)) {
+        _livenessStale.delete(prefix);
+        notifier.send({ source: prefix, level: 'info', key: 'liveness:' + prefix + ':ok',
+          title: `${name} 已恢复`,
+          message: `✅ ${name} 数据连接已恢复正常。` });
+      }
+    } catch (e) { logger.error('watchdog', e?.message || String(e)); }
+  }
+}, 60_000);
+if (_wdTimer.unref) _wdTimer.unref();
 
 // SSE 客户端集合（按交易所分组）
 const deClients = new Set();
 const exClients = new Set();
 const rsClients = new Set();
 const lrClients = new Set();
+const hlClients = new Set();
+const vaClients = new Set();
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 const MIME = {
@@ -283,6 +409,8 @@ const deHandler = makeExchangeHandler('/api/de', deBot, deExchange, cfg.de, deCl
 const exHandler = makeExchangeHandler('/api/ex', exBot, exExchange, cfg.ex, exClients, 'Extended');
 const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsClients, 'RISEx');
 const lrHandler = makeExchangeHandler('/api/lr', lrBot, lrExchange, cfg.lr, lrClients, 'RHC Lighter');
+const hlHandler = makeExchangeHandler('/api/hl', hlBot, hlExchange, cfg.hl, hlClients, 'Entropy');
+const vaHandler = makeExchangeHandler('/api/va', vaBot, vaExchange, cfg.va, vaClients, 'Variational');
 
 // ── 鉴权守卫（VPS 安全）──────────────────────────────────────────────────────
 // 三层防护：
@@ -397,6 +525,8 @@ const server = http.createServer(async (request, res) => {
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
         lr: pick(lrBot.getState(), cfg.lr.mode),
+        hl: pick(hlBot.getState(), cfg.hl.mode),
+        va: pick(vaBot.getState(), cfg.va.mode),
       });
     }
 
@@ -414,12 +544,26 @@ const server = http.createServer(async (request, res) => {
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
         lr: pick(lrBot.getState(), cfg.lr.mode),
+        va: pick(vaBot.getState(), cfg.va.mode),
+        hl: pick(hlBot.getState(), cfg.hl.mode),
       };
       res.write(`data: ${JSON.stringify(initial, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}\n\n`);
       const overviewClients = server._overviewClients;
       overviewClients.add(res);
       request.on('close', () => overviewClients.delete(res));
       return;
+    }
+
+    // ── 事件日历 API ───────────────────────────────────────────────────────
+    if (p === '/api/calendar') {
+      const now = Date.now();
+      const { windowMin, autoPause } = getCalendarConfig();
+      return send(res, 200, {
+        now, config: { windowMin, autoPause },
+        events: getEvents(),
+        upcoming: upcomingEvents(now, 45),
+        active: activeWindow(now, windowMin),
+      });
     }
 
     // ── AI 助手 API ───────────────────────────────────────────────────────
@@ -478,7 +622,7 @@ const server = http.createServer(async (request, res) => {
       try {
         const { key, value } = await readBody(request);
         const PROXY_KEYS = ['GLOBAL_PROXY','DECIBEL_PROXY','EXTENDED_PROXY','RISEX_PROXY','LIGHTER_PROXY'];
-        const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK'];
+        const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK','SERVERCHAN_SENDKEY','CALENDAR_ALERT_MINUTES','CALENDAR_AUTO_PAUSE'];
         if (!PROXY_KEYS.includes(key) && !AI_KEYS.includes(key)) return send(res, 400, { error: '不允许修改该字段: ' + key });
         // SECURITY: the value is written verbatim into .env. Reject anything that
         // could break out of a single KEY=VALUE line (newlines / control chars)
@@ -502,6 +646,10 @@ const server = http.createServer(async (request, res) => {
             if (!/^\d{1,2}$/.test(val) || Number(val) > 23) return send(res, 400, { error: '日报时间必须是 0-23 的整点小时。' });
           } else if (key === 'AI_BASE_URL' || key === 'NOTIFY_WEBHOOK') {
             if (!/^https?:\/\/\S+$/i.test(val)) return send(res, 400, { error: '必须是 http(s):// 开头的 URL。' });
+          } else if (key === 'CALENDAR_ALERT_MINUTES') {
+            if (!/^\d{1,4}$/.test(val) || Number(val) < 1) return send(res, 400, { error: '预警窗口必须是 ≥1 的分钟数。' });
+          } else if (key === 'CALENDAR_AUTO_PAUSE') {
+            if (!/^(on|off|1|0|true|false|yes|no)$/i.test(val)) return send(res, 400, { error: '自动暂停只能是 on / off。' });
           }
         }
         // 更新内存中的环境变量
@@ -535,6 +683,27 @@ const server = http.createServer(async (request, res) => {
     }
     if (p.startsWith('/api/lr/')) {
       return await lrHandler(request, res, p.slice('/api/lr'.length), url);
+    }
+    if (p.startsWith('/api/hl/')) {
+      return await hlHandler(request, res, p.slice('/api/hl'.length), url);
+    }
+    // VA 会话令牌热切换：自动登录被 Cloudflare 挑战拦截时，粘贴新 vr-token 免重启恢复。
+    if (p === '/api/va/token' && request.method === 'POST') {
+      try {
+        if (typeof vaExchange.adoptToken !== 'function') {
+          return send(res, 400, { error: 'Variational 当前非实盘会话，无需粘贴 token。' });
+        }
+        const { token } = await readBody(request);
+        return send(res, 200, await vaExchange.adoptToken(token));
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    // 手动触发一次 VA 核账并返回报告（面板"立即核账"按钮 / 排查用）。
+    if (p === '/api/va/audit') {
+      try { return send(res, 200, await vaAudit.runNow()); }
+      catch (e) { return send(res, 500, { error: e.message }); }
+    }
+    if (p.startsWith('/api/va/')) {
+      return await vaHandler(request, res, p.slice('/api/va'.length), url);
     }
 
     // ── 静态文件 ──────────────────────────────────────────────────────────
@@ -574,16 +743,28 @@ setInterval(() => {
     const data = `data: ${stringify(lrBot.getState())}\n\n`;
     for (const r of lrClients) { try { r.write(data); } catch { lrClients.delete(r); } }
   }
+  if (hlClients.size > 0) {
+    const data = `data: ${stringify(hlBot.getState())}\n\n`;
+    for (const r of hlClients) { try { r.write(data); } catch { hlClients.delete(r); } }
+  }
+  if (vaClients.size > 0) {
+    const data = `data: ${stringify(vaBot.getState())}\n\n`;
+    for (const r of vaClients) { try { r.write(data); } catch { vaClients.delete(r); } }
+  }
   if (server._overviewClients.size > 0) {
     const deState = deBot.getState();
     const exState = exBot.getState();
     const rsState = rsBot.getState();
     const lrState = lrBot.getState();
+    const hlState = hlBot.getState();
+    const vaState = vaBot.getState();
     const overview = {
       de: pick(deState, cfg.de.mode),
       ex: pick(exState, cfg.ex.mode),
       rs: pick(rsState, cfg.rs.mode),
       lr: pick(lrState, cfg.lr.mode),
+      hl: pick(hlState, cfg.hl.mode),
+      va: pick(vaState, cfg.va.mode),
     };
     const data = `data: ${stringify(overview)}\n\n`;
     for (const r of server._overviewClients) { try { r.write(data); } catch { server._overviewClients.delete(r); } }
@@ -652,6 +833,8 @@ await Promise.all([
   initExchange(exExchange, 'Extended', cfg.ex),
   initExchange(rsExchange, 'RISEx', cfg.rs),
   initExchange(lrExchange, 'RHC Lighter', cfg.lr),
+  initExchange(hlExchange, 'Entropy', cfg.hl),
+  initExchange(vaExchange, 'Variational', cfg.va),
 ]);
 
 // ── 崩溃恢复 / 续跑 ────────────────────────────────────────────────────────────
@@ -680,6 +863,8 @@ await Promise.all([
   resumeIfWasRunning(exBot, exExchange, 'ex'),
   resumeIfWasRunning(rsBot, rsExchange, 'rs'),
   resumeIfWasRunning(lrBot, lrExchange, 'lr'),
+  resumeIfWasRunning(hlBot, hlExchange, 'hl'),
+  resumeIfWasRunning(vaBot, vaExchange, 'va'),
 ]);
 
 // After init, surface any LEFTOVER position so the dashboard can prompt the user
@@ -717,6 +902,8 @@ server.listen(cfg.port, cfg.host, () => {
   console.log(`  Extended [${cfg.ex.mode.toUpperCase()}]  ${cfg.ex.network}`);
   console.log(`  RISEx    [${cfg.rs.mode.toUpperCase()}]  ${cfg.rs.network}`);
   console.log(`  RHC      [${cfg.lr.mode.toUpperCase()}]  ${cfg.lr.network}`);
+  console.log(`  Entropy  [${cfg.hl.mode.toUpperCase()}]  ${cfg.hl.network} (${cfg.hl.dex})`);
+  console.log(`  Variational [${cfg.va.mode.toUpperCase()}]  ${cfg.va.network}`);
   console.log(`${'─'.repeat(52)}`);
   if (cfg.de.mode === 'paper' || cfg.ex.mode === 'paper' || cfg.rs.mode === 'paper') {
     console.log('  ⚠ 部分交易所为模拟模式，不涉及真实资金。');

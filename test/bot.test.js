@@ -184,7 +184,10 @@ test('成交补单链：买单成交 -> 相邻上一格挂卖单；卖单成交 
 
 test('出区间风控(close)：价格突破上边界 -> 撤单 + 平仓 + 停止', async () => {
   const { ex, bot } = await makeBot();
-  ex.setPrice(1, 205);
+  ex.setPrice(1, 210); // 第 1 拍越界（>upper+半格=205）：仅去抖计数，不触发
+  await sleep(10);
+  assert.equal(bot.running, true, '单拍越界不触发（2 拍确认去抖）');
+  ex.setPrice(1, 210); // 第 2 拍越界：触发
   await sleep(100); // 等待异步 auto-stop 完成
   assert.equal(bot.running, false, '自动停止');
   assert.equal(ex.closeCalls, 1, '已发送平仓');
@@ -197,7 +200,10 @@ test('出区间风控(recover)：空头突破上边界 -> 挂只减仓回收阶�
   ex.fill(idOf(bot, sell160));
   await sleep(10);
   assert.equal(bot.ex.getPosition(1).sizeBase, -1, '空头持仓 -1');
-  ex.setPrice(1, 250);
+  ex.setPrice(1, 250); // 第 1 拍越界：去抖计数
+  await sleep(10);
+  assert.equal(bot.outOfRange, false, '单拍越界不进破界');
+  ex.setPrice(1, 250); // 第 2 拍：进破界
   await sleep(50);
   const ladders = [...bot.active.values()].filter((a) => a.recovery);
   assert.ok(ladders.length >= 2, '应挂出回收阶梯单，实际 ' + ladders.length);
@@ -207,6 +213,98 @@ test('出区间风控(recover)：空头突破上边界 -> 挂只减仓回收阶�
   await sleep(50);
   assert.equal(bot.outOfRange, false);
   assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, '阶梯已撤销');
+});
+
+test('recover 迟滞：越外侧半格且连续 2 拍才进破界；回内侧半格才退出；阶梯首档 L−2 格', async () => {
+  // CFG：lower=100 upper=200 gridCount=10 → 格距 sp=10，半格 h=5 → 外侧 95、内侧 105
+  const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover' });
+  const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
+  ex.fill(idOf(bot, buy140));
+  await sleep(10);
+  assert.ok(bot.ex.getPosition(1).sizeBase > 0, '应有多头库存');
+
+  // 半格缓冲带内抖动：97(=L−0.3格) 与 102(=L+0.2格) 都不进破界
+  ex.setPrice(1, 97); await sleep(10);
+  ex.setPrice(1, 102); await sleep(10);
+  assert.equal(bot.outOfRange, false, '半格缓冲带内不进破界');
+  assert.equal(bot._outTicks, 0, '带内不累计越界拍数');
+
+  // 越过外侧半格但仅 1 拍：不进破界（2 拍确认去抖）
+  ex.setPrice(1, 94); await sleep(10);
+  assert.equal(bot.outOfRange, false, '单拍越界不进破界');
+  assert.equal(bot._outTicks, 1, '越界拍数累计 1');
+
+  // 连续第 2 拍越界（79 同时低于 L−2格=80）：进破界并挂阶梯，首档落在 80
+  ex.setPrice(1, 79); await sleep(50);
+  assert.equal(bot.outOfRange, true, '连续 2 拍越界进破界');
+  const ladders = [...bot.active.values()].filter((a) => a.recovery);
+  assert.ok(ladders.length >= 1, '应挂出回收阶梯单，实际 ' + ladders.length);
+  assert.ok(ladders.every((a) => a.side === 'sell' && a.recovery), '多头破下界挂 reduce-only 卖单（recovery=true 即 reduce-only）');
+  assert.ok(ladders.some((a) => a.price === 80), '阶梯首档 = L − 2 格 = 80');
+  assert.ok(ladders.every((a) => a.price <= 80), '所有阶梯档不高于 L−2 格（首档留 2 格缓冲）');
+
+  // 回到迟滞带内（102 = L+0.2格 < 内侧半格 105）：不撤阶梯
+  ex.setPrice(1, 102); await sleep(50);
+  assert.equal(bot.outOfRange, true, '回到迟滞带内仍保持破界');
+  assert.ok([...bot.active.values()].some((a) => a.recovery), '带内不撤阶梯');
+
+  // 回到内侧半格之内（106 > 105）：撤阶梯、恢复正常
+  ex.setPrice(1, 106); await sleep(50);
+  assert.equal(bot.outOfRange, false, '回内侧半格退出破界');
+  assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, '阶梯已撤销');
+});
+
+test('recoverLadderOffsetGrids：off=1 首档落在 L−1 格；off=∞ 不挂阶梯', async () => {
+  // off=1：格距 sp=10，首档应落在 L−1格=90（而非默认 L−2格=80）
+  {
+    const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: 1 });
+    assert.equal(bot.config.recoverLadderOffsetGrids, 1);
+    const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
+    ex.fill(idOf(bot, buy140)); await sleep(10);
+    ex.setPrice(1, 94); await sleep(10);   // 第 1 拍
+    ex.setPrice(1, 79); await sleep(50);   // 第 2 拍 → 破界挂阶梯
+    const ladders = [...bot.active.values()].filter((a) => a.recovery);
+    assert.ok(ladders.some((a) => a.price === 90), 'off=1 阶梯首档 = L − 1 格 = 90');
+    assert.ok(ladders.every((a) => a.price <= 90), '所有阶梯档不高于 L−1 格');
+  }
+  // off=∞：破界后完全不挂回收阶梯（纯持有，靠硬退出线）
+  {
+    const { ex, bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: Infinity });
+    // 存字符串 'inf'（非 JS Infinity）——保证 JSON 快照往返不失真
+    assert.equal(bot.config.recoverLadderOffsetGrids, 'inf');
+    const buy140 = [...bot.active.values()].find((a) => a.side === 'buy' && a.price === 140);
+    ex.fill(idOf(bot, buy140)); await sleep(10);
+    ex.setPrice(1, 94); await sleep(10);
+    ex.setPrice(1, 79); await sleep(50);
+    assert.equal(bot.outOfRange, true, '仍进破界（迟滞逻辑不受阶梯偏移影响）');
+    assert.equal([...bot.active.values()].filter((a) => a.recovery).length, 0, 'off=∞ 不挂任何回收阶梯');
+  }
+});
+
+test('recoverLadderOffsetGrids：∞ 经 snapshot→JSON→restore 仍是"不挂阶梯"（P0 序列化回归）', async () => {
+  const { bot } = await makeBot({}, { ...CFG, mode: 'long', outOfRangeAction: 'recover', recoverLadderOffsetGrids: Infinity });
+  // 真实持久化路径：snapshot → JSON 往返 → restore。若还存 JS Infinity，这一步会被吞成 null。
+  const snap = JSON.parse(JSON.stringify(bot.snapshot()));
+  assert.equal(snap.config.recoverLadderOffsetGrids, 'inf', '快照存可往返的 "inf" 字符串');
+
+  const { bot: fresh } = await makeBot({}, CFG);
+  fresh.running = false;
+  fresh.restore(snap);
+  assert.equal(fresh.config.recoverLadderOffsetGrids, 'inf', 'restore 后仍是 inf（不挂阶梯）');
+});
+
+test('recover 迟滞：启动价落在边界外侧半格内 → 不判破界、正常铺单（P2-1）', async () => {
+  // lower=100 sp=10 h=5 → 外侧半格 95；起始价 97 在 [95,100) 缓冲带内
+  const mkt = { marketId: 1, name: 'BTC-USD', displayName: 'BTC-USD', symbol: 'BTC',
+    stepSize: 0.00001, stepPrice: 1, maxLeverage: 50, minOrderSize: 0.0001, lastPrice: 97 };
+  const { bot } = await makeBot({ markets: [mkt] }, { ...CFG, outOfRangeAction: 'recover' });
+  assert.equal(bot.outOfRange, false, '外侧半格内启动不判破界（避免"已铺单+补单暂停"的怪状态）');
+  assert.ok(bot.active.size > 0, '正常铺单');
+
+  // 对照：起始价 94（< 95 外侧半格）应判破界起步
+  const mkt2 = { ...mkt, lastPrice: 94 };
+  const { bot: bot2 } = await makeBot({ markets: [mkt2] }, { ...CFG, outOfRangeAction: 'recover' });
+  assert.equal(bot2.outOfRange, true, '越过外侧半格启动仍判破界');
 });
 
 test('对账 prune：交易所消失的挂单连续两轮确认后清理', async () => {
@@ -284,6 +382,23 @@ test('stop：撤单 + 平仓 + 状态复位', async () => {
   assert.equal(bot.active.size, 0);
   assert.equal(ex.closeCalls, 1);
   assert.equal(ex.orders.size, 0);
+});
+
+test('重试空快照守卫：期望有单但快照为空 -> 本轮不重挂（防翻倍下单）', async () => {
+  const { ex, bot } = await makeBot();
+  // 塞入 10+ 个 opening 重试项，且本地 active 有 10+ 单（满足守卫阈值）
+  for (let i = 0; i < 12; i++) {
+    bot.active.set('a' + i, { levelIndex: i, side: 'buy', price: 110 + i, sizeBase: 1, opening: true, placedAt: Date.now() });
+    bot._retryQueue.push({ levelIndex: i, sizeBase: 1, side: 'buy', price: 110 + i, opening: true, _nextAt: 0 });
+  }
+  // 交易所挂单快照为空（模拟 dex 端点瞎眼）——守卫应拦截重挂
+  ex.orders.clear();
+  const before = bot.active.size;
+  await bot._drainRetryQueueNow();
+  assert.equal(bot.active.size, before, '空快照轮不得重挂/新增挂单');
+  assert.equal(ex.orders.size, 0, '交易所侧不得出现任何新单');
+  assert.ok(bot._retryQueue.length >= 12, '重试项应保留（推后重试而非放弃）');
+  assert.ok(bot.alerts.some((a) => a.message.includes('安全重试暂缓')), '应发出安全重试暂缓告警');
 });
 
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────

@@ -121,13 +121,57 @@ test('影子模式：动作只告警不执行', async () => {
   assert.ok(bot.alerts.some((a) => a.message.includes('[动态·影子]')), '影子应有提醒告警');
 });
 
+test('_dynLog：影子重定记录一条动作 + 进快照可恢复', async () => {
+  const ex = new MockExchange();
+  calmCandles(ex, 0.5);
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: true, driftFrac: 0.33, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: false } });
+  bot.stop({ closePosition: false });
+  bot.running = true; bot.lastPrice = 275;
+  bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
+  bot.config = { ...bot.config, lower: 100, upper: 300 };
+  await bot._dynCheck();
+  assert.equal(bot._dynLog.length, 1, '影子重定应记录一条 _dynLog');
+  const rec = bot._dynLog[0];
+  assert.equal(rec.branch, 'A', '分支 A');
+  assert.equal(rec.reason, 'drift', '原因 drift');
+  assert.equal(rec.shadow, true, 'shadow=true');
+  assert.ok(rec.before && rec.after, 'before/after 齐全');
+  assert.equal(rec.pnlAfter, null, '回填字段初始 null');
+
+  // 快照往返：_dynLog 应随快照持久化并在 restore 后恢复
+  const snap = bot.snapshot();
+  assert.equal(snap.dynLog.length, 1, 'snapshot 带 dynLog');
+  const ex2 = new MockExchange(); calmCandles(ex2, 0.5);
+  const bot2 = new GridBot(ex2, { cancelVerifyDelayMs: 10 });
+  await bot2.restore(snap);
+  assert.equal(bot2._dynLog.length, 1, 'restore 后 _dynLog 恢复');
+  bot._stopDynTimer(); bot2._stopDynTimer();
+});
+
+test('_dynLog 门计数：漂移达标但冷静门拦截 -> gateBlocked.calm++，不记动作', async () => {
+  const ex = new MockExchange();
+  calmCandles(ex, 8); // 动量 8% > 3%：非冷静
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: false } });
+  bot.stop({ closePosition: false });
+  bot.running = true; bot.lastPrice = 275;
+  bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
+  bot.config = { ...bot.config, lower: 100, upper: 300 };
+  await bot._dynCheck();
+  assert.equal(bot._dynGateBlocked.calm, 1, '冷静门拦截计数 +1');
+  assert.equal(bot._dynLog.length, 0, '被门拦截不记动作');
+  bot._stopDynTimer();
+});
+
 test('自动停机记录：破界 stop 前 _noteAutoStop(reason=breakout)', async () => {
   const ex = new MockExchange();
   calmCandles(ex, 0.5);
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
   await bot.start({ ...CFG, outOfRangeAction: 'close', dynamic: { enabled: true, shadow: false } });
   bot.lastPrice = 150;
-  bot._handlePrice({ marketId: 1, price: 205 }); // 突破上边界
+  bot._handlePrice({ marketId: 1, price: 210 }); // 第 1 拍越界（>upper+半格 205）：去抖计数
+  bot._handlePrice({ marketId: 1, price: 210 }); // 第 2 拍：触发破界 close
   await sleep(120);
   assert.equal(bot.running, false, '破界 close 停止');
   assert.ok(bot._autoStopped, '应记录自动停机');

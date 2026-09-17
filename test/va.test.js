@@ -1,0 +1,471 @@
+// Variational Omni (VA) adapter tests.
+//
+// Covers the two things that make this adapter different from the guess-based
+// RISEx template: (1) pure parsers against capture-shaped payloads, and (2) the
+// POSITIVE-confirmation fill state machine — cleared→fill, failed_risk_checks→
+// reject, canceled(local)→silent, canceled(remote)→error, the cancel-vs-fill
+// race, fail-closed when terminal rows can't be read — PLUS the five review-driven
+// boundary fixes: soft-forget late fills, created_at windowing, pagination,
+// internal-close no-fill, and fail-closed position parsing.
+import { strict as assert } from 'node:assert';
+import { Buffer } from 'node:buffer';
+import {
+  instrumentFor, instrumentKey, parseSupportedAsset, parseOrderRow, parseTrade, parsePortfolio,
+  parsePosition, parseIndicative, unwrapResult, roundQty, roundPrice, formatStep, isFilled, isCanceled,
+} from '../src/exchange/va/market.js';
+import { VariationalExchange } from '../src/exchange/va/variational.js';
+
+// ── A controllable in-memory HTTP double (matches VaHttpClient's surface) ───
+class MockHttp {
+  constructor() {
+    this.price = 60000;
+    this.pending = [];
+    this.history = [];
+    this.historyByOffset = null; // { 0:[...], 100:[...] } to exercise pagination
+    this.trades = [];
+    this.portfolio = { balance: 1000, upnl: 0, sub_accounts: { cross_available: 900 } };
+    this.positions = []; // BARE ARRAY (confirmed real shape)
+    this.failHistory = false;
+    this.posted = [];
+    this._seq = 1000;
+    this.lastHistoryPath = null;
+    // A realistic indicative response (drives init precision/leverage + closePosition).
+    this.indicative = {
+      quote_id: 'q-1', bid: '59990', ask: '60010', mark_price: '60000', index_price: '60000',
+      qty_limits: { bid: { min_qty_tick: '0.000001', min_qty: '0.000002', max_qty: '1000' }, ask: { min_qty_tick: '0.000001', min_qty: '0.000002', max_qty: '1000' } },
+      margin_params: { params: { asset_params: { BTC: { futures_initial_margin: '0.02' } } } },
+      margin_requirements: { bid_max_notional_delta: '6900', ask_max_notional_delta: '6900' },
+    };
+  }
+  hasToken() { return true; }
+  setToken() {}
+  async supportedAssets(u) {
+    return { [u]: [{ price: this.price, index_price: this.price, instrument_type: 'perpetual_future', market_status: 'open', max_leverage: 50, funding_interval_s: 28800 }] };
+  }
+  async get(path) {
+    if (path.includes('/api/portfolio')) return this.portfolio;
+    if (path.includes('/api/positions')) return this.positions;
+    if (path.includes('/api/trades')) return { result: this.trades };
+    if (path.includes('status=pending')) return { result: this.pending };
+    // Anything else on orders/v2 is a terminal-window (created_at_gte) query.
+    this.lastHistoryPath = path;
+    if (this.failHistory) throw new Error('history 503');
+    if (this.historyByOffset) {
+      const off = Number((path.match(/offset=(\d+)/) || [])[1] || 0);
+      const maxOff = Math.max(...Object.keys(this.historyByOffset).map(Number));
+      return { result: this.historyByOffset[off] || [], pagination: { next_page: off < maxOff ? 'next' : null } };
+    }
+    return { result: this.history };
+  }
+  async post(path, body) {
+    this.posted.push({ path, body });
+    if (path.includes('orders/new/limit')) return { rfq_id: String(this._seq++) };
+    if (path.includes('quotes/indicative')) return this.indicative;
+    if (path.includes('quotes/accept')) return { rfq_id: String(this._seq++) };
+    if (path.includes('orders/cancel')) return null; // real API: HTTP 2xx + body null
+    if (path.includes('set_leverage')) return { current: body.leverage, max: 50 };
+    return {};
+  }
+  warnOnce() {}
+}
+
+const mkEx = (http) => new VariationalExchange({ underlyings: ['BTC'], leverage: 0, http });
+const collect = (ex) => { const ev = { fills: [], errors: [] }; ex.on('fill', (f) => ev.fills.push(f)); ex.on('error', (e) => ev.errors.push(e)); return ev; };
+const pendRow = (rfq, extra = {}) => ({ rfq_id: rfq, order_type: 'limit', side: 'buy', limit_price: '58000', qty: '0.001', status: 'pending', instrument: { underlying: 'BTC' }, ...extra });
+
+// ─────────────────────────────────────────────────────────────────────────
+// ① Pure parsers
+{
+  const snap = parseSupportedAsset({ BTC: [{ price: '58496.84', index_price: '58490.0', max_leverage: 50, funding_interval_s: 28800 }] }, 'BTC');
+  assert.equal(snap.price, 58496.84);
+  assert.equal(snap.maxLeverage, 50);
+  assert.equal(snap.fundingWindowS, 28800, 'metadata reports the 28800 settlement window');
+}
+{
+  const inst = instrumentFor('BTC', {});
+  assert.equal(inst.funding_interval_s, 3600, 'order identity uses 3600, not metadata 28800');
+  assert.equal('kind' in inst, false, 'BTC perp must not carry kind');
+  assert.equal(instrumentKey('BTC', {}), 'P-BTC-USDC-3600', 'instrument identity string');
+  const rwa = instrumentFor('AAPL', { kind: 'rwa', fundingIntervalS: 86400 });
+  assert.equal(rwa.kind, 'rwa');
+  assert.equal(rwa.funding_interval_s, 86400);
+}
+{
+  const row = parseOrderRow({ rfq_id: 42, order_id: 999, status: 'CLEARED', side: 'BUY', order_type: 'limit', limit_price: '58000', qty: '0.001', failed_risk_checks: [], instrument: { underlying: 'BTC' } });
+  assert.equal(row.rfqId, '42');
+  assert.equal(row.orderId, '999');
+  assert.ok(isFilled(row.status));
+  assert.equal(row.underlying, 'BTC');
+  const tr = parseTrade({ id: 7, source_rfq: 42, price: '58001.5', qty: '0.001', side: 'buy' });
+  assert.equal(tr.rfqId, '42', 'trade keyed back to order via source_rfq');
+  assert.equal(tr.price, 58001.5);
+}
+{
+  const port = parsePortfolio({ balance: '1000', upnl: '12.5', sub_accounts: { cross_available: '900' } });
+  assert.equal(port.balance, 1000);
+  assert.equal(port.equity, 1012.5, 'equity = balance + upnl');
+  assert.equal(port.available, 900);
+  assert.equal(unwrapResult({ result: [1, 2] }).length, 2);
+  // Three-state parsePosition against the confirmed bare-array shape.
+  const pr = parsePosition([{ position_info: { instrument: { underlying: 'BTC' }, qty: '-0.5', avg_entry_price: '60000', last_local_sequence: 3 }, upnl: '-1.2', price_info: { price: '60010' }, rpnl: '0' }], 'BTC');
+  assert.ok(pr.ok && pr.pos, 'readable position');
+  assert.equal(pr.pos.sizeBase, -0.5, 'qty is already signed (short negative)');
+  assert.equal(pr.pos.entryPrice, 60000);
+  assert.equal(pr.pos.unrealizedPnl, -1.2, 'upnl read from OUTER level');
+  const flat = parsePosition([], 'BTC');
+  assert.ok(flat.ok && flat.pos === null, 'empty array -> genuinely flat');
+  const bad = parsePosition({ not: 'array' }, 'BTC');
+  assert.equal(bad.ok, false, 'non-array -> unreadable (fail-closed), never a fabricated zero');
+}
+{
+  const ind = parseIndicative({ quote_id: 'x', bid: '10', ask: '11', mark_price: '10.5', qty_limits: { bid: { min_qty_tick: '0.000001', min_qty: '0.000002' } }, margin_params: { params: { asset_params: { BTC: { futures_initial_margin: '0.02' } } } }, margin_requirements: { bid_max_notional_delta: '6900' } });
+  assert.equal(ind.quoteId, 'x');
+  assert.equal(ind.minQty, 0.000002);
+  assert.equal(ind.currentLeverage, 50, '1/0.02 = 当前 50x（当前杠杆，非合约上限）');
+  assert.equal(ind.maxLeverage, undefined, 'parseIndicative 不再输出 maxLeverage 字段');
+  assert.equal(ind.maxNotionalBid, 6900);
+}
+{
+  assert.equal(roundQty(0.0017095, 0.000001), 0.001709);
+  assert.ok(Math.abs(roundPrice(58496.843, 0.01) - 58496.84) < 1e-6);
+  assert.equal(formatStep(0.001709, 0.000001), '0.001709');
+  assert.ok(isCanceled('CANCELED'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+async function ready(http) {
+  const ex = mkEx(http);
+  const ev = collect(ex);
+  await ex.init();
+  ex.stop(); // drive _refreshOrders manually; no background polling
+  return { ex, ev };
+}
+
+// ② cleared -> fill (row.price is the actual fill)
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 });
+  http.pending = [pendRow(orderId)];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0, 'resting order does not fill');
+  http.pending = [];
+  http.history = [{ rfq_id: orderId, status: 'cleared', side: 'buy', qty: '0.001', price: '58000', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  http.trades = [{ id: 1, source_rfq: orderId, price: '58001.25', qty: '0.001', side: 'buy' }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 1, 'cleared -> exactly one fill');
+  assert.equal(ev.fills[0].price, 58000, 'fill price comes from the order row (actual fill)');
+  assert.equal(ev.fills[0].levelIndex, 3);
+  assert.equal(ex.getOpenOrders(1).length, 0, 'filled order removed from tracking');
+}
+
+// ③ failed_risk_checks -> reject (error carries `reject`, no fill, counter++)
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'sell', price: 62000, sizeBase: 0.001, levelIndex: 5 });
+  http.pending = [pendRow(orderId, { side: 'sell', limit_price: '62000' })];
+  await ex._refreshOrders();
+  http.pending = [];
+  http.history = [{ rfq_id: orderId, status: 'canceled', side: 'sell', qty: '0.001', failed_risk_checks: ['max_position'], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0, 'rejected order never fills');
+  assert.equal(ex.rejectedOrders, 1, 'reject counter incremented');
+  assert.ok(ev.errors.some((e) => /reject/i.test(e.message)), 'reject error carries the bot back-off keyword');
+}
+
+// ④ canceled by US -> silent
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 57000, sizeBase: 0.001, levelIndex: 1 });
+  http.pending = [pendRow(orderId, { limit_price: '57000' })];
+  await ex._refreshOrders();
+  await ex.cancelOrder(1, orderId);
+  http.pending = [];
+  http.history = [{ rfq_id: orderId, status: 'canceled', side: 'buy', qty: '0.001', cancel_reason: 'user_cancel', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0);
+  assert.equal(ev.errors.length, 0, 'our own cancel is silent');
+  assert.equal(ex.getOpenOrders(1).length, 0);
+}
+
+// ⑤ canceled REMOTELY -> error
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 57000, sizeBase: 0.001, levelIndex: 2 });
+  http.pending = [pendRow(orderId, { limit_price: '57000' })];
+  await ex._refreshOrders();
+  http.pending = [];
+  http.history = [{ rfq_id: orderId, status: 'canceled', side: 'buy', qty: '0.001', cancel_reason: 'olp_reject', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0);
+  assert.ok(ev.errors.some((e) => /非本地撤销/.test(e.message)), 'remote cancel raises an error');
+}
+
+// ⑥ cancel-vs-fill RACE -> fill wins
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 4 });
+  http.pending = [pendRow(orderId)];
+  await ex._refreshOrders();
+  await ex.cancelOrder(1, orderId);
+  http.pending = [];
+  http.history = [{ rfq_id: orderId, status: 'cleared', side: 'buy', qty: '0.001', price: '58000', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 1, 'a cleared order fills even if we tried to cancel');
+  assert.equal(ev.errors.length, 0);
+}
+
+// ⑦ fail-closed: terminal rows unreadable -> resolve nothing
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 0 });
+  http.pending = [pendRow(orderId)];
+  await ex._refreshOrders();
+  http.pending = [];
+  http.failHistory = true;
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0, 'never fabricate a fill when the terminal row is unreadable');
+  assert.equal(ex.getOpenOrders(1).length, 1, 'order stays tracked (fail-closed)');
+  assert.ok(ex.operationalIssue, 'an operational issue is surfaced');
+}
+
+// ⑧ SOFT-FORGET: mid-cancel + bot forgetOrder, then cleared -> NO grid fill, lateFills++
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 7 });
+  http.pending = [pendRow(orderId)];
+  await ex._refreshOrders();          // seen
+  await ex.cancelOrder(1, orderId);   // canceling = true
+  ex.forgetOrder(orderId);            // bot drops the level -> soft-forget (kept)
+  http.pending = [];
+  http.history = [{ rfq_id: orderId, status: 'cleared', side: 'buy', qty: '0.001', price: '58000', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0, 'a fill during cancel is NOT re-emitted onto the (already dropped) grid level');
+  assert.equal(ex.lateFills, 1, 'counted as a late fill');
+  assert.ok(ev.errors.some((e) => /撤单期间已成交/.test(e.message)), 'operator warned that inventory changed');
+}
+
+// ⑨ created_at WINDOW: adopted order (created ~1h ago) resolves in the correct window
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const oldCreated = new Date(Date.now() - 3600_000).toISOString();
+  ex.adoptOrder({ orderId: 'AA', marketId: 1, levelIndex: 9, side: 'buy', price: 58000, sizeBase: 0.001, createdAt: oldCreated });
+  http.pending = [pendRow('AA', { created_at: oldCreated })];
+  await ex._refreshOrders();          // seen; createdAt already carried from adopt
+  http.pending = [];
+  http.history = [{ rfq_id: 'AA', status: 'cleared', side: 'buy', qty: '0.001', price: '58050', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  const gte = Date.parse(decodeURIComponent((http.lastHistoryPath.match(/created_at_gte=([^&]+)/) || [])[1]));
+  assert.ok(gte < Date.now() - 50 * 60_000, 'terminal window anchored to the order created_at (~1h ago), not placedAt(now)');
+  assert.equal(ev.fills.length, 1, 'fill resolved because the window reached back far enough');
+}
+
+// ⑩ PAGINATION: target terminal row sits on page 2 -> must page through and find it
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 11 });
+  http.pending = [pendRow(orderId)];
+  await ex._refreshOrders();
+  http.pending = [];
+  http.historyByOffset = {
+    0: [{ rfq_id: 'noise', status: 'cleared', side: 'buy', qty: '0.001', price: '1', failed_risk_checks: [], instrument: { underlying: 'BTC' } }],
+    100: [{ rfq_id: orderId, status: 'cleared', side: 'buy', qty: '0.001', price: '58000', failed_risk_checks: [], instrument: { underlying: 'BTC' } }],
+  };
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 1, 'found the terminal row on page 2 via pagination');
+}
+
+// ⑪ INTERNAL close (indicative→accept) -> never re-emitted as a grid fill
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  http.positions = [{ position_info: { instrument: { underlying: 'BTC' }, qty: '0.001', avg_entry_price: '60000', last_local_sequence: 1 }, upnl: '0', price_info: { price: '60000' } }];
+  await ex._refreshAccount();
+  assert.ok(ex.getPosition(1), 'position present before close');
+  await ex.closePosition(1);
+  assert.ok(http.posted.some((p) => p.path.includes('quotes/indicative')), 'closePosition asked for an indicative quote');
+  assert.ok(http.posted.some((p) => p.path.includes('quotes/accept')), 'closePosition accepted the quote');
+  const internalId = [...ex._tracked.keys()].at(-1);
+  ex._tracked.get(internalId).placedAt = Date.now() - 10_000; // past grace so it counts as gone
+  http.pending = [];
+  http.history = [{ rfq_id: internalId, status: 'cleared', side: 'sell', qty: '0.001', price: '60000', failed_risk_checks: [], instrument: { underlying: 'BTC' } }];
+  await ex._refreshOrders();
+  assert.equal(ev.fills.length, 0, 'internal close does NOT emit a grid fill');
+  assert.equal(ex._tracked.size, 0, 'internal order cleared from tracking');
+}
+
+// ⑫ POSITION fail-closed: unreadable positions keep the last known position
+{
+  const http = new MockHttp();
+  const { ex } = await ready(http);
+  http.positions = [{ position_info: { instrument: { underlying: 'BTC' }, qty: '0.002', avg_entry_price: '60000', last_local_sequence: 2 }, upnl: '1', price_info: { price: '60010' } }];
+  await ex._refreshAccount();
+  assert.equal(ex.getPosition(1)?.sizeBase, 0.002, 'position read');
+  http.positions = { garbage: true }; // unreadable
+  ex.operationalIssue = null;
+  await ex._refreshAccount();
+  assert.equal(ex.getPosition(1)?.sizeBase, 0.002, 'unreadable positions keep the last known position');
+  assert.ok(ex.operationalIssue, 'unreadable positions surface an issue');
+}
+
+// ⑬ maxOpenOrders: default 50 on the market + 422 max-orders pauses opens
+{
+  const http = new MockHttp();
+  const { ex } = await ready(http);
+  assert.equal(ex.getMarket(1).maxOpenOrders, 50, 'market carries the 50-order cap');
+  // Simulate the server 50-order 422 (error_message shape from the probe).
+  const orig = http.post.bind(http);
+  http.post = async (path, body) => {
+    if (path.includes('orders/new/limit')) {
+      const { VaHttpError } = await import('../src/exchange/va/httpclient.js');
+      throw new VaHttpError('Variational 接口错误 422: user exceeds max orders per instrument limit for order type (limit), max orders limit for this type is 50', 422, {});
+    }
+    return orig(path, body);
+  };
+  await assert.rejects(
+    ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 }),
+    /reject/, 'a 50-order 422 surfaces as a reject',
+  );
+  assert.ok(ex._placementPausedUntil > Date.now(), 'opens are paused after the cap 422');
+  await assert.rejects(
+    ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 57000, sizeBase: 0.001, levelIndex: 2 }),
+    /50 单|上限/, 'while paused, new opens are refused locally',
+  );
+}
+
+// ⑭ cancelAll verify-retry: residual orders after all rounds -> false + issue
+{
+  const http = new MockHttp();
+  const { ex } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 });
+  // The order never leaves the pending set no matter how many cancels we send.
+  http.pending = [pendRow(orderId)];
+  const origPost = http.post.bind(http);
+  http.post = async (path, body) => origPost(path, body); // cancels "succeed" but book stays full
+  const ok = await ex.cancelAll(1);
+  assert.equal(ok, false, 'cancelAll reports failure when orders keep resting');
+  assert.ok(ex.operationalIssue && /仍有/.test(ex.operationalIssue.message), 'residual raises an operational issue');
+  const cancelCalls = http.posted.filter((p) => p.path.includes('orders/cancel')).length;
+  assert.ok(cancelCalls >= 4, `retried across rounds (saw ${cancelCalls} cancels)`);
+}
+
+// ⑮ benign cancel 400 (already gone / pending clearing) -> NOT a failure, no alarm
+{
+  const http = new MockHttp();
+  const { ex, ev } = await ready(http);
+  const { orderId } = await ex.placeLimitOrder({ marketId: 1, side: 'buy', price: 58000, sizeBase: 0.001, levelIndex: 3 });
+  // The order is already gone server-side: cancel 400s, and it is NOT in pending.
+  http.pending = [];
+  const { VaHttpError } = await import('../src/exchange/va/httpclient.js');
+  http.post = async (path) => {
+    if (path.includes('orders/cancel')) {
+      throw new VaHttpError('Variational 接口错误 400: unable to cancel rfq', 400, { error_message: 'unable to cancel rfq, either rfq does not exist, is inactive, or is currently pending clearing' });
+    }
+    return null;
+  };
+  const one = await ex.cancelOrder(1, orderId);
+  assert.equal(one, true, 'a benign "does not exist" 400 counts as canceled, not a failure');
+  const all = await ex.cancelAll(1);
+  assert.equal(all, true, 'cancelAll succeeds when the only errors are benign already-gone 400s');
+  assert.equal(ev.errors.length, 0, 'benign cancel 400s raise no error/alarm');
+}
+
+// ⑯ transient flagging: 5xx / network(0) are transient (auto-clear), 4xx is sticky
+{
+  const { VaHttpClient, VaHttpError } = await import('../src/exchange/va/httpclient.js');
+  const mkClient = (status, text = '', headers = {}) => new VaHttpClient({
+    token: 't', transport: { async request() { return { status, text, headers }; } },
+  });
+  // 503 -> transient
+  await assert.rejects(mkClient(503).get('/api/orders/v2'), (e) => {
+    assert.ok(e instanceof VaHttpError && e.status === 503 && e.transient === true, '503 is transient');
+    assert.ok(/GET \/api\/orders\/v2/.test(e.message), '503 message carries method+path');
+    return true;
+  });
+  // 400 -> NOT transient
+  await assert.rejects(mkClient(400, JSON.stringify({ error_message: 'bad' })).get('/api/x'), (e) => {
+    assert.ok(e instanceof VaHttpError && e.status === 400 && e.transient !== true, '400 is sticky');
+    return true;
+  });
+  // transport throw (network) -> status 0, transient
+  const netClient = new VaHttpClient({ token: 't', transport: { async request() { throw new Error('ECONNRESET'); } } });
+  await assert.rejects(netClient.get('/api/x'), (e) => {
+    assert.ok(e instanceof VaHttpError && e.status === 0 && e.transient === true, 'network error is transient');
+    return true;
+  });
+}
+
+// ⑰ 杠杆语义：indicative 只反映【当前】杠杆，不得覆盖合约 maxLeverage。
+// 复现实盘 bug：账户当前 5x（fim=0.2），但 supported_assets 报 max_leverage=50。
+// 期望 market.maxLeverage 保持 50（否则 bot._start 会把目标 10x 静默压回 5x）。
+{
+  const http = new MockHttp();
+  http.indicative.margin_params.params.asset_params.BTC.futures_initial_margin = '0.2'; // 1/0.2 = 当前 5x
+  const { ex } = await ready(http);
+  const m = ex.getMarket(1);
+  assert.equal(m.maxLeverage, 50, 'maxLeverage 保持合约上限 50，不被当前杠杆覆盖');
+  assert.equal(m.currentLeverage, 5, 'currentLeverage 反映账户当前 5x');
+}
+
+// ⑱ vr-token 寿命三档预警（手动 token 模式；配了私钥能自签则整体跳过）。
+// 构造一个带 exp 的假 JWT，驱动 _checkTokenLife，断言各档级别 / key / cooldown。
+{
+  const mkJwt = (msFromNow) => {
+    const exp = Math.floor((Date.now() + msFromNow) / 1000);
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+    return `${b64({ alg: 'none' })}.${b64({ exp })}.sig`;
+  };
+  const mkTokEx = (msFromNow) => {
+    const http = new MockHttp();
+    http.token = mkJwt(msFromNow);           // 让 decodeJwtExp 拿到寿命
+    const ex = new VariationalExchange({ underlyings: ['BTC'], leverage: 0, http });
+    assert.equal(ex.auth.canRefresh(), false, '无私钥 → 手动 token 模式（canRefresh=false）');
+    const out = [];
+    ex.onNotify = (p) => out.push(p);
+    return { ex, out };
+  };
+
+  // >72h：完全静默（连 info 都不发）。
+  { const { ex, out } = mkTokEx(80 * 3600_000); ex._checkTokenLife(); assert.equal(out.length, 0, '>72h 不预警'); }
+
+  // <72h：info（仅面板/日志），无 cooldownMs。
+  { const { ex, out } = mkTokEx(50 * 3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'info');
+    assert.equal(out[0].key, 'token-expiry'); assert.equal(out[0].cooldownMs, undefined, 'info 档不设 cooldown'); }
+
+  // <24h：warn（推手机，6h 冷却）。
+  { const { ex, out } = mkTokEx(10 * 3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'warn');
+    assert.equal(out[0].cooldownMs, 6 * 3600_000, 'warn 档 6h 冷却'); }
+
+  // <2h：critical（推手机，30min 冷却）。
+  { const { ex, out } = mkTokEx(1 * 3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'critical');
+    assert.equal(out[0].cooldownMs, 30 * 60_000, 'critical 档 30min 冷却'); }
+
+  // 已过期：critical（交易锁定，去面板重贴 token）。
+  { const { ex, out } = mkTokEx(-3600_000); ex._checkTokenLife();
+    assert.equal(out.length, 1); assert.equal(out[0].level, 'critical');
+    assert.ok(/已过期/.test(out[0].message)); }
+
+  // 轮询节流：throttle=true 时，30min 内第二次调用不重复计算/推送。
+  { const { ex, out } = mkTokEx(1 * 3600_000);
+    ex._checkTokenLife({ throttle: true }); ex._checkTokenLife({ throttle: true });
+    assert.equal(out.length, 1, '30min 内节流，只发一次'); }
+
+  // 无 exp 的 token：判不了寿命，静默跳过（不误报）。
+  { const http = new MockHttp(); http.token = 'not-a-jwt';
+    const ex = new VariationalExchange({ underlyings: ['BTC'], leverage: 0, http });
+    const out = []; ex.onNotify = (p) => out.push(p); ex._checkTokenLife();
+    assert.equal(out.length, 0, '无 exp 不预警'); }
+}
+
+console.log('✓ va.test.js 全部通过');

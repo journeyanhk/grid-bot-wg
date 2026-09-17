@@ -43,6 +43,8 @@ html[data-theme="light"] {
   --blu:#2563eb; --blu2:#1d4ed8; --yel:#d97706; --pur:#7c3aed; --pur2:#6d28d9;
   --de-bg:#f59e0b14; --ex-bg:#3b82f614; --rs-bg:#22c55e14;
   --lr-color:#0891b2; --lr-bg:#22d3ee14;
+  --hl-color:#a855f7; --hl-bg:#a855f714;
+  --va-color:#f43f5e; --va-bg:#f43f5e14;
   --radius:8px;
 }
 @media (prefers-color-scheme: light) {
@@ -54,6 +56,8 @@ html[data-theme="light"] {
     --blu:#2563eb; --blu2:#1d4ed8; --yel:#d97706; --pur:#7c3aed; --pur2:#6d28d9;
     --de-bg:#f59e0b14; --ex-bg:#3b82f614; --rs-bg:#22c55e14;
     --lr-color:#0891b2; --lr-bg:#22d3ee14;
+  --hl-color:#a855f7; --hl-bg:#a855f714;
+  --va-color:#f43f5e; --va-bg:#f43f5e14;
     --radius:8px;
   }
 }
@@ -98,6 +102,8 @@ body {
 .tab-btn .dot-ex { color: var(--ex-color); }
 .tab-btn .dot-rs { color: var(--rs-color); }
 .tab-btn .dot-lr { color: var(--lr-color); }
+.tab-btn .dot-hl { color: var(--hl-color); }
+.tab-btn .dot-va { color: var(--va-color); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
@@ -120,6 +126,8 @@ body {
 .panel.ex { border-top: 2px solid var(--ex-color); }
 .panel.rs { border-top: 2px solid var(--rs-color); }
 .panel.lr { border-top: 2px solid var(--lr-color); }
+.panel.hl { border-top: 2px solid var(--hl-color); }
+.panel.va { border-top: 2px solid var(--va-color); }
 
 /* ── Overview cards ── */
 .overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px; }
@@ -135,6 +143,8 @@ body {
 .ov-card.ex::before { background: var(--ex-color); }
 .ov-card.rs::before { background: var(--rs-color); }
 .ov-card.lr::before { background: var(--lr-color); }
+.ov-card.hl::before { background: var(--hl-color); }
+.ov-card.va::before { background: var(--va-color); }
 .ov-exname {
   font-size: 12px; font-weight: 700; letter-spacing: .4px; margin-bottom: 10px;
   display: flex; align-items: center; gap: 8px;
@@ -315,6 +325,22 @@ details.dyn input[type=number] { width: 100%; }
 details.dyn .row { gap: 8px; margin-top: 6px; }
 .dynstat { font-size: 11px; color: var(--mut2); margin-top: 2px; }
 
+.cal-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px; }
+.cal-nav { display:flex; gap:6px; align-items:center; }
+.cal-nav button { padding:4px 10px; font-size:13px; border:1px solid var(--border2); background:var(--panel); color:var(--txt); border-radius:6px; cursor:pointer; font-family:inherit; }
+.cal-nav button:hover { border-color:var(--pur); }
+.cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+.cal-dow { text-align:center; font-size:11px; color:var(--mut); padding:4px 0; }
+.cal-cell { min-height:56px; border:1px solid var(--border); border-radius:6px; padding:4px; background:var(--panel2); display:flex; flex-direction:column; gap:2px; }
+.cal-cell.other { visibility:hidden; }
+.cal-cell.today { border-color:var(--pur); box-shadow:0 0 0 1px var(--pur) inset; }
+.cal-date { font-size:11px; color:var(--mut2); }
+.cal-ev { font-size:10px; padding:1px 4px; border-radius:4px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:default; }
+.cal-ev.CPI { background:#d97706; }
+.cal-ev.FOMC { background:#dc2626; }
+.cal-ev.NFP { background:#2563eb; }
+.cal-legend { display:flex; gap:14px; font-size:11px; color:var(--mut2); margin-top:10px; flex-wrap:wrap; }
+.cal-dot { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; vertical-align:middle; }
 /* ── IP Config panel ── */
 .ip-section { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg2); margin-bottom: 10px; }
 .ip-section-title { font-size: 11px; font-weight: 700; color: var(--mut2); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 8px; }
@@ -412,6 +438,8 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
   <span class="hdot idle" id="hdr-ex-dot" title=""></span><span id="hdr-ex" class="badge badge-paper">EX: PAPER</span>
   <span class="hdot idle" id="hdr-rs-dot" title=""></span><span id="hdr-rs" class="badge badge-paper">RS: PAPER</span>
   <span class="hdot idle" id="hdr-lr-dot" title=""></span><span id="hdr-lr" class="badge badge-paper">LR: PAPER</span>
+  <span class="hdot idle" id="hdr-hl-dot" title=""></span><span id="hdr-hl" class="badge badge-paper">HL: PAPER</span>
+  <span class="hdot idle" id="hdr-va-dot" title=""></span><span id="hdr-va" class="badge badge-paper">VA: PAPER</span>
   <div class="header-right">
     <button class="icon-btn" id="theme-toggle" title="切换主题（当前跟随系统）">🌓</button>
     <span id="hdr-proxy" class="conn" title="全局代理状态"><span class="cdot"></span><span id="hdr-proxy-txt">代理检测中…</span></span>
@@ -442,7 +470,10 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
   <button class="tab-btn" onclick="switchTab('ex')"><span class="dot-ex">●</span> Extended</button>
   <button class="tab-btn" onclick="switchTab('rs')"><span class="dot-rs">●</span> RISEx</button>
   <button class="tab-btn" onclick="switchTab('lr')"><span class="dot-lr">●</span> RHC</button>
+  <button class="tab-btn" onclick="switchTab('hl')"><span class="dot-hl">●</span> Entropy</button>
+  <button class="tab-btn" onclick="switchTab('va')"><span class="dot-va">●</span> Variational</button>
   <button class="tab-btn" onclick="switchTab('ai')">🤖 AI助手</button>
+  <button class="tab-btn" onclick="switchTab('calendar')">📅 事件</button>
   <button class="tab-btn" onclick="switchTab('settings')">⚙ IP配置</button>
 </div>
 
@@ -590,6 +621,60 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div id="ov-lr-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
       <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('lr', this)">🔌 重连交易所（不动挂单/持仓）</button>
       <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('lr')">进入 RHC Lighter 控制台 →</button>
+    </div>
+    <div class="ov-card hl">
+      <div class="ov-exname" style="color:var(--hl-color)">
+        <span class="run-dot" id="ov-hl-dot"></span>
+        Entropy(HL)
+        <span id="ov-hl-badge" class="badge badge-paper" style="margin-left:auto">PAPER</span>
+      </div>
+      <div id="ov-hl-health" class="exhealth eh-idle">—</div>
+      <div class="ov-pnl" id="ov-hl-pnl">—</div>
+      <div class="ov-sub" id="ov-hl-ret">收益率 —</div>
+      <div style="margin-top:10px">
+        <div class="ov-stat"><span class="lbl">余额</span><span class="val" id="ov-hl-bal">—</span></div>
+        <div class="ov-stat"><span class="lbl">权益</span><span class="val" id="ov-hl-eq">—</span></div>
+        <div class="ov-stat"><span class="lbl">已实现</span><span class="val" id="ov-hl-rpnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">未实现</span><span class="val" id="ov-hl-upnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">交易量</span><span class="val" id="ov-hl-vol">—</span></div>
+        <div class="ov-stat"><span class="lbl">完成网格</span><span class="val" id="ov-hl-rungs">—</span></div>
+        <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-hl-price">—</span></div>
+        <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-hl-mkt">—</span></div>
+      </div>
+      <div class="ov-position" id="ov-hl-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-hl-issue" style="display:none"></div>
+      <div id="ov-hl-gridcfg" class="gridcfg" style="display:none"></div>
+      <div id="ov-hl-ai" class="ai-box muted" style="display:none;margin-top:8px;font-size:12px"></div>
+      <div id="ov-hl-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
+      <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('hl', this)">🔌 重连交易所（不动挂单/持仓）</button>
+      <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('hl')">进入 Entropy(HL) 控制台 →</button>
+    </div>
+    <div class="ov-card va">
+      <div class="ov-exname" style="color:var(--va-color)">
+        <span class="run-dot" id="ov-va-dot"></span>
+        Variational
+        <span id="ov-va-badge" class="badge badge-paper" style="margin-left:auto">PAPER</span>
+      </div>
+      <div id="ov-va-health" class="exhealth eh-idle">—</div>
+      <div class="ov-pnl" id="ov-va-pnl">—</div>
+      <div class="ov-sub" id="ov-va-ret">收益率 —</div>
+      <div style="margin-top:10px">
+        <div class="ov-stat"><span class="lbl">余额</span><span class="val" id="ov-va-bal">—</span></div>
+        <div class="ov-stat"><span class="lbl">权益</span><span class="val" id="ov-va-eq">—</span></div>
+        <div class="ov-stat"><span class="lbl">已实现</span><span class="val" id="ov-va-rpnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">未实现</span><span class="val" id="ov-va-upnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">交易量</span><span class="val" id="ov-va-vol">—</span></div>
+        <div class="ov-stat"><span class="lbl">完成网格</span><span class="val" id="ov-va-rungs">—</span></div>
+        <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-va-price">—</span></div>
+        <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-va-mkt">—</span></div>
+      </div>
+      <div class="ov-position" id="ov-va-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-va-issue" style="display:none"></div>
+      <div id="ov-va-gridcfg" class="gridcfg" style="display:none"></div>
+      <div id="ov-va-ai" class="ai-box muted" style="display:none;margin-top:8px;font-size:12px"></div>
+      <div id="ov-va-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
+      <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('va', this)">🔌 重连交易所（不动挂单/持仓）</button>
+      <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('va')">进入 Variational 控制台 →</button>
     </div>
   </div>
 
@@ -1197,6 +1282,300 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
+
+<div id="tab-hl" class="tab-panel">
+<div class="wrap">
+<div class="grid-left-right">
+  <div>
+    <div class="panel lr" style="margin-bottom:14px">
+      <div class="panel-title" style="color:var(--hl-color)">RHC Lighter · 市场与趋势</div>
+      <label>交易对</label>
+      <select id="hl-market"></select>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>K线周期</label>
+          <select id="hl-interval">
+            <option value="900">15m</option>
+            <option value="3600" selected>1h</option>
+            <option value="14400">4h</option>
+            <option value="86400">1d</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="btn btn-ghost" style="margin:0;padding:7px" id="hl-refresh-trend">刷新</button>
+        </div>
+      </div>
+      <div style="margin-top:10px" id="hl-rec-box" class="rec-box rec-range">
+        <div class="muted">趋势分析</div>
+        <div class="rec-tag" id="hl-rec-tag">分析中…</div>
+        <div class="rec-detail" id="hl-rec-detail">—</div>
+        <button class="btn btn-ghost" style="margin-top:8px;padding:6px;font-size:12px" id="hl-apply-rec">采用推荐策略 + 自动区间</button>
+      </div>
+    </div>
+
+    <div class="panel lr">
+      <div class="panel-title" style="color:var(--hl-color)">RHC Lighter · 策略配置</div>
+      <label>网格类型</label>
+      <div class="modes" id="hl-modes">
+        <div class="mode-btn sel" data-mode="neutral">中性<small>双向震荡</small></div>
+        <div class="mode-btn" data-mode="long">做多<small>低买高止</small></div>
+        <div class="mode-btn" data-mode="short">做空<small>高空低止</small></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+        <span class="muted">风格</span>
+        <div class="risk-toggle" id="hl-risk-toggle">
+          <span class="risk-btn sel" data-risk="steady">稳健</span>
+          <span class="risk-btn" data-risk="aggressive">激进</span>
+        </div>
+        <span class="muted" id="hl-risk-hint">成交少·更安全</span>
+      </div>
+      <button class="btn btn-smart" id="hl-smart-fill">🎯 智能填充参数</button>
+      <div class="muted" id="hl-smart-note" style="margin:5px 0 2px"></div>
+      <div class="row">
+        <div><label>下边界</label><input id="hl-lower" type="number" step="any"></div>
+        <div><label>上边界</label><input id="hl-upper" type="number" step="any"></div>
+      </div>
+      <div class="row">
+        <div><label>网格数量</label><input id="hl-grid-count" type="number" value="20" min="2"></div>
+        <div><label>每格数量(币)</label><input id="hl-size-base" type="number" step="any" value="0.01"></div>
+      </div>
+      <div class="row">
+        <div><label>杠杆 (x)</label><input id="hl-leverage" type="number" value="3" min="1"></div>
+        <div>
+          <label>区间外止损策略</label>
+          <select id="hl-auto-stop">
+            <option value="close" selected>冲破区间平仓</option>
+            <option value="recover">只减仓回收阶梯</option>
+          </select>
+          <label style="margin-top:8px">硬止损上限 (USDC，0=不启用，仅 recover)</label>
+          <input id="hl-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
+        </div>
+      </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="hl-dyn-enable" checked> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="hl-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="hl-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="hl-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="hl-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="hl-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="hl-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="hl-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
+      <div class="risk-preview" id="hl-risk-preview"></div>
+      <button class="btn btn-start" id="hl-start-btn">启动 Entropy(HL) 网格</button>
+      <button class="btn btn-stop" id="hl-stop-btn" disabled>停止 + 撤单 + 平仓</button>
+      <button class="btn btn-ghost" id="hl-adjust-btn" disabled style="margin-top:8px">调整区间（不停止网格）</button>
+      <button class="btn btn-ghost" id="hl-cancel-orders-btn" style="margin-top:8px;border-color:var(--yel);color:var(--yel)">撤销所有挂单（保留持仓）</button>
+      <button class="btn btn-ghost" id="hl-refill-btn" style="margin-top:8px">补齐网格挂单（一键补格）</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="hl-orphan-prompt" style="display:none;margin-bottom:14px;border:1px solid var(--yel)">
+      <div class="panel-title" style="color:var(--yel)">⚠ 检测到未托管持仓 · 请选择处理方式</div>
+      <div id="hl-orphan-info" class="muted" style="margin-bottom:10px;line-height:1.5"></div>
+      <button class="btn btn-ghost" id="hl-orphan-recover" style="border-color:var(--yel);color:var(--yel)">① 只减仓回收阶梯</button>
+      <label style="display:block;font-size:11px;color:var(--mut2);margin-top:6px"><input type="checkbox" id="hl-orphan-above-entry" style="width:auto;margin-right:6px;vertical-align:middle">回收仅在成本价以上减仓（不亏才减；否则任何反弹都分批减）</label>
+      <button class="btn btn-ghost" id="hl-orphan-regrid" style="margin-top:8px">② 按现价重开网格</button>
+      <button class="btn btn-stop" id="hl-orphan-close" style="margin-top:8px">③ 市价平仓</button>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-title">Entropy(HL) · 账户状态</div>
+      <div class="grid-2" style="gap:10px;margin-bottom:10px">
+        <div><div class="kv"><span class="lbl">运行状态</span><span class="val" id="hl-st-run">未运行</span></div>
+          <div class="kv"><span class="lbl">最新价</span><span class="val" id="hl-st-price">—</span></div>
+          <div class="kv"><span class="lbl">账户余额</span><span class="val" id="hl-st-bal">—</span></div>
+          <div class="kv"><span class="lbl">权益</span><span class="val" id="hl-st-eq">—</span></div></div>
+        <div><div class="kv"><span class="lbl">持仓</span><span class="val" id="hl-st-pos">—</span></div>
+          <div class="kv"><span class="lbl">持仓均价</span><span class="val" id="hl-st-entry">—</span></div>
+          <div class="kv"><span class="lbl">强平价</span><span class="val" id="hl-st-liq">—</span></div>
+          <div class="kv"><span class="lbl">已实现盈亏</span><span class="val" id="hl-st-rpnl">—</span></div>
+          <div class="kv"><span class="lbl">未实现盈亏</span><span class="val" id="hl-st-upnl">—</span></div></div>
+      </div>
+      <div class="kv"><span class="lbl">总盈亏 / 收益率</span><span class="val" id="hl-st-total">—</span></div>
+      <div class="kv"><span class="lbl">挂单数 / 完成格</span><span class="val" id="hl-st-orders">—</span></div>
+      <div class="kv" id="hl-st-issue" style="display:none"></div>
+      <button class="btn btn-ghost" id="hl-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
+      <button class="btn btn-ghost" id="hl-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-title">价格 / 网格</div>
+      <div id="hl-range-warn"></div>
+      <div class="chartbox"><canvas id="hl-chart"></canvas></div>
+    </div>
+    <div class="grid-2" style="gap:14px">
+      <div class="panel">
+        <div class="panel-title">成交记录</div>
+        <table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th></tr></thead><tbody id="hl-fills"></tbody></table>
+      </div>
+      <div class="panel">
+        <div class="panel-title">运行日志</div>
+        <div class="log" id="hl-alerts"><div class="log-item muted">暂无日志</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+
+<div id="tab-va" class="tab-panel">
+<div class="wrap">
+<div class="grid-left-right">
+  <div>
+    <div class="panel lr" style="margin-bottom:14px">
+      <div class="panel-title" style="color:var(--va-color)">Variational · 市场与趋势</div>
+      <label>交易对</label>
+      <select id="va-market"></select>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>K线周期</label>
+          <select id="va-interval">
+            <option value="900">15m</option>
+            <option value="3600" selected>1h</option>
+            <option value="14400">4h</option>
+            <option value="86400">1d</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="btn btn-ghost" style="margin:0;padding:7px" id="va-refresh-trend">刷新</button>
+        </div>
+      </div>
+      <div style="margin-top:10px" id="va-rec-box" class="rec-box rec-range">
+        <div class="muted">趋势分析</div>
+        <div class="rec-tag" id="va-rec-tag">分析中…</div>
+        <div class="rec-detail" id="va-rec-detail">—</div>
+        <button class="btn btn-ghost" style="margin-top:8px;padding:6px;font-size:12px" id="va-apply-rec">采用推荐策略 + 自动区间</button>
+      </div>
+    </div>
+
+    <div class="panel lr">
+      <div class="panel-title" style="color:var(--va-color)">Variational · 策略配置</div>
+      <label>网格类型</label>
+      <div class="modes" id="va-modes">
+        <div class="mode-btn sel" data-mode="neutral">中性<small>双向震荡</small></div>
+        <div class="mode-btn" data-mode="long">做多<small>低买高止</small></div>
+        <div class="mode-btn" data-mode="short">做空<small>高空低止</small></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+        <span class="muted">风格</span>
+        <div class="risk-toggle" id="va-risk-toggle">
+          <span class="risk-btn sel" data-risk="steady">稳健</span>
+          <span class="risk-btn" data-risk="aggressive">激进</span>
+        </div>
+        <span class="muted" id="va-risk-hint">成交少·更安全</span>
+      </div>
+      <button class="btn btn-smart" id="va-smart-fill">🎯 智能填充参数</button>
+      <div class="muted" id="va-smart-note" style="margin:5px 0 2px"></div>
+      <div class="row">
+        <div><label>下边界</label><input id="va-lower" type="number" step="any"></div>
+        <div><label>上边界</label><input id="va-upper" type="number" step="any"></div>
+      </div>
+      <div class="row">
+        <div><label>网格数量</label><input id="va-grid-count" type="number" value="20" min="2"></div>
+        <div><label>每格数量(币)</label><input id="va-size-base" type="number" step="any" value="0.01"></div>
+      </div>
+      <div class="row">
+        <div><label>杠杆 (x)</label><input id="va-leverage" type="number" value="3" min="1"></div>
+        <div>
+          <label>区间外止损策略</label>
+          <select id="va-auto-stop">
+            <option value="close" selected>冲破区间平仓</option>
+            <option value="recover">只减仓回收阶梯</option>
+          </select>
+          <label style="margin-top:8px">硬止损上限 (USDC，0=不启用，仅 recover)</label>
+          <input id="va-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
+        </div>
+      </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="va-dyn-enable" checked> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="va-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="va-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="va-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="va-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="va-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="va-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="va-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
+      <div class="risk-preview" id="va-risk-preview"></div>
+      <button class="btn btn-start" id="va-start-btn">启动 Variational 网格</button>
+      <button class="btn btn-stop" id="va-stop-btn" disabled>停止 + 撤单 + 平仓</button>
+      <button class="btn btn-ghost" id="va-adjust-btn" disabled style="margin-top:8px">调整区间（不停止网格）</button>
+      <button class="btn btn-ghost" id="va-cancel-orders-btn" style="margin-top:8px;border-color:var(--yel);color:var(--yel)">撤销所有挂单（保留持仓）</button>
+      <button class="btn btn-ghost" id="va-refill-btn" style="margin-top:8px">补齐网格挂单（一键补格）</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="va-orphan-prompt" style="display:none;margin-bottom:14px;border:1px solid var(--yel)">
+      <div class="panel-title" style="color:var(--yel)">⚠ 检测到未托管持仓 · 请选择处理方式</div>
+      <div id="va-orphan-info" class="muted" style="margin-bottom:10px;line-height:1.5"></div>
+      <button class="btn btn-ghost" id="va-orphan-recover" style="border-color:var(--yel);color:var(--yel)">① 只减仓回收阶梯</button>
+      <label style="display:block;font-size:11px;color:var(--mut2);margin-top:6px"><input type="checkbox" id="va-orphan-above-entry" style="width:auto;margin-right:6px;vertical-align:middle">回收仅在成本价以上减仓（不亏才减；否则任何反弹都分批减）</label>
+      <button class="btn btn-ghost" id="va-orphan-regrid" style="margin-top:8px">② 按现价重开网格</button>
+      <button class="btn btn-stop" id="va-orphan-close" style="margin-top:8px">③ 市价平仓</button>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-title">Variational · 账户状态</div>
+      <div class="grid-2" style="gap:10px;margin-bottom:10px">
+        <div><div class="kv"><span class="lbl">运行状态</span><span class="val" id="va-st-run">未运行</span></div>
+          <div class="kv"><span class="lbl">最新价</span><span class="val" id="va-st-price">—</span></div>
+          <div class="kv"><span class="lbl">账户余额</span><span class="val" id="va-st-bal">—</span></div>
+          <div class="kv"><span class="lbl">权益</span><span class="val" id="va-st-eq">—</span></div></div>
+        <div><div class="kv"><span class="lbl">持仓</span><span class="val" id="va-st-pos">—</span></div>
+          <div class="kv"><span class="lbl">持仓均价</span><span class="val" id="va-st-entry">—</span></div>
+          <div class="kv"><span class="lbl">强平价</span><span class="val" id="va-st-liq">—</span></div>
+          <div class="kv"><span class="lbl">已实现盈亏</span><span class="val" id="va-st-rpnl">—</span></div>
+          <div class="kv"><span class="lbl">未实现盈亏</span><span class="val" id="va-st-upnl">—</span></div></div>
+      </div>
+      <div class="kv"><span class="lbl">总盈亏 / 收益率</span><span class="val" id="va-st-total">—</span></div>
+      <div class="kv"><span class="lbl">挂单数 / 完成格</span><span class="val" id="va-st-orders">—</span></div>
+      <div class="kv" id="va-st-issue" style="display:none"></div>
+      <button class="btn btn-ghost" id="va-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
+      <button class="btn btn-ghost" id="va-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
+        <div class="muted" style="font-size:12px;margin-bottom:6px">会话令牌（vr-token）· 自动登录被 Cloudflare 拦截时手动热切换（无需重启）</div>
+        <textarea id="va-token-input" rows="2" placeholder="粘贴新的 vr-token（7 天有效）后点应用" style="width:100%;box-sizing:border-box;font-size:12px;font-family:monospace;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+          <button class="btn btn-ghost" style="margin:0;font-size:12px" onclick="adoptVaToken(this)">应用令牌</button>
+          <span id="va-token-msg" class="muted" style="font-size:12px"></span>
+        </div>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-title">价格 / 网格</div>
+      <div id="va-range-warn"></div>
+      <div class="chartbox"><canvas id="va-chart"></canvas></div>
+    </div>
+    <div class="grid-2" style="gap:14px">
+      <div class="panel">
+        <div class="panel-title">成交记录</div>
+        <table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th></tr></thead><tbody id="va-fills"></tbody></table>
+      </div>
+      <div class="panel">
+        <div class="panel-title">运行日志</div>
+        <div class="log" id="va-alerts"><div class="log-item muted">暂无日志</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
 <!-- TAB: IP配置 -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -1222,6 +1601,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div><label>Telegram Bot Token（推送用，可选）</label><input id="ai-tg-token" type="password" placeholder="123456:ABC-..."></div>
       <div><label>Telegram Chat ID（可选）</label><input id="ai-tg-chat" placeholder="例：123456789"></div>
       <div><label>通用 Webhook（可选，POST {"text":...}）</label><input id="ai-webhook" placeholder="https://..."></div>
+      <div><label>Server酱 SendKey（可选，微信推送）</label><input id="ai-serverchan" type="password" placeholder="SCT... 或 sctp..."></div>
     </div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn btn-smart" style="margin:0;width:auto;padding:8px 22px" onclick="aiSaveConfig(this)">保存配置</button>
@@ -1266,6 +1646,58 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <input id="ai-chat-input" placeholder="例：三个所现在整体情况怎么样？ / 把 Extended 上边界调到 66000" style="flex:1" onkeydown="if(event.key==='Enter')aiChatSend()">
       <button class="btn btn-smart" style="margin:0;width:auto;padding:8px 18px" onclick="aiChatSend()">发送</button>
     </div>
+  </div>
+</div>
+</div>
+
+<!-- TAB: 事件日历 -->
+<div id="tab-calendar" class="tab-panel">
+<div class="wrap" style="max-width:900px">
+  <div class="panel" style="margin-top:4px">
+    <div class="panel-title">📅 事件日历（CPI / FOMC / 非农）</div>
+    <p class="muted" style="margin-bottom:12px;line-height:1.6">
+      这三类经济数据时间表提前公布、零误报，是网格最该盯的「可提前预警」信号。数据发布前后波动放大，
+      系统会在事件<b>前后各 N 分钟</b>推送提醒（可选自动暂停入场侧）。<br>
+      时间为你本地时区显示；数据为 2026 全年预填，请每年（或遇改期）核对官方日程。
+    </p>
+    <div class="cal-head">
+      <div class="cal-nav">
+        <button onclick="calPrevMonth()">‹ 上月</button>
+        <b id="cal-title" style="min-width:110px;text-align:center">—</b>
+        <button onclick="calNextMonth()">下月 ›</button>
+        <button onclick="calToday()">今天</button>
+      </div>
+      <div id="cal-active" style="color:var(--red,#dc2626);font-size:12px"></div>
+    </div>
+    <div class="cal-grid" id="cal-dow-row"></div>
+    <div class="cal-grid" id="cal-grid" style="margin-top:4px"></div>
+    <div class="cal-legend">
+      <span><i class="cal-dot" style="background:#dc2626"></i>FOMC 利率决议</span>
+      <span><i class="cal-dot" style="background:#d97706"></i>CPI 通胀数据</span>
+      <span><i class="cal-dot" style="background:#2563eb"></i>非农就业报告</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">⏰ 预警设置</div>
+    <div class="ai-grid">
+      <div><label>预警窗口（事件前后各多少分钟）</label><input id="cal-window" type="number" min="1" placeholder="30"></div>
+      <div><label>窗口内自动暂停入场侧</label>
+        <select id="cal-autopause"><option value="off">否 · 仅通知（推荐）</option><option value="on">是 · 暂停开仓（保留出场腿）</option></select></div>
+    </div>
+    <p class="muted" style="margin-top:8px;font-size:12px;line-height:1.6">
+      按回测判决，BTC 网格上「自动动手」是负期望，默认仅通知。若你想在数据发布窗口更保守，可开自动暂停：
+      窗口内只暂停开仓、保留出场/减仓腿，窗口结束自动恢复。
+    </p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-smart" style="margin:0;width:auto;padding:8px 22px" onclick="calSaveConfig(this)">保存设置</button>
+    </div>
+    <div id="cal-cfg-status" class="muted" style="margin-top:8px;font-size:12px">—</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">🔜 未来事件</div>
+    <div id="cal-upcoming" class="muted">加载中…</div>
   </div>
 </div>
 </div>
@@ -1529,8 +1961,9 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   $('tab-' + name).classList.add('active');
-  document.querySelectorAll('.tab-btn')[['overview','de','ex','rs','lr','ai','settings'].indexOf(name)].classList.add('active');
+  document.querySelectorAll('.tab-btn')[['overview','de','ex','rs','lr','hl','va','ai','calendar','settings'].indexOf(name)].classList.add('active');
   if (name === 'ai') aiRefreshStatus();
+  if (name === 'calendar') calLoad();
 }
 
 // ── 时钟 ────────────────────────────────────────────────────────────────────
@@ -1923,7 +2356,7 @@ function makeExchangeCtrl(prefix, chartId) {
     };
     const config = {
       type: 'line',
-      data: { labels, datasets: [{ data, borderColor: prefix === 'de' ? '#f59e0b' : prefix === 'ex' ? '#3b82f6' : prefix === 'lr' ? '#22d3ee' : '#22c55e', borderWidth: 1.5, pointRadius: 0, tension: .15 }] },
+      data: { labels, datasets: [{ data, borderColor: prefix === 'de' ? '#f59e0b' : prefix === 'ex' ? '#3b82f6' : prefix === 'lr' ? '#22d3ee' : prefix === 'hl' ? '#a855f7' : prefix === 'va' ? '#f43f5e' : '#22c55e', borderWidth: 1.5, pointRadius: 0, tension: .15 }] },
       options: { responsive:true, maintainAspectRatio:false, animation:false,
         plugins:{legend:{display:false}},
         scales: { x:{ticks:{color:'#6b82a0',maxTicksLimit:8},grid:{color:'#1e2d45'}},
@@ -1945,6 +2378,8 @@ const deCtrl = makeExchangeCtrl('de', 'de-chart');
 const exCtrl = makeExchangeCtrl('ex', 'ex-chart');
 const rsCtrl = makeExchangeCtrl('rs', 'rs-chart');
 const lrCtrl = makeExchangeCtrl('lr', 'lr-chart');
+const hlCtrl = makeExchangeCtrl('hl', 'hl-chart');
+const vaCtrl = makeExchangeCtrl('va', 'va-chart');
 
 // ── 总览 SSE + 程序运行状态（后端连接心跳）─────────────────────────────────────
 // 服务器每秒推送一次总览数据。只要心跳正常即视为"正常运行"；心跳停止
@@ -1975,7 +2410,7 @@ function updateConnStatus() {
   el.className = 'conn ' + cls;
   txt.textContent = label;
   el.title = '后端连接状态' + (lastBeat ? `（最后更新 ${Math.round(age / 1000)} 秒前）` : '');
-  if (lastBeat && age >= 10000) ['de','ex','rs'].forEach((p) => setExHealth(p, lastOverview[p]?.health, false));
+  if (lastBeat && age >= 10000) ['de','ex','rs','lr','hl','va'].forEach((p) => setExHealth(p, lastOverview[p]?.health, false));
 }
 setInterval(updateConnStatus, 1000);
 updateConnStatus();
@@ -2018,7 +2453,7 @@ const MODE_LABEL = { neutral: '中性', long: '做多', short: '做空' };
 const TREND_LABEL = { up: '上升', down: '下降', range: '震荡' };
 
 async function scanTrends() {
-  for (const p of ['de', 'ex', 'rs', 'lr']) {
+  for (const p of ['de', 'ex', 'rs', 'lr', 'hl', 'va']) {
     const box = $(`ov-${p}-trend`);
     if (!box) continue;
     const d = lastOverview[p];
@@ -2087,6 +2522,31 @@ async function reconnectEx(p, btn) {
   if (btn) { btn.textContent = orig; btn.disabled = false; }
 }
 
+// VA 会话令牌热切换：粘贴新 vr-token，后端校验+落缓存+portfolio 验证后恢复交易（无需重启）。
+async function adoptVaToken(btn) {
+  const ta = $('va-token-input');
+  const msg = $('va-token-msg');
+  const token = (ta && ta.value || '').trim();
+  if (!token) { if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '请先粘贴 token'; } return; }
+  if (btn) btn.disabled = true;
+  if (msg) { msg.style.color = ''; msg.textContent = '应用中…'; }
+  try {
+    const r = await apiFetch('/api/va/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    if (ta) ta.value = '';
+    const hrs = j.exp ? Math.max(1, Math.round((j.exp * 1000 - Date.now()) / 3600000)) : null;
+    if (msg) {
+      msg.style.color = '#22c55e';
+      msg.textContent = '已应用' + (hrs ? `，有效约 ${hrs} 小时` : '') + (j.tradingReady ? '，交易已恢复' : '');
+    }
+  } catch (e) {
+    if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '失败：' + e.message; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function setExHealth(p, h, connected) {
   const status = !connected ? 'error' : (h?.status || 'idle');
   const reason = !connected ? '后端连接中断，状态未知' : (h?.reason || '未运行');
@@ -2126,9 +2586,14 @@ function renderOverview(data) {
   let totEquity = 0, totBalance = 0, totPnl = 0, totRealized = 0, totUnrealized = 0, totVolume = 0, totRungs = 0;
   let running = 0;
 
-  ['de','ex','rs','lr'].forEach(p => {
+  ['de','ex','rs','lr','hl','va'].forEach(p => {
     const d = data[p];
     if (!d) return;
+    // 总览只展示有金额在运行的交易所：live + 有余额 + 运行中，否则隐藏卡片（v1.6.0）
+    const visible = d.mode === 'live' && (d.balance > 0) && d.running;
+    const card = document.querySelector('.ov-card.' + p);
+    if (card) card.style.display = visible ? '' : 'none';
+    if (!visible) return;
     if (d.balance != null) totBalance += d.balance;
     if (d.equity != null) totEquity += d.equity;
     if (d.totalPnl != null) totPnl += d.totalPnl;
@@ -2201,8 +2666,11 @@ function renderOverview(data) {
   $('tot-running').innerHTML = running === 0
     ? '<span class="muted">全部停止</span>'
     : `<span class="up">${running}/3 运行中</span>`;
-  const modes = ['de','ex','rs'].map(p => data[p]?.mode?.toUpperCase() || 'PAPER').join(' / ');
-  $('tot-modes').textContent = `DE / EX / RS : ${modes}`;
+  const modes = ['de','ex','rs','lr','hl','va'].filter(p => {
+    const d = data[p];
+    return d && d.mode === 'live' && (d.balance > 0) && d.running;
+  }).map(p => p.toUpperCase()).join(' / ');
+  $('tot-modes').textContent = modes || '无';
 }
 
 // ── IP 配置功能 ──────────────────────────────────────────────────────────────
@@ -2264,12 +2732,90 @@ async function loadProxyConfig() {
 }
 loadProxyConfig();
 
+// ══ 事件日历 ═══════════════════════════════════════════════════════════════
+const CAL_TYPE_LABEL = { CPI:'CPI', FOMC:'FOMC', NFP:'非农' };
+const CAL_DOW = ['日','一','二','三','四','五','六'];
+let calState = { events:[], upcoming:[], active:null, config:{windowMin:30,autoPause:false}, now:Date.now(), viewY:null, viewM:null };
+
+function calColor(t){ return t==='FOMC'?'#dc2626':t==='CPI'?'#d97706':'#2563eb'; }
+
+async function calLoad(){
+  try{
+    const r = await apiFetch('/api/calendar'); const d = await r.json();
+    calState.events = d.events||[]; calState.upcoming = d.upcoming||[];
+    calState.active = d.active||null; calState.config = d.config||calState.config; calState.now = d.now||Date.now();
+    if (calState.viewY==null){ const n=new Date(calState.now); calState.viewY=n.getFullYear(); calState.viewM=n.getMonth()+1; }
+    $('cal-window').value = calState.config.windowMin;
+    $('cal-autopause').value = calState.config.autoPause ? 'on' : 'off';
+    $('cal-active').textContent = calState.active ? ('⚠ 当前处于事件窗口：'+calState.active.title) : '';
+    calRenderDow(); calRenderMonth(); calRenderUpcoming();
+  }catch(e){ const b=$('cal-upcoming'); if(b) b.textContent='加载失败：'+(e.message||e); }
+}
+function calRenderDow(){
+  const row=$('cal-dow-row'); if(!row) return; row.innerHTML='';
+  for(const d of CAL_DOW){ const c=document.createElement('div'); c.className='cal-dow'; c.textContent=d; row.appendChild(c); }
+}
+function calRenderMonth(){
+  const y=calState.viewY, m=calState.viewM;
+  $('cal-title').textContent = y+' 年 '+m+' 月';
+  const startDow=new Date(y,m-1,1).getDay();
+  const daysInMonth=new Date(y,m,0).getDate();
+  const evByDay={};
+  for(const ev of calState.events){ const d=new Date(ev.ts); if(d.getFullYear()===y && d.getMonth()+1===m){ (evByDay[d.getDate()]=evByDay[d.getDate()]||[]).push(ev); } }
+  const grid=$('cal-grid'); grid.innerHTML='';
+  const tod=new Date(calState.now);
+  for(let i=0;i<startDow;i++){ const c=document.createElement('div'); c.className='cal-cell other'; grid.appendChild(c); }
+  for(let day=1;day<=daysInMonth;day++){
+    const c=document.createElement('div'); c.className='cal-cell';
+    if(tod.getFullYear()===y && tod.getMonth()+1===m && tod.getDate()===day) c.classList.add('today');
+    const dd=document.createElement('div'); dd.className='cal-date'; dd.textContent=day; c.appendChild(dd);
+    for(const ev of (evByDay[day]||[])){
+      const e=document.createElement('div'); e.className='cal-ev '+ev.type;
+      const t=new Date(ev.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+      e.textContent=(CAL_TYPE_LABEL[ev.type]||ev.type)+' '+t;
+      e.title=ev.title+' · '+new Date(ev.ts).toLocaleString('zh-CN');
+      c.appendChild(e);
+    }
+    grid.appendChild(c);
+  }
+}
+function calRenderUpcoming(){
+  const box=$('cal-upcoming'); if(!box) return;
+  if(!calState.upcoming.length){ box.textContent='未来 45 天内无 CPI/FOMC/非农事件。'; return; }
+  box.innerHTML = calState.upcoming.map(ev=>{
+    const dt=new Date(ev.ts); const days=Math.round((ev.ts-calState.now)/86400000);
+    const when=dt.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+    const rel=days<=0?'今天':(days+' 天后');
+    return '<div style="padding:5px 0;border-bottom:1px solid var(--border);font-size:12px"><span class="cal-dot" style="background:'+calColor(ev.type)+'"></span>'
+      + when+' · '+ev.title+' <span class="muted">（'+rel+'）</span></div>';
+  }).join('');
+}
+function calPrevMonth(){ if(--calState.viewM<1){calState.viewM=12;calState.viewY--;} calRenderMonth(); }
+function calNextMonth(){ if(++calState.viewM>12){calState.viewM=1;calState.viewY++;} calRenderMonth(); }
+function calToday(){ const n=new Date(calState.now); calState.viewY=n.getFullYear(); calState.viewM=n.getMonth()+1; calRenderMonth(); }
+async function calSaveConfig(btn){
+  if(btn) btn.disabled=true;
+  try{
+    const items=[['CALENDAR_ALERT_MINUTES', String($('cal-window').value||'30').trim()],
+                 ['CALENDAR_AUTO_PAUSE', $('cal-autopause').value]];
+    for(const [key,value] of items){
+      const r=await apiFetch('/api/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})});
+      const j=await r.json();
+      if(j.error){ $('cal-cfg-status').textContent='❌ '+key+'：'+j.error; if(btn) btn.disabled=false; return; }
+    }
+    $('cal-cfg-status').textContent='✅ 已保存并立即生效（已写入 .env）';
+    calLoad();
+  }catch(e){ $('cal-cfg-status').textContent='❌ 保存失败：'+(e.message||e); }
+  if(btn) btn.disabled=false;
+}
+
+
 // ══ AI 助手 ═══════════════════════════════════════════════════════════════
 const AI_ENV_MAP = {
   'ai-baseurl':'AI_BASE_URL', 'ai-key':'AI_API_KEY',
   'ai-model':'AI_MODEL', 'ai-model-small':'AI_MODEL_SMALL',
   'ai-sentinel-min':'AI_SENTINEL_MINUTES', 'ai-report-hour':'AI_REPORT_HOUR',
-  'ai-tg-token':'TELEGRAM_BOT_TOKEN', 'ai-tg-chat':'TELEGRAM_CHAT_ID', 'ai-webhook':'NOTIFY_WEBHOOK',
+  'ai-tg-token':'TELEGRAM_BOT_TOKEN', 'ai-tg-chat':'TELEGRAM_CHAT_ID', 'ai-webhook':'NOTIFY_WEBHOOK', 'ai-serverchan':'SERVERCHAN_SENDKEY',
 };
 // 服务商预设：proto=后端协议（openai 兼容 / anthropic / gemini），base=接口地址，
 // models=常用模型（datalist 下拉，可手动输入任意新模型），main/small=选中后自动填的默认值
@@ -2305,7 +2851,7 @@ function aiVendorChange() {
   for (const m of v.models) { const o = document.createElement('option'); o.value = m; dl.appendChild(o); }
   $('ai-cfg-status').textContent = `已按 ${v.name} 预填接口地址和推荐模型（模型可下拉换或手动输入），填好 API Key 后点「保存配置」。`;
 }
-const AI_EXNAME = { de:'Decibel', ex:'Extended', rs:'RISEx' };
+const AI_EXNAME = { de:'Decibel', ex:'Extended', rs:'RISEx', lr:'RHC', hl:'Entropy', va:'Variational' };
 const AI_ACTION_LABEL = {
   adjust_range:'调整网格区间', stop_grid:'停止网格', cancel_orders:'撤销全部挂单（保留持仓）',
   close_position:'市价平仓', reconnect:'重连交易所', start_recovery:'启动只减仓回收阶梯', start_grid:'启动网格',
@@ -2421,7 +2967,7 @@ async function aiRefreshStatus() {
       }
       if (document.activeElement !== $('ov-ai-mkt-min')) $('ov-ai-mkt-min').placeholder = s.marketMin;
       if (document.activeElement !== $('ov-ai-sent-min')) $('ov-ai-sent-min').placeholder = s.sentinelMin;
-      for (const p of ['de', 'ex', 'rs', 'lr']) {
+      for (const p of ['de', 'ex', 'rs', 'lr', 'hl', 'va']) {
         const el = $(`ov-${p}-ai`);
         const per = s.sentinel && s.sentinel.per ? s.sentinel.per[p] : null;
         if (el && per) {
