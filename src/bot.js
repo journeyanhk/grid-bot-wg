@@ -1553,6 +1553,7 @@ export class GridBot {
     this._exchangeOpenOrders = real.length;
     this._exchangeOpenOrdersVerifiedAt = Date.now();
     const realIds = new Set(real.map((o) => String(o.orderId)));
+    const realById = new Map(real.map((o) => [String(o.orderId), o]));
     const now = Date.now();
 
     // GUARD against transient bad snapshots: Extended's open-order endpoint has
@@ -1567,10 +1568,23 @@ export class GridBot {
       this._lastVanishAlertAt = now;
       this._alert(`⚠️ 挂单对账：交易所返回 0 单但本地跟踪 ${this.active.size} 单，疑似接口异常快照，本轮不清理（等待下轮复核）。`);
     }
-    let pruned = 0;
+    let pruned = 0, repaired = 0;
     if (!massVanish) {
       for (const [oid, info] of [...this.active]) {
-        if (realIds.has(oid)) { info.goneRecon = 0; continue; }
+        if (realIds.has(oid)) {
+          info.goneRecon = 0;
+          // 方向漂移修正：接管/重启后本地方向可能与交易所不符（HL 'B'/'A' 解析历史缺陷）。
+          // oid 已匹配则交易所权威，同步纠正 active（图表 openByLevel 源）与适配器 _tracked。
+          const realSide = realById.get(oid)?.side;
+          if (realSide && info.side !== realSide) {
+            info.side = realSide;
+            const closing = recovery ? true : ((this.config.mode === 'short') ? realSide === 'buy' : realSide === 'sell');
+            info.opening = !closing;
+            try { this.ex.adoptOrder?.({ orderId: oid, marketId: this.config.marketId, levelIndex: info.levelIndex, side: realSide, price: info.price, sizeBase: info.sizeBase ?? this.config.sizeBase }); } catch { /* ignore */ }
+            repaired++;
+          }
+          continue;
+        }
         if (now - (info.placedAt || 0) <= PRUNE_GRACE_MS) continue;
         info.goneRecon = (info.goneRecon || 0) + 1;
         if (info.goneRecon >= 2) { this.active.delete(oid); pruned++; }
@@ -1619,8 +1633,8 @@ export class GridBot {
     // The grid is now maintained ONLY by the normal fill -> opposite-leg
     // replacement chain. Reconcile just keeps tracking accurate (prune) and
     // enforces one-order-per-level (trim). It never opens new positions.
-    if (pruned || trimmed || adopted) {
-      this._alert(`挂单对账：交易所实际 ${real.length} 单；清理失效 ${pruned}，撤除重复 ${trimmed}${adopted ? `，接管 ${adopted}` : ''}。`);
+    if (pruned || trimmed || adopted || repaired) {
+      this._alert(`挂单对账：交易所实际 ${real.length} 单；清理失效 ${pruned}，撤除重复 ${trimmed}${adopted ? `，接管 ${adopted}` : ''}${repaired ? `，方向修正 ${repaired}` : ''}。`);
       this._changed();
     }
     this._drainRetryQueue().catch(() => {});

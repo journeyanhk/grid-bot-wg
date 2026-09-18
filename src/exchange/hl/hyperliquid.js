@@ -237,7 +237,14 @@ export class HyperliquidExchange extends EventEmitter {
         const oidMatch = String(tracked.orderId) === String(f.oid);
         const cloidMatch = !!fillCloid && String(tracked.clientOrderId || '').toLowerCase() === fillCloid;
         if (!oidMatch && !cloidMatch) continue;
-        if (tracked.side !== (String(f.side) === 'B' ? 'buy' : 'sell')) continue;
+        // oid/cloid 已权威匹配同一张单：方向不一致只可能是本地记错（历史上接管
+        // 快照曾把 'B'/'A' 误解析成 sell）。以交易所成交方向为准并就地纠正，
+        // 绝不 continue——跳过等于把真实成交扔掉，直接造成档位空洞。
+        const exSide = String(f.side) === 'B' ? 'buy' : 'sell';
+        if (tracked.side !== exSide) {
+          logger.warn('hl', `订单 ${id} 本地方向 ${tracked.side} 与交易所成交方向 ${exSide} 不一致，以交易所为准。`);
+          tracked.side = exSide;
+        }
         this._tracked.delete(id);
         this.emit('fill', { orderId: id, marketId, side: tracked.side, price: Number(f.px || tracked.price), sizeBase: Number(f.sz || tracked.sizeBase), levelIndex: tracked.levelIndex });
       }
@@ -285,7 +292,10 @@ export class HyperliquidExchange extends EventEmitter {
       .filter((o) => marketId == null || this.markets.get(Number(marketId))?.name === String(o.coin))
       .map((o) => ({
         orderId: String(o.oid), marketId: this._marketIdByCoin(String(o.coin)),
-        side: String(o.side).toLowerCase() === 'buy' ? 'buy' : 'sell',
+        // HL frontendOpenOrders 返回 side='B'(买)/'A'(卖)，不是 'buy'/'sell'。
+        // 旧写法 toLowerCase()==='buy' 把每张单都判成 sell，导致网格图全红、
+        // 且被接管的买单成交因方向不符被成交流丢弃（档位空洞根因）。
+        side: /^(b|buy|bid)$/i.test(String(o.side)) ? 'buy' : 'sell',
         price: Number(o.limitPx), sizeBase: Number(o.sz),
         reduceOnly: !!o.reduceOnly, status: 'open',
         cloid: String(o.cloid || ''), raw: o,

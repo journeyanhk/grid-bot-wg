@@ -234,4 +234,42 @@ const ANTH = { marketId: 0, name: 'io:ANTH', symbol: 'ANTH', displayName: 'io:AN
   assert.ok(!calls.includes('metaAndAssetCtxs'), '60s 内不得重复拉市场元数据');
 }
 
+{
+  // 方向解析回归：frontendOpenOrders 的 side 'B'(买)/'A'(卖) 必须映射为 buy/sell。
+  // 旧写法 toLowerCase()==='buy' 把每张单都判成 sell（网格图全红 + 买单成交被丢弃）。
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  ex._postInfo = async (payload) => {
+    if (payload.type === 'frontendOpenOrders') return [
+      { oid: 1, coin: 'io:ANTH', side: 'B', limitPx: '1990', sz: '0.005', cloid: '' },
+      { oid: 2, coin: 'io:ANTH', side: 'A', limitPx: '2010', sz: '0.005', cloid: '' },
+    ];
+    return [];
+  };
+  const rows = await ex.fetchOpenOrders(0);
+  assert.equal(rows.length, 2);
+  const byId = new Map(rows.map((o) => [o.orderId, o]));
+  assert.equal(byId.get('1').side, 'buy', "side 'B' -> buy");
+  assert.equal(byId.get('2').side, 'sell', "side 'A' -> sell");
+}
+
+{
+  // 成交流方向不一致以交易所为准：本地 tracked 记成 sell，真实成交 side 'B'(买)、
+  // oid 匹配 -> 仍确认成交并把方向纠正为 buy，绝不 continue（档位空洞根因回归）。
+  const ex = mkEx();
+  ex.markets.set(0, ANTH);
+  ex._tracked.set('777', { orderId: '777', marketId: 0, levelIndex: 3, side: 'sell', price: 1990, sizeBase: 0.005, reduceOnly: false, placedAt: Date.now(), seen: true });
+  let fill = null;
+  ex.on('fill', (f) => { fill = f; });
+  ex._postInfo = async (payload) => {
+    if (payload.type === 'userFillsByTime') return [{ coin: 'io:ANTH', oid: 777, side: 'B', px: '1990', sz: '0.005', tid: 5, pnl: '0', time: 1725000000000 }];
+    return [];
+  };
+  await ex._refreshFills();
+  assert.ok(fill, '方向不一致时仍应确认成交（不丢单）');
+  assert.equal(fill.orderId, '777');
+  assert.equal(fill.side, 'buy', '成交方向以交易所为准 -> buy');
+  assert.ok(!ex._tracked.has('777'), '成交后删除跟踪');
+}
+
 console.log('hl tests passed');
