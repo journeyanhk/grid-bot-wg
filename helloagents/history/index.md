@@ -39,6 +39,7 @@
 ---
 
 | 202609071613 | entropy-hl | 第5交易所 Entropy(HL) 接入 + 总览过滤 | ✅已完成 | [链接](2026-09/202609071613_entropy-hl/) |
+| 202609201323 | dyn-recenter-switch | 补 recenterEnabled 分支A独立开关（先B后A毕业路径） | ✅已完成 | [链接](2026-09/202609201323_dyn-recenter-switch/) |
 
 ## 按月归档
 

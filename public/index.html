@@ -775,6 +775,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
           <label style="margin:0"><input type="checkbox" id="de-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="de-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="de-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="de-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
         </div>
         <div class="row" style="margin-top:6px">
           <div><label>漂移阈值(×宽度)</label><input id="de-dyn-drift" type="number" step="0.05" value="0.33"></div>
@@ -921,6 +922,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
           <label style="margin:0"><input type="checkbox" id="ex-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="ex-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="ex-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="ex-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
         </div>
         <div class="row" style="margin-top:6px">
           <div><label>漂移阈值(×宽度)</label><input id="ex-dyn-drift" type="number" step="0.05" value="0.33"></div>
@@ -1066,6 +1068,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
           <label style="margin:0"><input type="checkbox" id="rs-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="rs-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="rs-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="rs-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
         </div>
         <div class="row" style="margin-top:6px">
           <div><label>漂移阈值(×宽度)</label><input id="rs-dyn-drift" type="number" step="0.05" value="0.33"></div>
@@ -1213,6 +1216,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
           <label style="margin:0"><input type="checkbox" id="lr-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="lr-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="lr-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="lr-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
         </div>
         <div class="row" style="margin-top:6px">
           <div><label>漂移阈值(×宽度)</label><input id="lr-dyn-drift" type="number" step="0.05" value="0.33"></div>
@@ -1357,6 +1361,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
           <label style="margin:0"><input type="checkbox" id="hl-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="hl-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="hl-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="hl-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
         </div>
         <div class="row" style="margin-top:6px">
           <div><label>漂移阈值(×宽度)</label><input id="hl-dyn-drift" type="number" step="0.05" value="0.33"></div>
@@ -1499,6 +1504,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
           <label style="margin:0"><input type="checkbox" id="va-dyn-enable" checked> 启用</label>
           <label style="margin:0"><input type="checkbox" id="va-dyn-shadow" checked> 影子模式</label>
           <label style="margin:0"><input type="checkbox" id="va-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="va-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
         </div>
         <div class="row" style="margin-top:6px">
           <div><label>漂移阈值(×宽度)</label><input id="va-dyn-drift" type="number" step="0.05" value="0.33"></div>
@@ -1926,7 +1932,9 @@ function renderDynSummary(s) {
   if (!dyn || !dyn.enabled) return '';
   const restartLine = dyn.autoStopped
     ? ` · 待冷静门重启(${dyn.autoStopped.reason})` : '';
-  return `<br><span class="dynstat">🔁 动态: 重定 ${dyn.recenters || 0} · 自动重启 ${dyn.autoRestarts || 0}${dyn.shadow ? ' · 影子' : ''}${restartLine}</span>`;
+  const branch = dyn.shadow ? '影子'
+    : '实盘·' + ([dyn.restartEnabled ? '重启' : null, dyn.recenterEnabled ? '重定' : null].filter(Boolean).join('+') || '无分支放行');
+  return `<br><span class="dynstat">🔁 动态: ${branch} · 重定 ${dyn.recenters || 0} · 自动重启 ${dyn.autoRestarts || 0}${restartLine}</span>`;
 }
 
 function verifiedOrdersText(state) {
@@ -1989,7 +1997,7 @@ function makeExchangeCtrl(prefix, chartId) {
   function saveDynPrefs() {
     try {
       const prefs = {};
-      ['dyn-enable', 'dyn-shadow', 'dyn-restart'].forEach((id) => {
+      ['dyn-enable', 'dyn-shadow', 'dyn-restart', 'dyn-recenter'].forEach((id) => {
         const el = P(id); if (el) prefs[id] = el.checked;
       });
       ['dyn-drift', 'dyn-calmh', 'dyn-calm', 'dyn-rec-cd', 'dyn-rest-cd'].forEach((id) => {
@@ -2012,7 +2020,7 @@ function makeExchangeCtrl(prefix, chartId) {
     } catch (e) { /* 恢复失败则保持默认 */ }
   }
   restoreDynPrefs();
-  ['dyn-enable', 'dyn-shadow', 'dyn-restart', 'dyn-drift', 'dyn-calmh', 'dyn-calm', 'dyn-rec-cd', 'dyn-rest-cd'].forEach((id) => {
+  ['dyn-enable', 'dyn-shadow', 'dyn-restart', 'dyn-recenter', 'dyn-drift', 'dyn-calmh', 'dyn-calm', 'dyn-rec-cd', 'dyn-rest-cd'].forEach((id) => {
     const el = P(id);
     if (el) el.addEventListener('change', saveDynPrefs);
   });
@@ -2178,7 +2186,7 @@ function makeExchangeCtrl(prefix, chartId) {
         driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120,
         calmMaxMovePct: +P('dyn-calm')?.value || 3,
         recenterCooldownMin: +P('dyn-rec-cd')?.value || 360,
-        restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120,
+        restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120, recenterEnabled: P('dyn-recenter')?.checked === true,
       },
     };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
@@ -2250,7 +2258,7 @@ function makeExchangeCtrl(prefix, chartId) {
     const lower = +P('lower').value, upper = +P('upper').value, n = +P('grid-count').value, sz = +P('size-base').value, lev = +P('leverage').value;
     if (!(upper > lower) || !n || !sz) { alert('无法自动计算区间，请在左侧手动填写参数后点"启动"。'); return; }
     if (!confirm(`按现价重开网格：区间 [${lower}, ${upper}]，${n} 格，每格 ${sz}，${lev}x。\n现有持仓将作为网格库存保留。继续？`)) return;
-    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0, dynamic: { enabled: !!P('dyn-enable')?.checked, shadow: P('dyn-shadow')?.checked !== false, driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120, calmMaxMovePct: +P('dyn-calm')?.value || 3, recenterCooldownMin: +P('dyn-rec-cd')?.value || 360, restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120 } };
+    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0, dynamic: { enabled: !!P('dyn-enable')?.checked, shadow: P('dyn-shadow')?.checked !== false, driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120, calmMaxMovePct: +P('dyn-calm')?.value || 3, recenterCooldownMin: +P('dyn-rec-cd')?.value || 360, restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120, recenterEnabled: P('dyn-recenter')?.checked === true } };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const j = await r.json();
     if (j.error) alert('启动失败：' + j.error);

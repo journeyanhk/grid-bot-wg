@@ -436,6 +436,9 @@ export class GridBot {
         driftFrac: Number.isFinite(cfg.dynamic?.driftFrac) ? Number(cfg.dynamic.driftFrac) : 0.33,   // 偏心 > 宽度×此值才考虑重定
         invGateGrids: Number.isFinite(cfg.dynamic?.invGateGrids) ? Number(cfg.dynamic.invGateGrids) : 2,   // 净库存 ≤ N 格才允许重定
         recenterCooldownMin: Number.isFinite(cfg.dynamic?.recenterCooldownMin) ? Number(cfg.dynamic.recenterCooldownMin) : 360,
+        // 分支 A 独立开关（Review21）：默认关闭——放行顺序必须"先 B 后 A"，
+        // 影子模式关闭时若未显式启用，A 继续以影子方式记录"本应重定"样本
+        recenterEnabled: !!(cfg.dynamic && cfg.dynamic.recenterEnabled),
         restartEnabled: !(cfg.dynamic && cfg.dynamic.restartEnabled === false), // 价值主体
         restartCooldownMin: Number.isFinite(cfg.dynamic?.restartCooldownMin) ? Number(cfg.dynamic.restartCooldownMin) : 120,
         calmWindowH: Number.isFinite(cfg.dynamic?.calmWindowH) ? Number(cfg.dynamic.calmWindowH) : 120,   // 动量窗口：5 天
@@ -530,7 +533,7 @@ export class GridBot {
     this._startDynTimer();
     const progress = this._placementProgressView();
     if (progress?.status === 'complete') {
-      this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。动态网格：${this.config.dynamic?.enabled ? (this.config.dynamic.shadow ? '启用（影子）' : '启用（实盘）') : '未启用'}。`);
+      this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。动态网格：${this._dynModeText()}。`);
       this._placementProgress.completionAlerted = true;
     } else {
       const paceSec = (Number(this.ex.orderBatchPaceMs) || 1500) / 1000;
@@ -1771,11 +1774,22 @@ export class GridBot {
   cancelAutoRestart() { this._autoStopped = null; }
 
   /** 动态监督器（60s 节拍）：冷静门自动重启 / 漂移重定，不挂在价格热路径上。 */
+  /** 动态网格模式文案：区分影子/实盘与两分支放行状态（启动告警/监督器心跳共用）。 */
+  _dynModeText() {
+    const dyn = this.config?.dynamic;
+    if (!dyn?.enabled) return '未启用';
+    if (dyn.shadow) return '影子';
+    const parts = [];
+    if (dyn.restartEnabled) parts.push('自动重启');
+    if (dyn.recenterEnabled) parts.push('漂移重定');
+    return `实盘·${parts.join('+') || '无分支放行'}`;
+  }
+
   _startDynTimer() {
     if (this._dynTimer) return;
     this._dynTimer = setInterval(() => { this._dynCheck().catch(() => {}); }, 60_000);
     this._dynTimer.unref?.();
-    logger.info('bot', `动态监督器已启动 ${this.config.displayName}（${this.config.dynamic?.enabled ? (this.config.dynamic.shadow ? '影子' : '实盘') : '未启用'}，60s 节拍）`);
+    logger.info('bot', `动态监督器已启动 ${this.config.displayName}（${this._dynModeText()}，60s 节拍）`);
   }
   _stopDynTimer() { if (this._dynTimer) { clearInterval(this._dynTimer); this._dynTimer = null; } }
 
@@ -1868,8 +1882,10 @@ export class GridBot {
           const lo = alignToStep(price - width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
           const hi = alignToStep(price + width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
           const beforeA = this._dynBefore(price, pos); const afterA = { lower: lo, upper: hi };
-          if (dyn.shadow) {
-            this._alert(`[动态·影子] 本应漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)} 偏心 ${round2(Math.abs(price - mid))}，库存 ${pos?.sizeBase ?? 0}）；影子模式不执行。`);
+          if (dyn.shadow || !dyn.recenterEnabled) {
+            // 影子全局开 或 分支A开关未启用：只记录"本应重定"样本，不执行
+            const holdTxt = dyn.shadow ? '影子模式' : '漂移重定未启用';
+            this._alert(`[动态·影子] 本应漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)} 偏心 ${round2(Math.abs(price - mid))}，库存 ${pos?.sizeBase ?? 0}）；${holdTxt}，不执行。`);
             this._recordDynAction({ branch: 'A', reason: 'drift', shadow: true, before: beforeA, after: afterA });
           } else {
             logger.info('bot', `[动态] 漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)}）`);
@@ -1993,6 +2009,8 @@ export class GridBot {
         autoRestarts: this.stats.autoRestarts || 0,
         shadow: !!(this.config?.dynamic?.shadow),
         enabled: !!(this.config?.dynamic?.enabled),
+        recenterEnabled: !!(this.config?.dynamic?.recenterEnabled),
+        restartEnabled: !!(this.config?.dynamic?.restartEnabled),
         gateBlocked: this._dynGateBlocked || { inventory: 0, calm: 0, cooldown: 0 },
         logCount: Array.isArray(this._dynLog) ? this._dynLog.length : 0,
         log: Array.isArray(this._dynLog) ? this._dynLog.slice(-20) : [],

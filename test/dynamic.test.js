@@ -56,7 +56,7 @@ test('漂移重定：偏心+库存平+冷静门+cooled -> 调用 adjustRange（�
   const ex = new MockExchange();
   calmCandles(ex, 0.5);
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
-  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: false } });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, recenterEnabled: true, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: false } });
   bot.lastPrice = 175; // 明显偏心上（mid=150, 宽100, 阈值33 -> |175-150|=25 > 33? 否）
   // 用更极端偏心：upper=300 宽 200，mid=200，price=275 -> |75| > 66 ✓
   await bot.stop({ closePosition: false });
@@ -76,7 +76,7 @@ test('库存门：净库存超限 -> 不重定', async () => {
   const ex = new MockExchange();
   calmCandles(ex, 0.5);
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
-  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, driftFrac: 0.33, invGateGrids: 1, recenterCooldownMin: 0, restartEnabled: false } });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, recenterEnabled: true, driftFrac: 0.33, invGateGrids: 1, recenterCooldownMin: 0, restartEnabled: false } });
   bot.stop({ closePosition: false });
   bot.running = true; bot.lastPrice = 275;
   bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
@@ -92,7 +92,7 @@ test('冷静门：动量超限 -> 不重定 / 不重启', async () => {
   const ex = new MockExchange();
   calmCandles(ex, 8); // 动量 8% > 3%
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
-  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: true, restartCooldownMin: 0 } });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, recenterEnabled: true, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: true, restartCooldownMin: 0 } });
   bot.stop({ closePosition: false });
   bot.running = true; bot.lastPrice = 275;
   bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
@@ -153,7 +153,7 @@ test('_dynLog 门计数：漂移达标但冷静门拦截 -> gateBlocked.calm++�
   const ex = new MockExchange();
   calmCandles(ex, 8); // 动量 8% > 3%：非冷静
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
-  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: false } });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, recenterEnabled: true, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: false } });
   bot.stop({ closePosition: false });
   bot.running = true; bot.lastPrice = 275;
   bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
@@ -211,6 +211,62 @@ test('手动 stop 不记录自动停机（清空）', async () => {
   await sleep(60);
   assert.equal(bot._autoStopped, null, '手动停止不应设置自动停机');
   bot._stopDynTimer();
+});
+
+test('分支A开关：shadow=false 但 recenterEnabled=false -> 不执行且仍记影子样本', async () => {
+  const ex = new MockExchange();
+  calmCandles(ex, 0.5);
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
+  // 先放行 B（shadow=false）、A 未放行（recenterEnabled 缺省 false）
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, driftFrac: 0.33, calmMaxMovePct: 3, invGateGrids: 2, recenterCooldownMin: 0, restartEnabled: true, restartCooldownMin: 0 } });
+  bot.stop({ closePosition: false });
+  bot.running = true; bot.lastPrice = 275;
+  bot.grid = { count: 10, levels: [100,120,140,160,180,200,220,240,260,280,300], spacing: 20 };
+  bot.config = { ...bot.config, lower: 100, upper: 300 };
+  let adjusted = false; bot.adjustRange = async () => { adjusted = true; };
+  bot.stats.recenters = 0;
+  await bot._dynCheck();
+  assert.equal(adjusted, false, 'A 未放行不得执行 adjustRange');
+  assert.equal(bot.stats.recenters, 0, '重定计数不增');
+  assert.ok(bot.alerts.some((a) => a.message.includes('[动态·影子]') && a.message.includes('漂移重定未启用')), '应记本应重定样本（注明开关未启用）');
+  assert.equal(bot._dynLog.length, 1, '未放行也产出一条影子样本供评审');
+  assert.equal(bot._dynLog[0].branch, 'A');
+  assert.equal(bot._dynLog[0].shadow, true, '未执行 -> shadow=true');
+  bot._stopDynTimer();
+});
+
+test('分支B不受A开关影响：shadow=false + recenterEnabled=false 时重启照常执行', async () => {
+  const ex = new MockExchange();
+  calmCandles(ex, 1);
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await bot.start({ ...CFG, dynamic: { enabled: true, shadow: false, recenterEnabled: false, restartEnabled: true, restartCooldownMin: 0 } });
+  await bot.stop({ closePosition: false });
+  const stoppedCfg = { ...bot.config, lower: 100, upper: 200, gridCount: 10, sizeBase: 1, stepPrice: 1 };
+  bot._autoStopped = { at: Date.now() - 5_000, reason: 'breakout', config: stoppedCfg };
+  bot.lastPrice = 160;
+  bot.running = false;
+  let started = false;
+  bot.start = async () => { started = true; return { running: true }; };
+  bot.stats.autoRestarts = 0;
+  await bot._dynCheck();
+  assert.ok(started, 'B 分支应照常自动重启（先放行 B 的毕业路径）');
+  assert.equal(bot.stats.autoRestarts, 1);
+  bot._stopDynTimer();
+});
+
+test('_dynModeText：影子/实盘分支放行状态文案', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
+  bot.config = { ...CFG, dynamic: { enabled: false } };
+  assert.equal(bot._dynModeText(), '未启用');
+  bot.config = { ...CFG, dynamic: { enabled: true, shadow: true, restartEnabled: true, recenterEnabled: false } };
+  assert.equal(bot._dynModeText(), '影子');
+  bot.config = { ...CFG, dynamic: { enabled: true, shadow: false, restartEnabled: true, recenterEnabled: false } };
+  assert.equal(bot._dynModeText(), '实盘·自动重启', '只放行 B');
+  bot.config = { ...CFG, dynamic: { enabled: true, shadow: false, restartEnabled: true, recenterEnabled: true } };
+  assert.equal(bot._dynModeText(), '实盘·自动重启+漂移重定', 'B+A 全放行');
+  bot.config = { ...CFG, dynamic: { enabled: true, shadow: false, restartEnabled: false, recenterEnabled: true } };
+  assert.equal(bot._dynModeText(), '实盘·漂移重定', '只放行 A');
 });
 
 (async () => {
