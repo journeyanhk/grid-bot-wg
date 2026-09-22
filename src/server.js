@@ -22,6 +22,7 @@ import { loadSnapshot, saveSnapshot } from './persist.js';
 import { createAiService } from './ai/service.js';
 import { createAuditService } from './audit.js';
 import { notifier } from './notify.js';
+import { createResumeGuard, tryResumeBot } from './resume-guard.js';
 import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
 
@@ -363,17 +364,12 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
           const snap = loadSnapshot(key);
           if (snap?.running && snap?.config) {
             try {
-              // marketId 是按连接会话编号的，可能已漂移：按市场名称重新解析
-              const markets = await exchange.getMarkets();
-              const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-              const m = markets.find((x) => norm(x.displayName) === norm(snap.config.displayName) || norm(x.name) === norm(snap.config.displayName));
-              if (m) snap.config.marketId = m.marketId;
-              await bot.resume(snap);
+              // 共享续跑助手（与看门狗同源）：按市场名重解析 marketId 后接管
+              await tryResumeBot(bot, exchange, snap, key, logger);
               resumed = true;
-              logger.info('server', `${key.toUpperCase()} 重连成功后已自动续跑，接管挂单并完成对账。`);
             } catch (e) {
-              resumeError = e?.message || String(e); // 续跑失败不撤单：挂单保留，可重启程序再试
-              logger.error('server', `${key.toUpperCase()} 重连后续跑失败（${resumeError}），挂单保留未动。`);
+              resumeError = e?.message || String(e); // 续跑失败不撤单：挂单保留，看门狗会持续重试与兜底
+              logger.error('server', `${key.toUpperCase()} 重连后续跑失败（${resumeError}），挂单保留未动（看门狗接管重试）。`);
             }
           }
         }
@@ -846,7 +842,7 @@ async function resumeIfWasRunning(bot, exchange, key) {
   const snap = loadSnapshot(key);
   if (!(snap?.running && snap?.config)) return;
   if (exchange.dataSource == null) {
-    logger.info('server', `[恢复] ${key.toUpperCase()} 交易所未连接，跳过续跑；保留挂单待下次连接。`);
+    logger.info('server', `[恢复] ${key.toUpperCase()} 交易所未连接，跳过本轮续跑；已移交续跑看门狗持续重连与接管。`);
     return;
   }
   try {
@@ -854,8 +850,7 @@ async function resumeIfWasRunning(bot, exchange, key) {
     await bot.resume(snap);
     logger.info('server', `[恢复] ${key.toUpperCase()} 已续跑，接管挂单并完成对账。`);
   } catch (e) {
-    logger.error('server', `[恢复] ${key.toUpperCase()} 续跑失败（${e?.message || e}），改为撤销遗留挂单。`);
-    await bot.recoverStrayOrders().catch(() => {});
+    logger.error('server', `[恢复] ${key.toUpperCase()} 续跑失败（${e?.message || e}），已移交续跑看门狗重试与兜底。`);
   }
 }
 await Promise.all([
@@ -866,6 +861,17 @@ await Promise.all([
   resumeIfWasRunning(hlBot, hlExchange, 'hl'),
   resumeIfWasRunning(vaBot, vaExchange, 'va'),
 ]);
+
+// ── 续跑看门狗（Review22 / 9·21）────────────────────────────────────────────
+// 接管缺失态防护：快照 running=true 但 bot 未运行（重启时交易所未连上/续跑失败）
+// -> 自动退避重连（1/2/5/15 分，封顶永续）+ 补续跑（≥3 次尝试）+ 响亮告警
+// （卡片红 + notify 每 30 分钟重复）+ 10 分钟兜底撤单（仅撤单、永不动仓位）。
+const resumeGuard = createResumeGuard({
+  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  loadSnapshot, notifier, logger,
+});
+resumeGuard.start();
 
 // After init, surface any LEFTOVER position so the dashboard can prompt the user
 // (recovery ladder / re-grid / market close). Decibel & Extended RE-NUMBER their

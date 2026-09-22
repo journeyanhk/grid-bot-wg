@@ -112,6 +112,15 @@ export class GridBot {
   /** Notify the persistence layer (if any) that durable state changed. */
   _changed() { try { this._onChange?.(this.snapshot()); } catch { /* never let persistence break trading */ } }
 
+  /** 外部组件（续跑看门狗）设置/清除 bot 级运营异常：优先级高于交易所自身 operationalIssue。 */
+  setOperationalIssue(issue) {
+    const next = issue ? { title: String(issue.title || ''), message: String(issue.message || '') } : null;
+    const cur = this._operationalIssue || null;
+    if (JSON.stringify(cur) === JSON.stringify(next)) return;
+    this._operationalIssue = next;
+    this._changed();
+  }
+
   /** Durable snapshot for crash recovery / resume. Includes resting orders. */
   snapshot() {
     return {
@@ -1949,6 +1958,7 @@ export class GridBot {
     let status = 'ok', reason = '正常运行';
     if (!this.running && !this.config) { status = 'idle'; reason = '未运行'; }
     else if (paused) { status = 'error'; reason = `订单频繁被取消（疑似保证金不足），已暂停补单 ${Math.ceil((this._refillPausedUntil - Date.now())/1000)}s`; }
+    else if (this._operationalIssue) { status = 'error'; reason = this._operationalIssue.title || this._operationalIssue.message || '接管缺失'; }
     else if (ex.operationalIssue) { status = 'error'; reason = ex.operationalIssue.title || ex.operationalIssue.message || '交易所操作异常'; }
     else if (ex.dataSource === 'synthetic') { status = 'warn'; reason = '合成行情（未连真实交易所）'; }
     else if (okAge != null && okAge > 30000) { status = 'error'; reason = `交易所数据 ${Math.round(okAge / 1000)}s 未更新`; }
@@ -2029,7 +2039,7 @@ export class GridBot {
         liquidationPrice: Number.isFinite(Number(pos.liquidationPrice)) && Number(pos.liquidationPrice) > 0
           ? roundPrice(Number(pos.liquidationPrice)) : null,
       } : null,
-      operationalIssue: this.ex.operationalIssue ?? null,
+      operationalIssue: this._operationalIssue ?? this.ex.operationalIssue ?? null,
       apiWalletAddress: this.ex.apiWalletAddress ?? null,
       realizedPnl: realized,
       unrealizedPnl: unrealized,
