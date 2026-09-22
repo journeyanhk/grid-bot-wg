@@ -23,6 +23,7 @@ import { createAiService } from './ai/service.js';
 import { createAuditService } from './audit.js';
 import { notifier } from './notify.js';
 import { createResumeGuard, tryResumeBot } from './resume-guard.js';
+import { createShadowRunner } from './strategy/shadow-runner.js';
 import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
 
@@ -562,6 +563,12 @@ const server = http.createServer(async (request, res) => {
       });
     }
 
+    // ── 趋势策略影子 API（只读）──────────────────────────────────────────
+    if (p === '/api/strategy/shadow/state') {
+      if (!shadowRunner) return send(res, 200, { enabled: false, message: '影子未启用（.env 设 STRATEGY_SHADOW=1）' });
+      return send(res, 200, shadowRunner.getState());
+    }
+
     // ── AI 助手 API ───────────────────────────────────────────────────────
     if (p === '/api/ai/status') {
       return send(res, 200, aiService.status());
@@ -872,6 +879,24 @@ const resumeGuard = createResumeGuard({
   loadSnapshot, notifier, logger,
 });
 resumeGuard.start();
+
+// ── 趋势策略影子运行器（阶段1：零交易权限，只读公共行情）──────────────────────
+// 环境变量：STRATEGY_SHADOW=1 启用；STRATEGY_SHADOW_SYMBOL/EQUITY/REPORT_HOUR/BINANCE 可选。
+let shadowRunner = null;
+if (String(process.env.STRATEGY_SHADOW || '') === '1') {
+  shadowRunner = createShadowRunner({
+    logger, notifier,
+    config: {
+      symbol: process.env.STRATEGY_SHADOW_SYMBOL || 'BTC',
+      reportHour: Number(process.env.STRATEGY_SHADOW_REPORT_HOUR || 8),
+      binance: String(process.env.STRATEGY_SHADOW_BINANCE || '') === '1',
+    },
+    equity: Number(process.env.STRATEGY_SHADOW_EQUITY || 10_000),
+  });
+  shadowRunner.start();
+} else {
+  logger.info('server', '[影子] 未启用（.env 设 STRATEGY_SHADOW=1 开启趋势信号影子记录）');
+}
 
 // After init, surface any LEFTOVER position so the dashboard can prompt the user
 // (recovery ladder / re-grid / market close). Decibel & Extended RE-NUMBER their

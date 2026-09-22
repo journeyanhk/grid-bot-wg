@@ -48,3 +48,50 @@ export function normalizedSlope(values, period) {
   const slope = den === 0 ? 0 : num / den; // price units per bar
   return yMean === 0 ? 0 : slope / yMean;   // fraction per bar
 }
+
+/**
+ * Wilder ADX with +DI/-DI (directional movement system). Pure function.
+ * candles: [{high, low, close}] chronological. Requires >= 2*period candles.
+ * Returns { adx, plusDI, minusDI } or null when insufficient data.
+ * 实现为 Wilder 平滑（RMA）：首值取前 period 项之和，其后 smoothed - smoothed/period + current。
+ */
+export function adx(candles, period = 14) {
+  if (!Array.isArray(candles) || candles.length < period * 2) return null;
+  const trs = [], plusDMs = [], minusDMs = [];
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i], p = candles[i - 1];
+    const up = c.high - p.high, down = p.low - c.low;
+    plusDMs.push(up > down && up > 0 ? up : 0);
+    minusDMs.push(down > up && down > 0 ? down : 0);
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
+  }
+  if (trs.length < period * 2 - 1) return null;
+
+  // Wilder 平滑首值 = 前 period 项之和；之后 smoothed = smoothed - smoothed/period + current
+  let smTr = trs.slice(0, period).reduce((a, b) => a + b, 0);
+  let smPlus = plusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+  let smMinus = minusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+  const dxs = [];
+  const pushDx = () => {
+    const plusDI = smTr === 0 ? 0 : (100 * smPlus) / smTr;
+    const minusDI = smTr === 0 ? 0 : (100 * smMinus) / smTr;
+    const sum = plusDI + minusDI;
+    dxs.push(sum === 0 ? 0 : (100 * Math.abs(plusDI - minusDI)) / sum);
+  };
+  pushDx();
+  for (let i = period; i < trs.length; i++) {
+    smTr = smTr - smTr / period + trs[i];
+    smPlus = smPlus - smPlus / period + plusDMs[i];
+    smMinus = smMinus - smMinus / period + minusDMs[i];
+    pushDx();
+  }
+  if (dxs.length < period) return null;
+  let adxValue = dxs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxs.length; i++) adxValue = (adxValue * (period - 1) + dxs[i]) / period;
+  const lastTr = smTr;
+  return {
+    adx: adxValue,
+    plusDI: lastTr === 0 ? 0 : (100 * smPlus) / lastTr,
+    minusDI: lastTr === 0 ? 0 : (100 * smMinus) / lastTr,
+  };
+}

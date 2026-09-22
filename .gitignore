@@ -6,6 +6,8 @@
 # 交易状态快照（含账户余额、挂单、成交记录）
 .state.json
 .state.json.bak-*
+.strategy-shadow.json
+.strategy-shadow.json.tmp
 
 # 依赖缓存
 node_modules/

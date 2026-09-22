@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-22
+
+### 新增（趋势单边网格 · 阶段0+阶段1：影子优先验证）
+- **阶段0 能力探针与隔离**：
+  - HL 触发单探针（`scripts/probe/probe-hl-trigger.py`）：官方 SDK 路径构造+签名 dry-run 通过（SL/TP，reduce-only，wire `{"trigger":{isMarket,triggerPx,tpsl}}`）；实盘受理待用户侧 testnet/tiny-real 探针
+  - 数据源探针（`scripts/probe/probe-data-sources.mjs`）：HL 5M/1H/4H 边界对齐、l2Book、资金费率全通；Binance 合约经代理可达；**HL/Binance 同根 5M 收盘基差实测 ~9.8bps（HL 溢价）**——单一信号源原则的直接依据
+  - `docs/strategy/exchange-capability-matrix.md` + `docs/strategy/account-isolation.md`（子账户+同进程隔离方案）
+- **阶段1 信号影子系统**（零交易权限）：
+  - `indicators.js` 增 Wilder ADX（+DI/-DI）
+  - `src/strategy/features.js`：4H/1H/5M 多周期特征（仅已收盘 K 线，dropUnclosed）
+  - `src/strategy/regime.js`：四态（TREND_UP/DOWN/RANGE/VOLATILE）+ 可解释评分 + 双确认防抖（2×5M 或 1H 收盘）
+  - `src/strategy/shadow-recorder.js`：三组参数（R2 Fast 决断 / Balanced / Strict 对照）假设交易全生命周期（入场/分层加仓/0.8R-1.5R-2.2R 分批止盈/移动止损/止损/信号退出/持仓熔断/30 分钟冷却）+ MFE/MAE
+  - `src/strategy/shadow-cost-model.js`：四档成本情景 + l2Book 真实盘口滑点采样 + 资金费率
+  - `src/strategy/shadow-persistence.js`：独立落盘（`.strategy-shadow.json`）+ 日报（notify）+ 决断门评估
+  - `src/strategy/shadow-runner.js` + server 接线：`STRATEGY_SHADOW=1` 启用，`GET /api/strategy/shadow/state` 只读
+
+### 测试
+- `test/regime.test.js`（15 例：ADX/特征/四态/防抖/去重）+ `test/shadow-recorder.test.js`（10 例：全生命周期/加仓/成本/盘口滑点/决断门统计）；npm test 15 项全绿 + lint 干净（0 新增告警）
+- 安全检查：策略模块零交易路径（无下单/撤单/签名/密钥引用），仅公共行情端点
+
 ## [1.6.9] - 2026-09-22
 
 ### 修复（Review23：v1.6.8 续跑看门狗复审）

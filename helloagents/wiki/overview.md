@@ -27,6 +27,7 @@
 | exchange | 四交易所适配器（live + paper + 签名） | ✅稳定 | [exchange](modules/exchange.md) |
 | ai | AI 助手（provider 适配 + 哨兵/日报/对话） | ✅稳定 | [ai](modules/ai.md) |
 | platform | 基础层（配置/持久化/代理/K线分析/日志） | ✅稳定 | [platform](modules/platform.md) |
+| strategy | 趋势方向策略（影子验证/市场状态/成本建模） | 🚧开发中 | [strategy](modules/strategy.md) |
 
 ---
 
