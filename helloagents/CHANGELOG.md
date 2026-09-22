@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+## [1.6.9] - 2026-09-22
+
+### 修复（Review23：v1.6.8 续跑看门狗复审）
+- P1 巡检重入竞态：tick 无重入保护，checkOne 耗时分钟级（重连+对账+撤单确认）时
+  下一轮 60s tick 会叠加——并发 resume 抛"已在运行"幽灵失败垫高 resumeAttempts、
+  并发 recoverStrayOrders 双倍撤单风暴 -> 加 busy 标志（上一轮未完成跳过本轮）
+- P2 resume 监听器重复附着：resume()/_resumeRecovery() 在 running 置位前附着
+  fill/price 监听，若 ex.start() 抛错则看门狗重试会再挂一遍 -> 事件双倍处理；
+  改为先 off 再 on（对齐 _resumeTradingRuntime 既有模式）
+
+### 测试
+- resume-guard.test.js 增"巡检重入保护"（慢 resume 挂起期间第二次 tick 直接返回，不叠加接管）
+- bot.test.js 增"resume 失败重试不重复附着监听器"（start 抛错后重试，listenerCount 恒为 1）
+- 两项修复均经"临时移除修复 -> 测试失败 -> 还原 -> 通过"有效性验证；npm test 13 项全绿 + lint 干净
+
 ## [1.6.8] - 2026-09-22
 
 ### 新增

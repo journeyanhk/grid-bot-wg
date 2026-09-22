@@ -148,6 +148,24 @@ test('tryResumeBot：市场名缺失时保留原 marketId 仍尝试接管', asyn
   assert.deepEqual(calls, [42]);
 });
 
+test('巡检重入保护：上一轮未完成时第二次 tick 直接返回（不叠加接管/撤单）', async () => {
+  const env = makeEnv({ connected: true });
+  const releases = [];
+  env.bot.resume = function () {
+    this.resumeCalls++;
+    return new Promise((resolve) => { releases.push(() => { this.running = true; resolve(); }); });
+  };
+  const first = env.guard.tick(); // 挂起在 resume（模拟分钟级慢巡检）
+  await new Promise((r) => setTimeout(r, 10));
+  env.guard.tick().catch(() => {}); // 重入：有保护立即返回；无保护会叠加 resume（断言捕获）
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(env.bot.resumeCalls, 1, '第二次 tick 不得叠加 resume');
+  for (const release of releases) release();
+  await first;
+  assert.equal(env.bot.resumeCalls, 1, '全程只接管一次');
+  assert.equal(env.guard.pending.size, 0, '接管成功解除');
+});
+
 (async () => {
   for (const [name, fn] of T) {
     try { await fn(); passed++; console.log('  ✓ ' + name); }

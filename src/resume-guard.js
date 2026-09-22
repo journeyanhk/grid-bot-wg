@@ -53,6 +53,7 @@ export function createResumeGuard(opts = {}) {
 
   const pending = new Map(); // key -> 状态机记录
   let timer = null;
+  let busy = false; // 巡检重入保护：checkOne 可能耗时分钟级（重连+对账+撤单确认）
 
   /** 重连退避：已尝试 N 次后下一次的最小间隔（0 次=首轮立即；之后 1/2/5/15 分，封顶永续每 15 分）。 */
   function backoffFor(attemptsDone) {
@@ -171,9 +172,15 @@ export function createResumeGuard(opts = {}) {
   }
 
   async function tick() {
-    for (const key of Object.keys(bots)) {
-      try { await checkOne(key); } catch (e) { logger.warn('server', `[接管缺失] 看门狗巡检 ${key} 异常：${e?.message || e}`); }
-    }
+    // 重入保护（Review23 P1）：上一轮未完成时直接跳过本轮——否则并发 resume 会
+    // 抛"已在运行"幽灵失败垫高 resumeAttempts，并发撤单会双倍风暴。
+    if (busy) return;
+    busy = true;
+    try {
+      for (const key of Object.keys(bots)) {
+        try { await checkOne(key); } catch (e) { logger.warn('server', `[接管缺失] 看门狗巡检 ${key} 异常：${e?.message || e}`); }
+      }
+    } finally { busy = false; }
   }
 
   function start() {

@@ -336,6 +336,27 @@ test('对账 trim + adopt：同档重复单被撤、孤儿单被接管', async (
   assert.ok(bot.active.has(orphanId), '孤儿单被接管进跟踪');
 });
 
+test('resume 失败重试不重复附着监听器（Review23 P2）', async () => {
+  const { ex, bot } = await makeBot();
+  const snap = bot.snapshot();
+  const ex2 = new MockExchange();
+  for (const [id, o] of ex.orders) ex2.orders.set(id, { ...o });
+  const bot2 = new GridBot(ex2);
+  // 第一次 resume：附着监听器后 ex.start() 抛错 -> running 未置位（看门狗会重试）
+  const origStart = ex2.start.bind(ex2);
+  ex2.start = () => { throw new Error('start boom'); };
+  await assert.rejects(() => bot2.resume(snap), /start boom/);
+  assert.equal(ex2.listenerCount('fill'), 1, '失败后监听器恰好一份');
+  assert.equal(ex2.listenerCount('price'), 1);
+  // 重试（模拟看门狗下一轮）：修复前会再挂一遍 -> 2 份 -> 成交双倍处理
+  ex2.start = origStart;
+  await bot2.resume(snap);
+  assert.equal(ex2.listenerCount('fill'), 1, '重试后监听器仍恰好一份');
+  assert.equal(ex2.listenerCount('price'), 1);
+  assert.equal(bot2.running, true, '重试成功恢复运行');
+  bot2._stopDynTimer(); bot2._stopReconcileTimer();
+});
+
 test('崩溃恢复 resume：接管快照挂单并恢复运行，成交事件继续生效', async () => {
   const { ex, bot } = await makeBot();
   const snap = bot.snapshot();

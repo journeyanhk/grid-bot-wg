@@ -220,6 +220,11 @@ export class GridBot {
       }
     }
 
+    // 防重复附着（Review23 P2）：看门狗对 resume 失败做每分钟重试，附着后若
+    // ex.start() 抛错则 running 未置位、下轮重试会再挂一遍 -> 事件双倍处理。
+    // 先 off 再 on，保证监听恰好一份（对齐 _resumeTradingRuntime 既有模式）。
+    this.ex.off('fill', this._onFill);
+    this.ex.off('price', this._onPrice);
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);
     if (typeof this.ex.start === 'function') this.ex.start();
@@ -256,6 +261,9 @@ export class GridBot {
         });
       } catch { /* best effort */ }
     }
+    // 防重复附着（Review23 P2）：同 resume()——看门狗重试前先 off 再 on
+    this.ex.off('fill', this._onFill);
+    this.ex.off('price', this._onPrice);
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);
     if (typeof this.ex.start === 'function') this.ex.start();
