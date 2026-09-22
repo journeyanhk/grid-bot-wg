@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-22
+
+### 新增（Propr 挑战账户适配 · Review 1 基础层）
+- 四模式运行配置 `PR_MODE=paper|shadow|sim-write|challenge`（刻意不用 live，避免与"真实资金"
+  混淆）：`paper` 本地模拟 / `shadow` 只读 Propr+本地模拟 / `sim-write` 写 Free Trial /
+  `challenge` 写付费挑战；含账户白名单 `PROPR_ALLOWED_ACCOUNT_IDS` 与付费双确认
+  `PR_ALLOW_CHALLENGE=YES`（`src/config.js` 的 `validateProprConfig`）
+- vendor Propr 官方 JS SDK 为 ESM（`src/exchange/propr/propr-sdk.js`，npm 无 propr-sdk 包），
+  新增运行时依赖 `ulid`（intentId 幂等键）；所有下单须走 `createOrders`（官方 `createOrder`
+  会覆盖 intentId）
+- Propr 错误语义层与内部类型（`src/exchange/propr/{errors,types}.js`）：超时/限频/5xx 可重试判定、
+  只读写拦截、未知订单态、鉴权/拒单分类
+- 日志与异常脱敏（`src/exchange/propr/redact.js`）：`pk_live_*`/Bearer/key=value 全抹除、
+  accountId 仅前 4+后 4；`PROPR_API_KEY` 纳入子进程凭证隔离清单（`src/exchange/secret-env.js`）
+- 方案包 `helloagents/plan/202609221928_propr-exchange/`（why/how/task，分批 Review 交付）
+
+### 测试
+- 新增 `test/propr-redact.test.js`：脱敏、四模式启动护栏、错误分类；`npm test` 全绿 + lint 0 error
+
 ## [1.6.9] - 2026-09-22
 
 ### 修复（Review23：v1.6.8 续跑看门狗复审）

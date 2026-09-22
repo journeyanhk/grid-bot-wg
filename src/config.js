@@ -183,6 +183,37 @@ export function getConfig() {
     proxy: process.env.VA_PROXY || globalProxy,
   };
 
+  // ── Propr Challenge（PR）────────────────────────────────────────────────
+  // 四级模式：paper（本地模拟，不访问 API）| shadow（只读 Propr + 本地模拟）
+  //   | sim-write（写入 Free Trial 模拟账户）| challenge（写入付费 Challenge，需显式确认）。
+  // 刻意不使用 live：Propr 的 Challenge/Funded 官方均为模拟账户，避免与"真实资金"混淆。
+  const PR_MODES = ['paper', 'shadow', 'sim-write', 'challenge'];
+  const prModeRaw = String(process.env.PR_MODE || 'paper').toLowerCase();
+  const propr = {
+    mode: PR_MODES.includes(prModeRaw) ? prModeRaw : 'paper',
+    apiKey: process.env.PROPR_API_KEY || '',
+    apiUrl: (process.env.PROPR_API_URL || 'https://api.propr.xyz/v1').replace(/\/$/, ''),
+    wsUrl: process.env.PROPR_WS_URL || 'wss://api.propr.xyz/ws',
+    accountId: process.env.PROPR_ACCOUNT_ID || '',
+    allowedAccountIds: (process.env.PROPR_ALLOWED_ACCOUNT_IDS || '')
+      .split(',').map((s) => s.trim()).filter(Boolean),
+    allowChallenge: String(process.env.PR_ALLOW_CHALLENGE || 'NO').toUpperCase() === 'YES',
+    base: String(process.env.PR_BASE || 'BTC').toUpperCase(),
+    leverage: Number(process.env.PR_LEVERAGE || 1),
+    positionMode: String(process.env.PR_POSITION_MODE || 'auto').toLowerCase(),
+    outOfRangeAction: String(process.env.PR_OUT_OF_RANGE_ACTION || 'close').toLowerCase(),
+    enableAutoRecenter: String(process.env.PR_ENABLE_AUTO_RECENTER || 'false') === 'true',
+    internalDailyStopPct: Number(process.env.PR_INTERNAL_DAILY_STOP_PCT || 0.01),
+    internalMaxDrawdownPct: Number(process.env.PR_INTERNAL_MAX_DRAWDOWN_PCT || 0.03),
+    orderPollMs: Number(process.env.PR_ORDER_POLL_MS || 3000),
+    tradePollMs: Number(process.env.PR_TRADE_POLL_MS || 3000),
+    reconcileMs: Number(process.env.PR_RECONCILE_MS || 15000),
+    timeoutMs: Number(process.env.PR_TIMEOUT_MS || 30000),
+    feeRate: Number(process.env.PR_FEE_RATE || 0.0005),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.PR_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
@@ -200,7 +231,39 @@ export function getConfig() {
     lr,
     hl,
     va,
+    propr,
   };
+}
+
+/** accountId 脱敏：仅保留前 4 + 后 4（错误信息与日志一律使用）。 */
+export function maskAccountId(id) {
+  const s = String(id ?? '');
+  if (!s) return '';
+  if (s.length <= 8) return '****';
+  return `${s.slice(0, 4)}****${s.slice(-4)}`;
+}
+
+/**
+ * Propr 启动护栏（ADR-006）：paper 之外必须显式配置账户并校验白名单，
+ * challenge 额外要求 PR_ALLOW_CHALLENGE=YES。任何一条不满足都拒绝启动，
+ * 宁可起不来，也不能误绑账户/误切付费账户。
+ */
+export function validateProprConfig(pr = {}) {
+  const mode = pr.mode || 'paper';
+  if (mode === 'paper') return;
+  if (!pr.apiKey) {
+    throw new Error(`Propr ${mode} 模式需要 PROPR_API_KEY（写入 .env，勿提交仓库）。`);
+  }
+  if (!pr.accountId) {
+    throw new Error(`Propr ${mode} 模式必须显式配置 PROPR_ACCOUNT_ID（禁止自动发现，避免误绑定账户）。`);
+  }
+  const allowed = Array.isArray(pr.allowedAccountIds) ? pr.allowedAccountIds : [];
+  if (allowed.length && !allowed.includes(pr.accountId)) {
+    throw new Error(`Propr 账户 ${maskAccountId(pr.accountId)} 不在 PROPR_ALLOWED_ACCOUNT_IDS 白名单中。`);
+  }
+  if (mode === 'challenge' && !pr.allowChallenge) {
+    throw new Error('Propr challenge 模式需显式设置 PR_ALLOW_CHALLENGE=YES（防止误切付费账户）。');
+  }
 }
 
 export const ROOT = root;

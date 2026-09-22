@@ -1,11 +1,11 @@
 {
   "name": "grid-bot-all",
-  "version": "1.6.9",
+  "version": "1.7.0",
   "description": "三交易所整合网格交易机器人：Decibel / Extended / RISEx，统一仪表盘，支持同时运行三个网格策略。",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/grid.test.js && node test/bot.test.js && node test/cancel-safety.test.js && node test/safety-progress.test.js && node test/decibel-safety.test.js && node test/lighter.test.js && node test/hl.test.js && node test/va.test.js && node test/dynamic.test.js && node test/resume-guard.test.js && node test/notify.test.js && node test/va-auth.test.js && node scripts/check-html.mjs",
+    "test": "node test/grid.test.js && node test/bot.test.js && node test/cancel-safety.test.js && node test/safety-progress.test.js && node test/decibel-safety.test.js && node test/lighter.test.js && node test/hl.test.js && node test/va.test.js && node test/dynamic.test.js && node test/resume-guard.test.js && node test/notify.test.js && node test/va-auth.test.js && node test/propr-redact.test.js && node scripts/check-html.mjs",
     "lint": "eslint src test",
     "check:html": "node scripts/check-html.mjs"
   },
@@ -15,6 +15,7 @@
   "dependencies": {
     "@aptos-labs/ts-sdk": "^5.2.1",
     "@decibeltrade/sdk": "^0.6.0",
+    "ulid": "^3.0.2",
     "undici": "^6.28.0",
     "zod": "^3.25.62"
   },

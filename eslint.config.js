@@ -14,7 +14,7 @@ export default [
         console: 'readonly', process: 'readonly', Buffer: 'readonly',
         setTimeout: 'readonly', setInterval: 'readonly', clearTimeout: 'readonly', clearInterval: 'readonly',
         globalThis: 'readonly', URL: 'readonly', URLSearchParams: 'readonly', fetch: 'readonly',
-        AbortSignal: 'readonly', BigInt: 'readonly', Promise: 'readonly',
+        AbortSignal: 'readonly', AbortController: 'readonly', BigInt: 'readonly', Promise: 'readonly',
         // 测试文件
         EventEmitter: 'readonly',
       },
