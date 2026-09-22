@@ -1,9 +1,12 @@
 // 结构化日志：JSON lines 写入 logs/app-YYYY-MM-DD.log（按天轮转），控制台同步
 // 可读输出。LOG_LEVEL（error|warn|info|debug，默认 info）与 LOG_DIR（默认 logs/）
 // 通过环境变量配置。任何日志失败（目录不可写/序列化异常）都绝不影响交易主路径。
+// 日志边界统一脱敏（Review1 P0）：msg 与 ctx 在写入前一律经过 redactSecrets/redactRecord，
+// 保证 API Key / 认证信息 / 完整 accountId 不会落到日志文件或控制台。
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from './config.js';
+import { redactRecord, redactSecrets } from './redact.js';
 
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const level = LEVELS[String(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LEVELS.info;
@@ -33,8 +36,8 @@ function rotate() {
 
 function write(lvl, module, msg, ctx) {
   if (LEVELS[lvl] > level) return;
-  const rec = { t: new Date().toISOString(), level: lvl, module, msg: String(msg ?? '') };
-  if (ctx && typeof ctx === 'object') Object.assign(rec, ctx);
+  const rec = { t: new Date().toISOString(), level: lvl, module, msg: redactSecrets(String(msg ?? '')) };
+  if (ctx && typeof ctx === 'object') Object.assign(rec, redactRecord(ctx));
   let line;
   try { line = JSON.stringify(rec); } catch { line = JSON.stringify({ t: rec.t, level: rec.level, module: rec.module, msg: rec.msg }); }
   try { rotate(); if (stream) stream.write(line + '\n'); } catch { /* ignore */ }

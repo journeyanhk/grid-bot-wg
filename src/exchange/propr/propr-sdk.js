@@ -1,8 +1,10 @@
 // Propr 官方 JavaScript/TypeScript SDK 的 ESM vendor 版本。
 // 来源：https://www.propr.xyz/developers/javascript-sdk（官方“复制粘贴”分发，npm 无 propr-sdk 包）。
-// 变更：去除 TS 类型标注改为 ESM + JSDoc；其余请求路径/字段/错误语义与官方源码保持一致，
+// 变更：去除 TS 类型标注改为 ESM + JSDoc；错误消息在抛出前统一脱敏（Review1 P0，防止
+// API 返回文本携带凭证外泄）；其余请求路径/字段/错误语义与官方源码保持一致，
 // 升级时按官方文档逐段比对。intentId 由调用方提供（幂等键），依赖 ulid。
 import { ulid } from 'ulid';
+import { redactSecrets } from '../../redact.js';
 
 const DEFAULT_BASE_URL = 'https://api.propr.xyz/v1';
 
@@ -66,7 +68,7 @@ export class ProprClient {
           code = body.code ?? null;
           message = body.message ?? message;
         } catch { /* 非 JSON 错误体：保留默认 message */ }
-        throw new ProprAPIError(response.status, code, message);
+        throw new ProprAPIError(response.status, code, redactSecrets(message));
       }
 
       return response.json();

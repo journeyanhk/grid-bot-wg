@@ -18,12 +18,24 @@
   会覆盖 intentId）
 - Propr 错误语义层与内部类型（`src/exchange/propr/{errors,types}.js`）：超时/限频/5xx 可重试判定、
   只读写拦截、未知订单态、鉴权/拒单分类
-- 日志与异常脱敏（`src/exchange/propr/redact.js`）：`pk_live_*`/Bearer/key=value 全抹除、
+- 日志与异常脱敏（`src/redact.js`，平台层）：`pk_live_*`/Bearer/key=value 全抹除、
   accountId 仅前 4+后 4；`PROPR_API_KEY` 纳入子进程凭证隔离清单（`src/exchange/secret-env.js`）
 - 方案包 `helloagents/plan/202609221928_propr-exchange/`（why/how/task，分批 Review 交付）
 
+### 修复（Review1 复审 P0/P1）
+- P0 启动护栏接入真实入口：新增 `src/exchange/propr/index.js` 工厂，`createExchange()` 先执行
+  `validateProprConfig()` 再分流，脚本/测试/未来入口均无法绕过
+- P0 脱敏接入真实输出链路：日志边界统一脱敏（`src/log.js` 对 msg/ctx 调 `redactSecrets`/
+  `redactRecord`）；vendor SDK 抛出 `ProprAPIError` 前对 API 返回消息脱敏；新增 `safeError()`
+- P1 `accountId` 纳入结构化脱敏（前 4+后 4）；深度超限返回 `[REDACTED_DEPTH_LIMIT]` 不再透传原值
+- P1 非法 `PR_MODE` 改为 fail closed（拒绝启动，不再静默降级为 paper）
+- P1 `package-lock.json` 版本对齐 1.7.0
+- 新增 `src/exchange/propr/paper.js`（本地 BTC 模拟适配器），paper 模式端到端可用
+
 ### 测试
-- 新增 `test/propr-redact.test.js`：脱敏、四模式启动护栏、错误分类；`npm test` 全绿 + lint 0 error
+- 新增 `test/propr-redact.test.js`：脱敏、四模式启动护栏、错误分类、日志边界、深度上限、safeError
+- 新增 `test/propr-modes.test.js`：真实入口护栏、非法 PR_MODE fail closed、paper 撮合契约
+- `npm test` 全绿 + lint 0 error
 
 ## [1.6.9] - 2026-09-22
 

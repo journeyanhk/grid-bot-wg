@@ -16,6 +16,11 @@
 - [√] 1.4 在 `src/exchange/propr/{errors.js,types.js}` 定义错误映射（400/401/403/404/429/500、`ProprReadOnlyError`、`UnknownOrderStateError`）与内部类型，依赖任务 1.3
 - [√] 1.5 落实日志脱敏（禁止 Authorization/API Key/Cookie/完整认证信息；accountId 仅前 4+后 4），验证 why.md#需求-四级运行模式与安全护栏，依赖任务 1.4
 - [√] 1.6 运行 `npm test` + `npm run lint` 基线全绿（确认本批未破坏现有 6 所）
+- [√] 1.7 【Review1 复审 P0】新增 `src/exchange/propr/index.js` 工厂，`createExchange()` 先 `validateProprConfig()` 再分流，护栏接入真实入口
+- [√] 1.8 【Review1 复审 P0】脱敏接入真实链路：`src/log.js` 日志边界统一脱敏、vendor SDK 错误消息脱敏、新增 `safeError()`；脱敏模块上移至平台层 `src/redact.js`
+- [√] 1.9 【Review1 复审 P1】`accountId` 结构化脱敏（前 4+后 4）；深度超限返回 `[REDACTED_DEPTH_LIMIT]`
+- [√] 1.10 【Review1 复审 P1】非法 `PR_MODE` fail closed（拒绝启动）
+- [√] 1.11 【Review1 复审 P1】`package-lock.json` 对齐 1.7.0；新增 `src/exchange/propr/paper.js`（paper 端到端可用）
 
 ## 2. 契约探测与冻结（探针门）
 - [ ] 2.1 在 `scripts/propr-probe.mjs` 实现只读链探针（health/healthServices/getUser/setup/getChallenges/getChallengeAttempts/getChallengeAttempt/getPositions/getOrders/getTrades/getMarginConfig/getLeverageLimits），输出原始结构与脱敏摘要，验证 why.md#需求-Propr-只读适配器契约探测-Day-0-契约探测，依赖任务 1.1、1.3
@@ -32,12 +37,14 @@
 - [ ] 3.4 在 `src/exchange/propr/paper.js` 实现本地 paper 适配器（不访问 Propr），依赖任务 3.1
 - [ ] 3.5 在 `src/exchange/propr/shadow.js` 实现 ShadowExchange（读 Propr + 本地撮合，写方法一律抛 `ProprReadOnlyError` 并锁定），验证 why.md#需求-四级运行模式与安全护栏-Shadow-模式绝对只读，依赖任务 3.3
 - [ ] 3.6 在 `src/exchange/propr/index.js` 实现 `createExchange(cfg)` 四模式工厂，依赖任务 3.4、3.5
+- [ ] 3.7 【Review1 复审要求】分页处理：官方默认 `limit:20/offset:0`，BTC 网格挂单与成交会超页，需实现 `getAllOrders/getAllTrades/getAllPositions`（或适配器内显式翻页），不得默认结果完整，依赖任务 3.3
 
 ## 4. 写路径与幂等（Review 3）
 - [ ] 4.1 在 `src/exchange/propr/propr.js` 实现 `placeLimitOrder/placeLimitOrders`（统一走 createOrders+自有 intentId，结果与输入等长），验证 why.md#需求-Propr-交易适配器-批量铺网与幂等，依赖任务 3.3
 - [ ] 4.2 在 `src/exchange/propr/propr.js` 实现 `cancelOrder/cancelAll/closePosition`（撤单先查实况、平仓自实现全平），依赖任务 4.1
 - [ ] 4.3 在 `src/exchange/propr/propr.js` 实现订单状态机与 `UnknownOrderStateError → TRADING_LOCKED` 路径，依赖任务 4.1
 - [ ] 4.4 在 `src/exchange/propr/propr.js` 实现本地 intent 日志与 `reconcileOrders()`（按 intentId 匹配），依赖任务 4.3
+- [ ] 4.5 【Review1 复审要求】适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，依赖任务 4.1
 
 ## 5A. 持仓模式落地 — net 分支（仅当探针=net）
 - [ ] 5A.1 在 `src/exchange/propr/propr.js` 实现 `getPosition` 返回带符号净仓，`positionMode='net'`，验证 how.md#ADR-001，依赖任务 2.6

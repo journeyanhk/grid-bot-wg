@@ -81,6 +81,13 @@
    - `cancelAll(base)` 逐笔后必须 `fetchOpenOrders` 复核，残留则重试并告警；
    - `closePosition` 自实现：遍历 `getOpenPositions('BTC')` 全平（官方只平 `[0]`），market + reduceOnly + closePosition。
 
+6.1 **分页（Review1 复审新增）**：官方 SDK 默认 `limit:20/offset:0`，BTC 网格挂单/成交会超页。
+   适配器需实现 `getAllOrders/getAllTrades/getAllPositions`（或显式翻页），**不得默认单页结果完整**，
+   否则对账会误判订单消失。
+
+6.2 **下单入口唯一化（Review1 复审新增）**：适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），
+   统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，避免 GridBot 误用。
+
 7. **订单状态机**：
    ```
    intent_created → submitted → accepted → partially_filled → filled

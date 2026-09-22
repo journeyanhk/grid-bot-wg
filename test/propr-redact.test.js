@@ -1,7 +1,8 @@
-// Propr Review 1 tests: log redaction and startup guards (mode/whitelist/challenge).
-// 目标：证明 API Key 与认证信息不会出现在任何对外输出中，且四种模式的启动护栏生效。
+// Propr Review 1 tests: log redaction, error classification and startup guards.
+// 目标：证明 API Key 与认证信息不会出现在任何对外输出中（含日志边界），且四种模式的启动护栏生效。
 import { strict as assert } from 'node:assert';
-import { maskAccountId, redactSecrets, redactRecord } from '../src/exchange/propr/redact.js';
+import { maskAccountId, redactSecrets, redactRecord, safeError } from '../src/redact.js';
+import { logger } from '../src/log.js';
 import { validateProprConfig } from '../src/config.js';
 import { ProprReadOnlyError, UnknownOrderStateError, classifyProprError, isRetryableProprError, isAuthError } from '../src/exchange/propr/errors.js';
 import { ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
@@ -24,7 +25,7 @@ import { ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
 }
 
 {
-  // 结构化脱敏：密钥字段整体替换，嵌套对象/数组/Error 也覆盖
+  // 结构化脱敏：密钥字段整体替换，accountId 按 4+4 掩码，嵌套对象/数组/Error 全覆盖
   const rec = redactRecord({
     apiKey: 'pk_live_SECRET',
     nested: { authorization: 'Bearer abc', accountId: 'acct-1234567890' },
@@ -33,9 +34,36 @@ import { ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
   });
   assert.equal(rec.apiKey, '***REDACTED***');
   assert.equal(rec.nested.authorization, '***REDACTED***');
-  assert.equal(rec.nested.accountId, 'acct-1234567890', 'accountId 不是密钥字段，原样保留（由日志侧再掩码）');
+  assert.equal(rec.nested.accountId, 'acct****7890', 'accountId 必须按前 4+后 4 掩码');
   assert.equal(rec.list[0].token, '***REDACTED***');
   assert.ok(!rec.err.message.includes('pk_live_SECRET'), 'Error.message 也必须脱敏');
+}
+
+{
+  // 深度上限：超过 6 层不再透传原值（防深层泄漏/循环引用）
+  let deep = 'pk_live_DEEP';
+  for (let i = 0; i < 8; i++) deep = { nested: deep };
+  const out = JSON.stringify(redactRecord(deep));
+  assert.ok(!out.includes('pk_live_DEEP'), '深层字符串不得泄漏');
+  assert.ok(out.includes('REDACTED_DEPTH_LIMIT'));
+}
+
+{
+  // safeError：统一错误包装（进入日志/告警/SSE 前必须经过）
+  const se = safeError(new ProprAPIError(401, 1001, 'bad key pk_live_SECRET'));
+  assert.equal(se.name, 'ProprAPIError');
+  assert.equal(se.statusCode, 401);
+  assert.equal(se.code, 1001);
+  assert.ok(!se.message.includes('pk_live_SECRET'));
+}
+
+{
+  // 日志边界：logger 输出的 msg 必须已脱敏（Review1 P0）
+  const orig = console.error; let captured = '';
+  console.error = (line) => { captured += String(line); };
+  try { logger.error('propr', '请求失败 pk_live_SECRET'); } finally { console.error = orig; }
+  assert.ok(!captured.includes('pk_live_SECRET'), '日志控制台输出必须脱敏');
+  assert.ok(captured.includes('pk_***REDACTED***'));
 }
 
 {

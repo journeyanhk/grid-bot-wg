@@ -189,8 +189,13 @@ export function getConfig() {
   // 刻意不使用 live：Propr 的 Challenge/Funded 官方均为模拟账户，避免与"真实资金"混淆。
   const PR_MODES = ['paper', 'shadow', 'sim-write', 'challenge'];
   const prModeRaw = String(process.env.PR_MODE || 'paper').toLowerCase();
+  // 配置错误必须 fail closed：非法模式直接拒绝启动，绝不静默降级为 paper
+  // （否则用户以为在连 Propr，实际只跑本地模拟，生产状态失真）。
+  if (!PR_MODES.includes(prModeRaw)) {
+    throw new Error(`非法 PR_MODE=${prModeRaw}，允许值：${PR_MODES.join('|')}`);
+  }
   const propr = {
-    mode: PR_MODES.includes(prModeRaw) ? prModeRaw : 'paper',
+    mode: prModeRaw,
     apiKey: process.env.PROPR_API_KEY || '',
     apiUrl: (process.env.PROPR_API_URL || 'https://api.propr.xyz/v1').replace(/\/$/, ''),
     wsUrl: process.env.PROPR_WS_URL || 'wss://api.propr.xyz/ws',
