@@ -5,15 +5,60 @@
 //   - 入场价 = 当根收盘价；加仓/止盈/止损按触发价成交；市价腿（止损/信号退出）滑点进成本模型；
 //   - 止损只允许向有利方向移动（移动止损 = 最高价 - trailAtr×ATR，多头镜像）。
 import { createRegimeTracker } from './regime.js';
-import { allScenarioCosts, COST_SCENARIOS, FEE_DEFAULTS, fundingCost } from './shadow-cost-model.js';
+import { allScenarioCosts, COST_SCENARIOS, FEE_DEFAULTS, legCost } from './shadow-cost-model.js';
 import { ExitReason } from './types.js';
 
-/** 三组参数：R2 Fast 为决断对象；Balanced/Strict 为对照（文档1 参数 + 低频对照假设）。 */
+/** 参数版本：与回测口径对齐的标识（Review 要求——新旧结果不得混用）。 */
+export const PARAM_VERSION = 'shadow-v1.7.1';
+/** 策略波动率基准：1H ATR（与回测一致）；5M ATR 仅作微观过滤，不作止损/间距基准。 */
+export const ATR_SOURCE = '1h';
+
+/**
+ * 三组参数：R2 Fast 为决断对象；Balanced/Strict 为对照。
+ * - Balanced：文档1 原参数（60/20/20/0.8/1.5）
+ * - Strict：ADX/间距/止损 对齐回测（22/0.8/1.5）；entry/exit 阈值为 shadow-v1 假设，待回测文档核对
+ */
 export const PARAM_SETS = Object.freeze([
-  { id: 'r2fast', label: 'R2 Fast（决断）', entryThreshold: 50, exitThreshold: 15, adxMin: 18, volMaxAtrPct: 2.0, spacingAtr: 0.5, stopAtr: 1.0, trailAtr: 1.2, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
-  { id: 'balanced', label: 'Balanced（对照）', entryThreshold: 60, exitThreshold: 20, adxMin: 20, volMaxAtrPct: 2.0, spacingAtr: 0.8, stopAtr: 1.5, trailAtr: 1.5, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
-  { id: 'strict', label: 'Strict（低频对照）', entryThreshold: 70, exitThreshold: 25, adxMin: 25, volMaxAtrPct: 2.0, spacingAtr: 1.0, stopAtr: 2.0, trailAtr: 2.0, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
+  { id: 'r2fast', version: PARAM_VERSION, label: 'R2 Fast（决断）', entryThreshold: 50, exitThreshold: 15, adxMin: 18, volMaxAtrPct: 2.0, spacingAtr: 0.5, stopAtr: 1.0, trailAtr: 1.2, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
+  { id: 'balanced', version: PARAM_VERSION, label: 'Balanced（对照）', entryThreshold: 60, exitThreshold: 20, adxMin: 20, volMaxAtrPct: 2.0, spacingAtr: 0.8, stopAtr: 1.5, trailAtr: 1.5, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
+  { id: 'strict', version: PARAM_VERSION, label: 'Strict（低频对照）', entryThreshold: 70, exitThreshold: 25, adxMin: 22, volMaxAtrPct: 2.0, spacingAtr: 0.8, stopAtr: 1.5, trailAtr: 1.5, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
 ]);
+
+/**
+ * 资金费率逐时段累计（修正：不再用"平仓时最新费率 × 整个持仓周期"）。
+ * 以 1 小时边界为粒度：边界 T 的费率点覆盖 (T-1h, T]，逐段累计；
+ * 无费率点的时段计入 missingMs（绝不静默当 0）；finalize 时不足 1 小时的尾巴按最后已知费率估算，否则记缺失。
+ */
+export function accrueFunding(pos, toTime, fundingPoints, { finalize = false } = {}) {
+  if (!pos?.funding) return;
+  const notional = Math.abs(pos.avgEntry || 0) * (pos.filledSize || 0);
+  const rates = fundingPoints
+    ? new Map(fundingPoints.map((p) => [Math.floor(Number(p.time) / 3_600_000), Number(p.rate)]))
+    : null;
+  const sign = pos.side === 'long' ? 1 : -1;
+  const lastBoundary = Math.floor(toTime / 3_600_000) * 3_600_000;
+  let cursor = pos.funding.accruedThrough;
+  const addSeg = (rate, dt) => {
+    if (rate != null && Number.isFinite(rate)) {
+      pos.funding.totalUsd += sign * notional * rate * (dt / 3_600_000);
+      pos.funding.samples++;
+      pos.funding.lastRate = rate;
+    } else {
+      pos.funding.missingMs += dt;
+    }
+  };
+  while (cursor < lastBoundary) {
+    const rem = ((cursor % 3_600_000) + 3_600_000) % 3_600_000;
+    const next = cursor + (rem === 0 ? 3_600_000 : 3_600_000 - rem); // 下一个整点边界（对齐时前进一整点）
+    addSeg(rates ? rates.get(Math.floor(next / 3_600_000)) : null, next - cursor);
+    cursor = next;
+  }
+  if (finalize && cursor < toTime) {
+    addSeg(pos.funding.lastRate, toTime - cursor);
+    cursor = toTime;
+  }
+  pos.funding.accruedThrough = cursor;
+}
 
 export const SHADOW_DEFAULTS = Object.freeze({
   equity: 10_000,          // 虚拟权益（仓位计算基准）
@@ -45,6 +90,7 @@ export function createShadowRecorder(opts = {}) {
     });
   }
   const signals = []; // 诊断用信号环（全局）
+  const bookSamples = []; // 盘口滑点观测环（仅诊断，不进入净 PnL）
   let evaluations = 0, lastSignal = null, lastProcessedBarKey = null;
 
   function pushSignal(signal, barKey) {
@@ -53,7 +99,7 @@ export function createShadowRecorder(opts = {}) {
     if (signals.length > 200) signals.pop();
   }
 
-  /** 开仓（虚拟）：按止损距离反推仓位，分 3 层。 */
+  /** 开仓（虚拟）：按止损距离反推仓位，分 3 层。ATR 基准 = 1H（与回测一致，ATR_SOURCE）。 */
   function openPosition(cfg, signal, candle, atrValue, structureRef) {
     const side = signal.direction;
     if (side !== 'long' && side !== 'short') return;
@@ -91,17 +137,20 @@ export function createShadowRecorder(opts = {}) {
       filled: false, at: null,
     }));
 
+    const openedAtMs = now();
     cfg.position = {
       tradeId: `sh-${++tradeSeq}`,
       configId: def.id, side,
-      openedAt: now(), entryPrice: entry, avgEntry: entry,
+      openedAt: openedAtMs, entryPrice: entry, avgEntry: entry,
       initialStop: stopPrice, stopPrice,
-      atr, R, layers, tpLevels,
+      atr, atrSource: ATR_SOURCE, R, layers, tpLevels,
       filledSize: layerSizes[0], closedSize: 0,
       legs: [{ notional: entry * layerSizes[0], isMarket: false, kind: 'entry' }],
       highSinceEntry: entry, lowSinceEntry: entry,
       mfe: 0, mae: 0, grossPnl: 0,
-      bookEntryBps: null,
+      // 资金费率逐时段累计（accrueFunding 维护；缺数据记 missingMs，不当 0）
+      funding: { accruedThrough: openedAtMs, totalUsd: 0, samples: 0, missingMs: 0, lastRate: null },
+      bookObserved: null, // 盘口采样：仅诊断观测，不进入净 PnL（Review Option A）
     };
     cfg.stats.entries++;
     return cfg.position;
@@ -194,10 +243,10 @@ export function createShadowRecorder(opts = {}) {
   /** 收尾：成本四档 + 资金费 + 记录交易。 */
   function finalize(cfg, pos, candle) {
     const closedAt = now();
+    accrueFunding(pos, closedAt, pos._fundingPoints || null, { finalize: true }); // 尾段结算（按最后已知费率估算，否则记缺失）
     const holdingMs = Math.max(0, closedAt - pos.openedAt);
     const costs = allScenarioCosts(pos.legs, scenarios, fees);
-    const avgNotional = pos.avgEntry * Math.max(pos.filledSize, 1e-12);
-    const fundingUsd = fundingCost({ notional: avgNotional, hourlyRate: pos.fundingHourly || 0, holdingMs, side: pos.side });
+    const fundingUsd = pos.funding.totalUsd;
     const netPnl = {};
     for (const sc of scenarios) netPnl[sc.id] = Number((pos.grossPnl - costs[sc.id].totalUsd - fundingUsd).toFixed(4));
     const trade = {
@@ -210,9 +259,13 @@ export function createShadowRecorder(opts = {}) {
       exitReason: pos.exitReason, exitPrice: pos.exitPrice != null ? Number(pos.exitPrice.toFixed(2)) : null,
       grossPnl: Number(pos.grossPnl.toFixed(4)),
       fundingUsd: Number(fundingUsd.toFixed(4)),
+      fundingMissingMs: pos.funding.missingMs,
+      fundingSamples: pos.funding.samples,
       costs, netPnl,
       mfe: Number(pos.mfe.toFixed(2)), mae: Number(pos.mae.toFixed(2)),
-      bookEntryBps: pos.bookEntryBps,
+      atrSource: pos.atrSource, atrValue: Number(pos.atr.toFixed(4)),
+      bookObservedSlippage: pos.bookObserved, // 仅诊断（Review Option A）
+      paramVersion: cfg.def.version,
     };
     cfg.trades.unshift(trade);
     if (cfg.trades.length > shadow.maxTradesPerConfig) cfg.trades.pop();
@@ -233,25 +286,38 @@ export function createShadowRecorder(opts = {}) {
    * @param {number} o.barKey   5M K 线 open time（去重）
    * @param {boolean} o.isNewHourlyBar 是否恰逢 1H 收盘
    * @param {Object} o.features buildFeatures 输出（ATR/结构）
-   * @param {number} [o.fundingHourly] 资金费率（每小时）
+   * @param {Array} [o.fundingPoints] 资金费率点 [{time, rate}]（逐时段累计；缺数据不当 0）
    * @param {Object} [o.bookSample] { entryBps } 盘口滑点采样（可选）
    */
-  function onBar({ candle5m, signal, barKey, isNewHourlyBar = false, features, fundingHourly = 0, bookSample = null }) {
+  function onBar({ candle5m, signal, barKey, isNewHourlyBar = false, features, fundingPoints = null, bookSample = null }) {
     // 同根去重：同一 5M 只驱动一次（管理+入场都不得重复处理）
     if (barKey != null && barKey === lastProcessedBarKey) return [];
     if (barKey != null) lastProcessedBarKey = barKey;
     evaluations++;
     pushSignal(signal, barKey);
+    const barCloseTime = Number(candle5m.time) + 300_000;
     const results = [];
+    let bookPushed = false; // 同一根 K 线只记一次盘口采样（多组参数同时入场不重复）
     for (const cfg of configs.values()) {
-      if (cfg.position) cfg.position.fundingHourly = fundingHourly;
-      if (cfg.position) managePosition(cfg, candle5m, signal);
+      if (cfg.position) {
+        cfg.position._fundingPoints = fundingPoints;
+        accrueFunding(cfg.position, barCloseTime, fundingPoints); // 逐时段累计（含补处理的历史 K 线）
+        managePosition(cfg, candle5m, signal);
+      }
       if (!cfg.position) {
         const cooled = !cfg.cooldownUntil || !Number.isFinite(barKey) || barKey >= cfg.cooldownUntil;
         const { entryDirection } = cooled ? cfg.tracker.onEvaluation(signal, { barKey, isNewHourlyBar }) : { entryDirection: null };
         if (entryDirection) {
-          const pos = openPosition(cfg, { ...signal, direction: entryDirection }, candle5m, features?.atr5m, features);
-          if (pos && bookSample?.entryBps != null) pos.bookEntryBps = bookSample.entryBps;
+          // 策略 ATR 基准 = 1H（与回测一致）；缺失则不入场
+          const pos = openPosition(cfg, { ...signal, direction: entryDirection }, candle5m, features?.atr1h, features);
+          if (pos && bookSample?.entryBps != null) {
+            pos.bookObserved = { entryBps: bookSample.entryBps };
+            if (!bookPushed) {
+              bookPushed = true;
+              bookSamples.unshift({ t: now(), barKey, entryBps: bookSample.entryBps });
+              if (bookSamples.length > 200) bookSamples.pop();
+            }
+          }
           if (pos) results.push({ configId: cfg.def.id, event: 'entry', tradeId: pos.tradeId, side: pos.side });
         }
       }
@@ -259,19 +325,54 @@ export function createShadowRecorder(opts = {}) {
     return results;
   }
 
-  function getState() {
+  /** 未平仓 mark-to-market（含资金费与预估退出成本；供决断门纳入回撤用）。 */
+  function getMarkToMarket(markPrice) {
+    const out = {};
+    const mark = Number(markPrice);
+    for (const [id, cfg] of configs) {
+      const pos = cfg.position;
+      if (!pos || !(mark > 0)) { out[id] = null; continue; }
+      const remaining = Math.max(0, pos.filledSize - pos.closedSize);
+      const unrealizedUsd = pos.side === 'long' ? (mark - pos.avgEntry) * remaining : (pos.avgEntry - mark) * remaining;
+      const baseline = COST_SCENARIOS.find((x) => x.id === 'baseline');
+      const exitCostUsd = legCost({ notional: Math.abs(mark * remaining), isMarket: true }, baseline, fees).totalUsd;
+      out[id] = {
+        side: pos.side, remaining, unrealizedUsd,
+        fundingUsd: pos.funding.totalUsd,
+        fundingMissingMs: pos.funding.missingMs,
+        exitCostUsd,
+        protected: Number.isFinite(pos.stopPrice) && pos.stopPrice > 0,
+        holdingMs: Math.max(0, now() - pos.openedAt),
+        mtmUsd: unrealizedUsd - exitCostUsd - pos.funding.totalUsd,
+      };
+    }
+    return out;
+  }
+
+  function getState(markPrice = null) {
+    const mtm = markPrice != null ? getMarkToMarket(markPrice) : null;
     const perConfig = {};
     for (const [id, cfg] of configs) {
       perConfig[id] = {
         label: cfg.def.label,
-        position: cfg.position ? { tradeId: cfg.position.tradeId, side: cfg.position.side, entryPrice: cfg.position.avgEntry, stopPrice: cfg.position.stopPrice } : null,
+        version: cfg.def.version,
+        position: cfg.position ? {
+          tradeId: cfg.position.tradeId, side: cfg.position.side, entryPrice: cfg.position.avgEntry,
+          stopPrice: cfg.position.stopPrice, filledSize: cfg.position.filledSize,
+          fundingUsd: Number(cfg.position.funding.totalUsd.toFixed(4)),
+          fundingMissingMs: cfg.position.funding.missingMs,
+        } : null,
+        mtm: mtm ? mtm[id] : null,
         stats: cfg.stats,
         recentTrades: cfg.trades.slice(0, 10),
       };
     }
+    const bookCount = bookSamples.length;
+    const bookMean = bookCount ? bookSamples.reduce((a, x) => a + x.entryBps, 0) / bookCount : null;
     return {
       evaluations, lastSignal, perConfig,
       recentSignals: signals.slice(0, 20),
+      bookObserved: { samples: bookCount, meanEntryBps: bookMean != null ? Number(bookMean.toFixed(3)) : null },
       equity: shadow.equity,
     };
   }
@@ -281,23 +382,25 @@ export function createShadowRecorder(opts = {}) {
     for (const [id, cfg] of configs) {
       perConfig[id] = { trades: cfg.trades, stats: cfg.stats, position: cfg.position };
     }
-    return { version: 1, evaluations, signals: signals.slice(0, 200), perConfig };
+    return { version: 1, evaluations, signals: signals.slice(0, 200), bookSamples: bookSamples.slice(0, 200), perConfig };
   }
 
   function loadData(data) {
     if (!data || typeof data !== 'object') return false;
     evaluations = Number(data.evaluations) || 0;
     if (Array.isArray(data.signals)) signals.splice(0, signals.length, ...data.signals.slice(0, 200));
+    if (Array.isArray(data.bookSamples)) bookSamples.splice(0, bookSamples.length, ...data.bookSamples.slice(0, 200));
     for (const [id, cfg] of configs) {
       const d = data.perConfig?.[id];
       if (!d) continue;
       cfg.trades = Array.isArray(d.trades) ? d.trades.slice(0, shadow.maxTradesPerConfig) : [];
       cfg.stats = { ...cfg.stats, ...(d.stats || {}) };
       cfg.position = d.position || null;
-      if (cfg.position) cfg.position.fundingHourly = cfg.position.fundingHourly || 0;
+      // 兼容旧快照：补齐 funding 结构（历史缺失按 0 计，但缺失时段在旧数据中无法追溯）
+      if (cfg.position && !cfg.position.funding) cfg.position.funding = { accruedThrough: cfg.position.openedAt || now(), totalUsd: 0, samples: 0, missingMs: 0, lastRate: null };
     }
     return true;
   }
 
-  return { onBar, getState, exportData, loadData, configs };
+  return { onBar, getState, getMarkToMarket, exportData, loadData, configs };
 }

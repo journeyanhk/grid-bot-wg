@@ -21,7 +21,7 @@ const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 export function evaluateRegime(f, cfg = {}) {
   const c = { ...REGIME_DEFAULTS, ...cfg };
   if (!f || !Number.isFinite(f.price)) {
-    return { regime: Regime.RANGE, score: 0, confidence: 0, direction: null, adx: null, atrPct: null, htfAligned: false, mtfAligned: false, entryConfirmed: false, reason: ['数据不足'] };
+    return { regime: Regime.RANGE, score: 0, confidence: 0, direction: null, adx: null, atrPct: null, htfAvailable: false, mtfAvailable: false, htfMtfAligned: false, entryConfirmed: false, reason: ['数据不足'] };
   }
   const dirHtf = f.htfUp === true ? 1 : f.htfUp === false ? -1 : 0;
   const dirMtf = f.mtfUp === true ? 1 : f.mtfUp === false ? -1 : 0;
@@ -69,8 +69,10 @@ export function evaluateRegime(f, cfg = {}) {
     direction,
     adx: Number.isFinite(f.adx1h) ? Number(f.adx1h.toFixed(1)) : null,
     atrPct: Number.isFinite(f.atrPct) ? Number(f.atrPct.toFixed(3)) : null,
-    htfAligned: f.htfUp === true || f.htfUp === false,
-    mtfAligned: f.mtfUp === true || f.mtfUp === false,
+    // 字段语义（Review P2-1）：Available=数据存在；Aligned=4H/1H 同向
+    htfAvailable: f.htfUp === true || f.htfUp === false,
+    mtfAvailable: f.mtfUp === true || f.mtfUp === false,
+    htfMtfAligned: f.htfUp != null && f.mtfUp != null && f.htfUp === f.mtfUp,
     entryConfirmed: f.entryUp === true || f.entryUp === false,
     reason,
   };

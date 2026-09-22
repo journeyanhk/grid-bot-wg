@@ -28,7 +28,7 @@
 - [√] 3.2 新建 `src/strategy/shadow-cost-model.js`：四档成本情景 + HL l2Book 真实盘口滑点采样（信号时触发）+ 资金费率累计
 - [√] 3.3 新建 `src/strategy/shadow-persistence.js`：独立数据文件（滚动窗口）+ 日报（复用 notify）+ `GET /api/strategy/shadow/state`（只读）
 - [√] 3.4 新建 `test/shadow-recorder.test.js`：生命周期完整性 / 部分成交 / 重复事件去重 / 三组隔离
-- [√] 3.5 `src/server.js` 接线：同进程独立 timer 启动影子（零交易密钥）+ 只读路由；异常边界（策略异常内部降级不抛主进程）
+- [√] 3.5（含 Review1 修复：费率分段/断档回放/MTM 入口径/覆盖率闸门/1H ATR/盘口口径 Option A） `src/server.js` 接线：同进程独立 timer 启动影子（零交易密钥）+ 只读路由；异常边界（策略异常内部降级不抛主进程）
 
 ## 4. 安全检查
 - [√] 4.1 影子期零交易权限核验（无下单路径/无账户密钥调用）；子账户 key 只交易不提现；探针 tiny real 前需用户确认

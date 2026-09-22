@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-22
+
+### 修复（Review1：影子决断有效性问题，部署前必修 P0/P1 全部落地）
+- **P0-1 资金费率逐时段累计**：改用 `fundingHistory` 小时级点位，按持仓时段逐段累计（不再"平仓时费率×全程"）；数据不可用时记 `fundingMissingMs`（绝不当 0）；决断门新增"资金费率数据完整度 ≥99%"闸门
+- **P0-2 断档 K 线补处理**：`computePendingBars` 回放 lastBarKey 之后所有已收盘 5M（升序逐根、按 as-of 切片特征无未来函数）；超出回放窗口的缺口计入覆盖率不伪造；每根落盘防重复驱动
+- **P0-3 未平仓 MTM 入口径**：`getMarkToMarket`（浮动盈亏-预估退出成本-累计资金费）纳入净值/回撤/当日亏损；决断门不再被历史和平掩盖
+- **P0-4 有效覆盖率**：以 processedBars/expectedBars 计算 coveragePct 与有效天数（取代墙上时间）；新增"覆盖率≥99% / 最大缺口≤15 分钟"闸门
+- **P1-1 ATR 周期一致性**：策略 ATR 基准改 1H（与回测一致）；5M ATR 不再用于止损/间距/移动止损；记录 atrSource/atrValue
+- **P1-2 盘口滑点口径（Option A）**：改名 `bookObservedSlippage`——仅诊断观测不进入净 PnL；日报同时展示情景 PnL 与观测分布，样本 30-50 后再评审是否替换
+- **P2**：regime 字段更名（htfAvailable/mtfAvailable/htfMtfAligned）；基差改有符号+分布（均值/|P95|/溢价占比）；请求计数与单次重试；参数版本化 `shadow-v1.7.1`（Strict 对齐回测 ADX22/0.8/1.5）
+
+### 测试
+- `test/shadow-quality.test.js` 新增 18 例（费率分段/缺失/补处理/MTM/覆盖率/资金完整度/ATR 来源/盘口口径/重启恢复/基差统计）；npm test 全绿
+
 ## [1.7.0] - 2026-09-22
 
 ### 新增（趋势单边网格 · 阶段0+阶段1：影子优先验证）

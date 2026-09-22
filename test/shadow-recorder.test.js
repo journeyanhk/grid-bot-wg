@@ -9,7 +9,8 @@ let passed = 0, failed = 0;
 const T = [];
 const test = (name, fn) => T.push([name, fn]);
 
-const FEATURES = { atr5m: 10, structureLow: 95, structureHigh: 105 };
+// 策略 ATR 基准 = 1H（Review：与回测一致）；测试中 atr1h=atr5m=10 便于断言
+const FEATURES = { atr5m: 10, atr1h: 10, structureLow: 95, structureHigh: 105 };
 const SIG_LONG = { score: 65, direction: 'long', ts: 0 };
 const candle = (o, h, l, c, t = 0) => ({ time: t, open: o, high: h, low: l, close: c, volume: 1 });
 const r2 = (rec) => rec.configs.get('r2fast');
@@ -33,6 +34,7 @@ test('多头全生命周期：入场 → TP1 → TP2 全平（tp_full）+ 三组
   assert.equal(pos.entryPrice, 100);
   assert.equal(pos.initialStop, 90, '止损 = 入场 - 1.0×ATR（与结构位取更宽：min(90, 95-2)=90）');
   assert.equal(pos.R, 10);
+  assert.equal(pos.atrSource, '1h', 'ATR 基准必须是 1H（与回测一致）');
 
   // K线A：high 109 触及 TP1(108)，移动止损升至 109-12=97
   rec.onBar({ candle5m: candle(100, 109, 101, 108, 3), signal: { score: 65, direction: 'long' }, barKey: 3, features: FEATURES });
