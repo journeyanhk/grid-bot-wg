@@ -24,6 +24,21 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review6 复审：风控硬约束，2026-09-23）
+- P0 风控硬拦截：适配器新增 `_assertRiskAllowsOpening()`，REDUCE_ONLY/HALT/LOCKED/BREACHED 一律拒绝
+  **开仓**（reduce-only 降风险操作放行）；`setLeverage` 仅 OK/WARNING 允许——bot 未运行或手动 `/start`
+  都无法绕过（风控不再是"可计算可展示"，而是不可绕过的交易约束）
+- P0 `/api/propr/start` 提前拒绝：风控非 OK/WARNING（或存在 actionError）时直接 400，不进入铺单流程
+- P1 权益口径统一为 `equity`（`account.marginBalance`，含未实现盈亏），缺失才回退 `balance`；
+  字段更名 `currentEquity/startOfDayEquity`；未实现亏损现在能正确触发风控
+- P1 动作失败不静默：`actionError` 记录 + critical 通知 + 面板透出 + **后续 tick 自动重试**降风险动作
+- P1 恢复解除暂停：新增 `GridBot.resumeOpening()`，LOCKED/REDUCE_ONLY → OK 时显式清除风控暂停
+- P1 `init()` 完成后即置 `lastApiOkAt`（重连成功的时间语义准确）
+- 测试：`propr-risk.test.js` 重写（权益口径/未实现亏损/动作失败重试/恢复解除暂停）、
+  `propr-order-state.test.js` 增硬拦截用例、`bot.test.js` 增「未运行时忽略 fill」用例；
+  `npm test` 全绿 + lint 0 error + HTML 核对通过
+- 真实 sim-write 冒烟：HALT 在发往 API 前拒绝开仓；REDUCE_ONLY 下 reduce-only 放行
+
 ### 新增（Propr 风控层 + 对账恢复，2026-09-23）
 - `src/risk/propr-challenge.js` 挑战风控层：UTC 日切（00:00 UTC 重置日初权益）、权益可用性/新鲜度、
   日损与总回撤分级（纯函数 `evaluateRisk`，优先级 BREACHED > LOCKED > HALT > REDUCE_ONLY > WARNING > OK）；

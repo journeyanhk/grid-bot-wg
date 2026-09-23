@@ -750,6 +750,13 @@ const server = http.createServer(async (request, res) => {
         ? proprRisk.getState()
         : { status: null, note: '当前模式未启用挑战风控（仅 sim-write/challenge）' });
     }
+    // 风控非正常时提前拒绝启动：避免先改运行状态、再在铺单阶段逐个失败（Review6 P0）
+    if (p === '/api/propr/start' && request.method === 'POST') {
+      const st = proprRisk?.getState();
+      if (st?.status && st.status !== 'OK' && st.status !== 'WARNING') {
+        return send(res, 400, { error: `Propr 风控状态 ${st.status}（${st.statusLabel || ''}）${st.actionError ? '，且上次风控动作失败：' + st.actionError : ''}，拒绝启动网格` });
+      }
+    }
     if (p.startsWith('/api/propr/')) {
       return await proprHandler(request, res, p.slice('/api/propr'.length), url);
     }

@@ -2690,7 +2690,8 @@ function renderProprCard(d) {
       const color = r.status === 'OK' ? 'var(--grn)' : r.status === 'WARNING' ? 'var(--yel)' : 'var(--red)';
       riskEl.textContent = `挑战风控：${r.statusLabel || r.status} · 日损 ${r.dailyLossPct ?? '—'}%（用量 ${usage(r.dailyUsage)}）`
         + ` · 回撤 ${r.drawdownPct ?? '—'}%（用量 ${usage(r.drawdownUsage)}）`
-        + (r.status !== 'OK' && r.reason ? ` · ${r.reason}` : '');
+        + (r.status !== 'OK' && r.reason ? ` · ${r.reason}` : '')
+        + (r.actionError ? ` · ⚠️ 动作失败：${r.actionError}` : '');
       riskEl.style.color = color;
     }
   }

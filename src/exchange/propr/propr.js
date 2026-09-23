@@ -145,6 +145,7 @@ export class ProprExchange extends EventEmitter {
 
     this.dataSource = 'real';
     this.lastOkAt = Date.now();
+    this.lastApiOkAt = this.lastOkAt; // 初始化/对账全部完成后即视为 API 健康（Review6）
     this.start();
     logger.info('propr', `已连接 Propr（${this.mode}），账户 ${maskAccountId(this.accountId)}，BTC 最大杠杆 ${this.market.maxLeverage}x`);
     return true;
@@ -488,6 +489,18 @@ export class ProprExchange extends EventEmitter {
     if (this.ordersSnapshotStale) throw new Error(`Propr 活动订单快照不完整（${this.ordersSnapshotError}），拒绝开仓`);
   }
 
+  /**
+   * 挑战风控硬拦截（Review6 P0）：只有 OK/WARNING 允许开仓。
+   * REDUCE_ONLY/HALT/LOCKED/BREACHED 一律拒绝**开仓**；reduce-only 降风险操作不走本检查。
+   * 关键：风控状态写入 exchange.riskState 后，即便 bot 未运行、用户手动 /start，也无法绕过。
+   */
+  _assertRiskAllowsOpening() {
+    const status = this.riskState?.status;
+    if (status && status !== 'OK' && status !== 'WARNING') {
+      throw new Error(`Propr 风控状态 ${status}，拒绝开仓（仅允许 reduce-only 降风险操作）`);
+    }
+  }
+
   _markOrdersSnapshotStale(err) {
     this.ordersSnapshotStale = true;
     this.ordersSnapshotError = mapProprError(err).message;
@@ -602,6 +615,7 @@ export class ProprExchange extends EventEmitter {
 
   async placeLimitOrder(order = {}) {
     this._assertCanOpen();
+    if (!order.reduceOnly) this._assertRiskAllowsOpening();
     const marketId = String(order.marketId ?? this.base);
     if (marketId !== this.base) throw new Error(`Propr 适配器仅支持 ${this.base}，收到 ${marketId}`);
     const price = roundPrice(order.price, this.market);
@@ -628,6 +642,7 @@ export class ProprExchange extends EventEmitter {
   async placeLimitOrders(orders = []) {
     this._assertCanOpen();
     if (!orders.length) return [];
+    if (orders.some((o) => !o.reduceOnly)) this._assertRiskAllowsOpening();
     const prepared = orders.map((order) => {
       const marketId = String(order.marketId ?? this.base);
       if (marketId !== this.base) throw new Error(`Propr 适配器仅支持 ${this.base}，收到 ${marketId}`);
@@ -790,6 +805,10 @@ export class ProprExchange extends EventEmitter {
 
   async setLeverage(_marketId, leverage) {
     this._assertCanOpen();
+    const riskStatus = this.riskState?.status;
+    if (riskStatus && riskStatus !== 'OK' && riskStatus !== 'WARNING') {
+      throw new Error(`Propr 风控状态 ${riskStatus}，禁止修改杠杆`);
+    }
     const lev = Math.floor(Number(leverage));
     if (!Number.isFinite(lev) || lev < 1) throw new Error(`杠杆非法: ${leverage}`);
     if (lev > this.market.maxLeverage) throw new Error(`杠杆 ${lev} 超过 ${this.base} 上限 ${this.market.maxLeverage}`);

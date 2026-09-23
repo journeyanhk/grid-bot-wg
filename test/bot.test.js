@@ -422,6 +422,19 @@ test('重试空快照守卫：期望有单但快照为空 -> 本轮不重挂（�
   assert.ok(bot.alerts.some((a) => a.message.includes('安全重试暂缓')), '应发出安全重试暂缓告警');
 });
 
+// Review6：适配器重连会补偿断线期间的成交（emit fill）；若 bot 已停止，
+// _handleFill 必须直接忽略，绝不补单或改动统计。
+test('未运行时收到 fill（如适配器重连补偿）必须忽略：不补单、不改统计', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  assert.equal(bot.running, false);
+  ex.emit('fill', { orderId: 'x1', marketId: 1, side: 'buy', price: 140, sizeBase: 1, levelIndex: 4 });
+  await sleep(10);
+  assert.equal(bot.stats.buys, 0, '未运行时不得记成交');
+  assert.equal(bot.active.size, 0, '未运行时不得补单');
+  assert.equal(ex.orders.size, 0, '交易所侧不得出现任何新单');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

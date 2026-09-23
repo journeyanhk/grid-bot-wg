@@ -1731,6 +1731,16 @@ export class GridBot {
   }
 
   /**
+   * 解除由风控层设置的入场暂停（只清暂停时间戳，不撤单、不影响网格运行）。
+   * 与 pauseOpening 配对：风控恢复（LOCKED/REDUCE_ONLY → OK）时调用，避免残留暂停到 24h/日切。
+   */
+  resumeOpening(reason = '') {
+    if (!this._refillPausedUntil) return;
+    this._refillPausedUntil = 0;
+    this._alert(`▶ 已恢复入场侧${reason ? '（' + reason + '）' : ''}。`, { level: 'info', key: 'risk-resume' });
+  }
+
+  /**
    * 成交流哨兵（文档力荐、回测正期望的免费传感器）：连续同向【入场】成交 = 价格
    * 正在切穿梯子。1h 内同向入场 ≥N 格 → 只发通知不碰订单（动作型在 BTC 网格上负期望）。
    */

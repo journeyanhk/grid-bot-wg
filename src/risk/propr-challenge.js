@@ -3,13 +3,15 @@
 // 职责：
 //  - UTC 日切（每日 00:00 UTC 重置日初权益；不用本地时区/进程启动时间）；
 //  - 内部日损 / 总回撤分级（严于平台 3% / 6%，留足安全边际）；
-//  - 权益新鲜度（权威字段 + 本地拉取时刻，过期即锁定开仓）；
+//  - **权益口径统一为 equity（account.marginBalance，含未实现盈亏）**，不可用则 LOCKED；
 //  - 平台状态 breach（挑战 failed/passed → 停机）；
 //  - 按级别向 bot 下发指令（预警 / 暂停开仓 / 撤单平仓停机），并把状态写入
-//    `exchange.riskState` 供仪表盘展示。
+//    `exchange.riskState`（适配器据此**硬拦截开仓**，手动 /start 也无法绕过）；
+//  - 动作失败不静默：记录 `actionError` + critical 通知，并在后续 tick 重试降风险动作。
 //
 // 设计要点：分级计算是纯函数 `evaluateRisk()`（可单测、无副作用）；本类只做 I/O 与动作编排。
 import { logger } from '../log.js';
+import { redactSecrets } from '../redact.js';
 
 export const STATUS = Object.freeze({
   OK: 'OK',
@@ -41,13 +43,14 @@ export function nextUtcDayStart(now = Date.now()) {
 }
 
 /**
- * 纯计算：给定权益与阈值返回风险评级（无 I/O）。
+ * 纯计算：给定**权益**与阈值返回风险评级（无 I/O）。
+ * 口径：equity = account.marginBalance（含未实现盈亏），与 highWaterMark 同口径。
  * `dailyLossPct` / `drawdownPct` 均为「负数表示亏损/回撤」。
  * 优先级：BREACHED > LOCKED > HALT > REDUCE_ONLY > WARNING > OK。
  */
 export function evaluateRisk({
-  balance,
-  startOfDayBalance,
+  equity,
+  startOfDayEquity,
   highWaterMark,
   internalDailyStopPct = 0.01,
   internalMaxDrawdownPct = 0.03,
@@ -60,14 +63,14 @@ export function evaluateRisk({
   if (!equityUsable) {
     return { status: STATUS.LOCKED, reason: '权益不可用或已过期（禁止开仓）', dailyLossPct: null, drawdownPct: null };
   }
-  const bal = Number(balance);
-  const sod = Number(startOfDayBalance);
+  const eq = Number(equity);
+  const sod = Number(startOfDayEquity);
   const hwm = Number(highWaterMark);
-  if (![bal, sod, hwm].every(Number.isFinite) || sod <= 0 || hwm <= 0) {
-    return { status: STATUS.LOCKED, reason: '权益/日初/高水位数值不可用', dailyLossPct: null, drawdownPct: null };
+  if (![eq, sod, hwm].every(Number.isFinite) || sod <= 0 || hwm <= 0) {
+    return { status: STATUS.LOCKED, reason: '权益/日初权益/高水位数值不可用', dailyLossPct: null, drawdownPct: null };
   }
-  const dailyLossPct = (bal - sod) / sod;
-  const drawdownPct = (bal - hwm) / hwm;
+  const dailyLossPct = (eq - sod) / sod;
+  const drawdownPct = (eq - hwm) / hwm;
   const dStop = Math.abs(Number(internalDailyStopPct));
   const dHalt = Math.abs(Number(internalMaxDrawdownPct));
 
@@ -96,11 +99,13 @@ export class ProprChallengeRisk {
     this.platformMaxDrawdownPct = Number(cfg.platformMaxDrawdownPct ?? 0.06);
     this.pollMs = Number(cfg.riskPollMs ?? 30_000);
 
-    this.initialBalance = null;
-    this.startOfDayBalance = null;
+    this.initialEquity = null;
+    this.startOfDayEquity = null;
     this._dayKey = null;
     this.status = null;
     this.reason = null;
+    this.actionError = null;      // 动作失败原因（不为空则每 tick 重试降风险动作）
+    this._pausedByRisk = false;   // 是否由本层暂停过开仓（恢复时据此解除）
     this._timer = null;
   }
 
@@ -123,8 +128,10 @@ export class ProprChallengeRisk {
       status: this.status,
       statusLabel: STATUS_LABEL[this.status] || null,
       reason: this.reason,
-      initialBalance: this.initialBalance,
-      startOfDayBalance: this.startOfDayBalance,
+      actionError: this.actionError,
+      initialEquity: this.initialEquity,
+      startOfDayEquity: this.startOfDayEquity,
+      currentEquity: this.currentEquity ?? null,
       balance: this.balance ?? null,
       highWaterMark: this.highWaterMark ?? null,
       dailyLossPct: pct(this.dailyLossPct),
@@ -147,20 +154,22 @@ export class ProprChallengeRisk {
     const ex = this.exchange;
     if (!ex || ex.dataSource == null) return null;
 
+    // 权益口径：marginBalance（含未实现盈亏），缺失才回退 balance（Review6 P1）
+    const currentEquity = Number.isFinite(Number(ex.equity)) ? Number(ex.equity) : Number(ex.balance);
+
     const dayStart = utcDayStart();
     if (this._dayKey !== String(dayStart)) {
       this._dayKey = String(dayStart);
-      const bal = Number(ex.balance);
-      if (Number.isFinite(bal)) this.startOfDayBalance = bal;
-      this.log.info('propr-risk', `UTC 日切：日初权益重置为 ${this.startOfDayBalance}`);
+      if (Number.isFinite(currentEquity)) this.startOfDayEquity = currentEquity;
+      this.log.info('propr-risk', `UTC 日切：日初权益重置为 ${this.startOfDayEquity}`);
     }
-    if (this.initialBalance == null) this.initialBalance = Number(ex.startingBalance) || Number(ex.balance) || null;
-    if (this.startOfDayBalance == null) this.startOfDayBalance = Number(ex.balance) || null;
+    if (this.initialEquity == null) this.initialEquity = Number(ex.startingBalance) || (Number.isFinite(currentEquity) ? currentEquity : null);
+    if (this.startOfDayEquity == null && Number.isFinite(currentEquity)) this.startOfDayEquity = currentEquity;
 
     const equityUsable = typeof ex.isEquityStale === 'function' ? !ex.isEquityStale() : false;
     const r = evaluateRisk({
-      balance: ex.balance,
-      startOfDayBalance: this.startOfDayBalance,
+      equity: currentEquity,
+      startOfDayEquity: this.startOfDayEquity,
       highWaterMark: ex.highWaterMark,
       internalDailyStopPct: this.internalDailyStopPct,
       internalMaxDrawdownPct: this.internalMaxDrawdownPct,
@@ -168,6 +177,7 @@ export class ProprChallengeRisk {
       attemptStatus: ex.attemptStatus ?? 'active',
     });
 
+    this.currentEquity = Number.isFinite(currentEquity) ? currentEquity : null;
     this.balance = Number(ex.balance);
     this.highWaterMark = Number(ex.highWaterMark);
     this.dailyLossPct = r.dailyLossPct;
@@ -181,40 +191,59 @@ export class ProprChallengeRisk {
     this.status = r.status;
     this.exchange.riskState = this.getState();
 
-    if (changed) {
+    // 状态变化或上次动作失败 → 执行/重试动作（失败不静默）
+    if (changed || this.actionError) {
       this.log.warn('propr-risk', `风控状态 ${r.status}：${r.reason}`);
-      await this._apply(r.status, r.reason).catch(() => {});
+      try {
+        await this._apply(r.status, r.reason);
+        this.actionError = null;
+      } catch (err) {
+        this.actionError = redactSecrets(err?.message || String(err));
+        this.exchange.riskState = this.getState();
+        this.log.error('propr-risk', `风控动作执行失败（将在下一轮重试）：${this.actionError}`);
+        this._send('critical', `🔴 Propr 风控动作执行失败，请立即人工确认挂单与持仓：${this.actionError}`, 'propr:risk:action-failed');
+      }
     }
     return this.getState();
   }
 
+  _send(level, message, key) {
+    try { this.notifier?.send({ source: 'propr', level, message, title: 'Propr 风控', key }); } catch { /* 通知失败不影响 */ }
+  }
+
   async _apply(status, reason) {
     const bot = this.bot;
-    const send = (level, msg, key) => {
-      try { this.notifier?.send({ source: 'propr', level, message: msg, title: 'Propr 风控', key }); } catch { /* 通知失败不影响 */ }
-    };
     switch (status) {
       case STATUS.OK:
-        send('info', '✅ Propr 挑战风控恢复正常。', 'propr:risk:ok:recover');
+        // LOCKED/REDUCE_ONLY 期间可能设置过入场暂停：恢复时必须显式解除，避免残留到 24h/日切
+        if (this._pausedByRisk) {
+          try { bot?.resumeOpening?.('Propr 风控恢复正常'); } catch { /* ignore */ }
+          this._pausedByRisk = false;
+        }
+        this._send('info', '✅ Propr 挑战风控恢复正常。', 'propr:risk:ok:recover');
         break;
       case STATUS.WARNING:
-        send('warn', `⚠️ Propr 风控预警：${reason}`, 'propr:risk:warn');
+        this._send('warn', `⚠️ Propr 风控预警：${reason}`, 'propr:risk:warn');
         break;
       case STATUS.REDUCE_ONLY:
         try { bot?.pauseOpening(nextUtcDayStart(), 'Propr 内部日损线：仅减仓至 UTC 日切'); } catch { /* ignore */ }
-        send('critical', `🔴 Propr 日损触及内部线，已暂停开仓（仅减仓，UTC 日切自动恢复）：${reason}`, 'propr:risk:reduce');
+        this._pausedByRisk = true;
+        this._send('critical', `🔴 Propr 日损触及内部线，已暂停开仓（仅减仓，UTC 日切自动恢复）：${reason}`, 'propr:risk:reduce');
         break;
       case STATUS.HALT:
-        try { await bot?.stop({ closePosition: true }); } catch { /* ignore */ }
-        send('critical', `🔴 Propr 总回撤触及内部线，已撤单 + 平仓 + 停机：${reason}`, 'propr:risk:halt');
+        await bot?.stop({ closePosition: true });
+        this._pausedByRisk = false;
+        this._send('critical', `🔴 Propr 总回撤触及内部线，已撤单 + 平仓 + 停机：${reason}`, 'propr:risk:halt');
         break;
       case STATUS.LOCKED:
         try { bot?.pauseOpening(Date.now() + 24 * 3600_000, 'Propr 权益不可用/过期：仅减仓'); } catch { /* ignore */ }
-        send('critical', `🔴 Propr 权益不可用/过期，已暂停开仓（等待恢复）：${reason}`, 'propr:risk:locked');
+        this._pausedByRisk = true;
+        this._send('critical', `🔴 Propr 权益不可用/过期，已暂停开仓（恢复后自动解除）：${reason}`, 'propr:risk:locked');
         break;
       case STATUS.BREACHED:
-        try { await bot?.stop({ closePosition: false }); } catch { /* ignore */ }
-        send('critical', `🔴 Propr 挑战已失效（${reason}），策略已停止，请检查账户。`, 'propr:risk:breached');
+        await bot?.stop({ closePosition: false });
+        this._pausedByRisk = false;
+        this._send('critical', `🔴 Propr 挑战已失效（${reason}），策略已停止，请检查账户。`, 'propr:risk:breached');
         break;
     }
   }

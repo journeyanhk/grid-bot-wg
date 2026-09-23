@@ -205,6 +205,32 @@ async function main() {
     await assert.rejects(() => ex.setLeverage('BTC', 99), /超过/);
     ex.stop();
   }
+
+  {
+    // Review6 P0：风控状态必须形成下单硬拦截（bot 未运行/手动 /start 也无法绕过）
+    const ex = await freshExchange();
+    const opening = { marketId: 'BTC', side: 'buy', price: 80000, sizeBase: 0.001, reduceOnly: false };
+    const closing = { marketId: 'BTC', side: 'sell', price: 100000, sizeBase: 0.001, reduceOnly: true };
+
+    for (const status of ['REDUCE_ONLY', 'HALT', 'LOCKED', 'BREACHED']) {
+      ex.riskState = { status };
+      await assert.rejects(() => ex.placeLimitOrder(opening), /风控状态/, `${status} 必须拒绝开仓`);
+      await assert.rejects(() => ex.placeLimitOrders([opening]), /风控状态/, `${status} 必须拒绝批量开仓`);
+      const res = await ex.placeLimitOrder(closing);
+      assert.ok(res.orderId, `${status} 下 reduce-only 降风险操作必须放行`);
+    }
+
+    // setLeverage 受风控状态限制（仅 OK/WARNING 允许）
+    ex.riskState = { status: 'REDUCE_ONLY' };
+    await assert.rejects(() => ex.setLeverage('BTC', 1), /风控状态/);
+
+    // WARNING 允许开仓；风控未启用（null，如 paper/shadow）也允许
+    ex.riskState = { status: 'WARNING' };
+    assert.ok((await ex.placeLimitOrder(opening)).orderId);
+    ex.riskState = null;
+    assert.ok((await ex.placeLimitOrder(opening)).orderId);
+    ex.stop();
+  }
 }
 
 main()

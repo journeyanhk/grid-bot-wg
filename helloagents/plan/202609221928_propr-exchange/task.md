@@ -121,6 +121,16 @@
   > 备注: 已含状态/日损·回撤使用率/原因/权益来源；一键解锁留待人工解锁接口（`unlockTrading` 已在适配器提供）
 - [ ] 7.4 【可选】AI 集成：Propr 目前独立于 AI 快照流（`EXNAMES` 与 per-key JSON 按 5 所硬编码，且 marketId 为字符串），如需纳入需扩展 AI 提示词与面板
 
+## 7R. Review6 复审修复（风控硬约束，2026-09-23）
+- [√] 7R.1 【P0】风控硬拦截：适配器 `_assertRiskAllowsOpening()`——REDUCE_ONLY/HALT/LOCKED/BREACHED 一律拒绝**开仓**（reduce-only 降风险操作放行）；`setLeverage` 仅 OK/WARNING 允许；即使 bot 未运行、手动 `/start` 也无法绕过
+- [√] 7R.2 【P0】`/api/propr/start` 提前拒绝：风控非 OK/WARNING（或存在 actionError）时不进入铺单流程，避免"先改运行态再逐个失败"
+- [√] 7R.3 【P1】权益口径统一：`evaluateRisk` 改用 `equity`（`account.marginBalance`，含未实现盈亏），缺失才回退 `balance`；字段更名 `currentEquity/startOfDayEquity`
+- [√] 7R.4 【P1】动作失败不静默：`actionError` 记录 + critical 通知 + 面板透出，并在后续 tick **自动重试**降风险动作
+- [√] 7R.5 【P1】恢复解除暂停：新增 `GridBot.resumeOpening()`，LOCKED/REDUCE_ONLY → OK 时显式清除风控暂停（避免残留到 24h/日切）
+- [√] 7R.6 【P1】`init()` 全部对账完成后即置 `lastApiOkAt`（重连成功的时间语义准确）
+- [√] 7R.7 测试补齐：风控分级（权益口径/未实现亏损）、动作失败重试、恢复解除暂停、适配器硬拦截（4 状态 × 开仓拒绝 + reduce-only 放行 + 杠杆限制）、**bot 未运行时忽略 fill**
+- [√] 7R.8 真实 sim-write 硬拦截冒烟：HALT 在发往 API 之前拒绝开仓；REDUCE_ONLY 下 reduce-only 放行
+
 ## 8. 对账、恢复与异常
 - [√] 8.1 在 `src/exchange/propr/propr.js` 实现断线重连与成交补偿（`reconnect()` → `init({resume:true})` 全量成交对账，emit 断线期间缺失 fill，tradeId 去重保证只补一次），依赖任务 4.4
 - [√] 8.2 处理部分成交（每笔成交按实际成交量发 fill，bot 侧按实际量补同量对腿；尘埃仓守卫沿用 bot），依赖任务 4.4
