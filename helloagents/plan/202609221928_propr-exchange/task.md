@@ -43,6 +43,15 @@
 - [√] 2R.7 【Review2 新增】`equity` 命令：开/持仓/平仓后按 0/10/30/60s 采样权益刷新时效（实测：balance/available 即时、uPnL ≤30s、`updatedAt` 不可用）
 - [√] 2R.8 契约文档收窄措辞并拆分「已冻结 / 待验证」两节（`docs/propr-api-contract.md#7`）
 
+## 2S. Review2 复审修复（只读可靠性，2026-09-23）
+- [√] 2S.1 【P1】活动挂单纳入 `pending/open/partially_filled`（`Promise.allSettled` 多状态 + 去重；全失败才抛）
+- [√] 2S.2 【P1】成交轮询改分页 + 时间游标 + 30s 重叠窗口（常规 ≤5 页/500 条，重连走全量 ≤20 页）
+- [√] 2S.3 【P1】shadow 账户/持仓读取失败保留上次快照并标 stale，不再假报空仓
+- [√] 2S.4 【P1】Propr/Shadow 的 error 事件统一走 `mapProprError`（分类 + 脱敏）
+- [√] 2S.5 【P2】`PR_FEE_RATE` 默认留空 → 优先实测 maker 费率；`getTrades` 返回内部视图 + 新增 `getRawTrades`
+- [√] 2S.6 【P2】`netPositionFromViews` 注释明确仅适用 net，多条同向按数量加权 entryPrice
+- [√] 2S.7 新增 `test/propr-shadow.test.js`；`propr.test.js` 增补活动状态/150 条成交/内部视图/脱敏事件
+
 ## 3. 只读适配器与 Shadow（Review 2）
 > 已完成（2026-09-23）：`market.js`/`mapper.js`/`propr.js`（只读）/`shadow.js`/`index.js` 全量落地，
 > 真实链路冒烟通过（shadow 与 sim-write 的 init 均无写请求）。`setLeverage` 属写路径，移至 Review 3（4.6）。

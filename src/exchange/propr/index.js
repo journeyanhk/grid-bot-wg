@@ -8,9 +8,11 @@ import { ProprExchange } from './propr.js';
 
 export function createExchange(cfg = {}) {
   validateProprConfig(cfg);
+  // 费率留空（NaN）时不覆盖市场实测值（maker 0.00015）
+  const feeRate = Number.isFinite(cfg.feeRate) ? cfg.feeRate : undefined;
 
   if (cfg.mode === 'paper') {
-    return new PaperExchange({ startBalance: cfg.startBalance, feeRate: cfg.feeRate });
+    return new PaperExchange({ startBalance: cfg.startBalance, feeRate });
   }
   if (cfg.mode === 'shadow') {
     return new ShadowExchange(cfg);

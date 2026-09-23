@@ -9,7 +9,7 @@ import { PaperExchange } from './paper.js';
 import { ProprClient } from './propr-sdk.js';
 import { ProprReadOnlyError, ProprStartupError } from './errors.js';
 import { createDispatcher } from '../../proxy.js';
-import { mapProprPosition, netPositionFromViews } from './mapper.js';
+import { mapProprPosition, mapProprError, netPositionFromViews } from './mapper.js';
 import { buildMarket } from './market.js';
 import { maskAccountId } from '../../redact.js';
 import { logger } from '../../log.js';
@@ -69,6 +69,13 @@ export class ShadowExchange extends PaperExchange {
     this.proprEquity = null;
     this.proprPositions = [];
     this.proprNetPosition = null;
+    // 快照新鲜度：读取失败时保留上次快照并标 stale，绝不伪装成空仓/零权益（Review2 P1）
+    this.proprAccountStale = false;
+    this.proprAccountError = null;
+    this.proprEquityFreshAt = 0;
+    this.proprPositionStale = false;
+    this.proprPositionError = null;
+    this.proprPositionFreshAt = 0;
     this._realPriceTimer = null;
     this._accountTimer = null;
   }
@@ -96,10 +103,14 @@ export class ShadowExchange extends PaperExchange {
     const marginConfig = await raw.getMarginConfig(this.base);
     const leverageLimits = await raw.getLeverageLimits();
     const px = await this._fetchMidPrice().catch(() => 0);
-    this._setMarkets([buildMarket({ base: this.base, quote: 'USDC', marginConfig, leverageLimits, markPrice: px })]);
+    this.market = buildMarket({ base: this.base, quote: 'USDC', marginConfig, leverageLimits, markPrice: px });
+    this._setMarkets([this.market]);
     if (px > 0) this.prices.set(this._marketId(), px);
+    // 费率：配置留空时用实测 maker 费率（Review2 P2）
+    this.feeRate = Number.isFinite(this._cfg.feeRate) ? this._cfg.feeRate : this.market.makerFee;
 
     await this._refreshProprAccount();
+    if (this.proprAccountStale) throw new ProprStartupError('Propr 账户权益读取失败，拒绝启动 shadow');
     this.dataSource = 'real';
     this.lastOkAt = Date.now();
     this.start();
@@ -150,28 +161,59 @@ export class ShadowExchange extends PaperExchange {
       this.emit('price', { marketId: id, price: px });
       this.matchTick(); // 用真实价格本地撮合，不写 Propr
     } catch (err) {
-      logger.warn('propr', `shadow 行情异常: ${err?.message ?? err}`);
-      if (this.listenerCount('error') > 0) this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      this._emitSafeError(err);
     }
   }
 
-  /** 只读刷新 Propr 账户快照（权益/持仓），仅用于观察与展示。 */
+  /** 统一安全错误事件（分类 + 脱敏），供 server/SSE/通知/AI 消费。 */
+  _emitSafeError(err) {
+    const mapped = mapProprError(err);
+    logger.warn('propr', `shadow 异常(${mapped.kind}): ${mapped.message}`, mapped);
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', Object.assign(new Error(mapped.message), mapped));
+    }
+  }
+
+  /**
+   * 只读刷新 Propr 账户快照（权益/持仓），仅用于观察与展示。
+   * 失败语义：保留上一次已知快照并置 stale，绝不把失败伪装成"空仓/零权益"（Review2 P1）。
+   */
   async _refreshProprAccount() {
-    const attempt = await this.readClient.getChallengeAttempt(this.attemptId);
-    const acc = attempt?.account || {};
-    this.proprEquity = {
-      balance: Number(acc.balance ?? 0),
-      marginBalance: Number(acc.marginBalance ?? 0),
-      availableBalance: Number(acc.availableBalance ?? 0),
-      highWaterMark: Number(acc.highWaterMark ?? 0),
-      totalUnrealizedPnl: Number(acc.totalUnrealizedPnl ?? 0),
-      currency: acc.currency ?? 'USDC',
-      equitySource: 'propr_account',
-      equityFreshAt: Date.now(),
-    };
-    const positions = await this.readClient.getPositions({ base: this.base, status: 'open' }).catch(() => []);
-    this.proprPositions = positions.map(mapProprPosition);
-    this.proprNetPosition = netPositionFromViews(this.proprPositions);
+    try {
+      const attempt = await this.readClient.getChallengeAttempt(this.attemptId);
+      const acc = attempt?.account || {};
+      this.proprEquity = {
+        balance: Number(acc.balance ?? 0),
+        marginBalance: Number(acc.marginBalance ?? 0),
+        availableBalance: Number(acc.availableBalance ?? 0),
+        highWaterMark: Number(acc.highWaterMark ?? 0),
+        totalUnrealizedPnl: Number(acc.totalUnrealizedPnl ?? 0),
+        currency: acc.currency ?? 'USDC',
+        equitySource: 'propr_account',
+        equityFreshAt: Date.now(),
+      };
+      this.proprAccountStale = false;
+      this.proprAccountError = null;
+      this.proprEquityFreshAt = Date.now();
+    } catch (err) {
+      this.proprAccountStale = true;
+      this.proprAccountError = mapProprError(err).message;
+      this._emitSafeError(err);
+    }
+
+    try {
+      const positions = await this.readClient.getPositions({ base: this.base, status: 'open' });
+      this.proprPositions = positions.map(mapProprPosition);
+      this.proprNetPosition = netPositionFromViews(this.proprPositions);
+      this.proprPositionStale = false;
+      this.proprPositionError = null;
+      this.proprPositionFreshAt = Date.now();
+    } catch (err) {
+      // 保留上次已知持仓（不回退为空数组）
+      this.proprPositionStale = true;
+      this.proprPositionError = mapProprError(err).message;
+      this._emitSafeError(err);
+    }
     this.lastOkAt = Date.now();
   }
 }

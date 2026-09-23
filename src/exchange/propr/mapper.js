@@ -129,7 +129,9 @@ export function mapProprMargin(raw = {}) {
 }
 
 /**
- * 多空视图 → 净仓视图（Propr 为 net，通常只有一条；兼容两条时做净额）。
+ * 多空视图 → 净仓视图。**仅适用于 Propr net 模式**（已实测：服务端按净仓归一化，
+ * 通常只返回一条）。若未来用于 hedge 数据，不能只取第一条——entryPrice 需按方向分别加权，
+ * 本函数不做该假设，故不应复用于双向持仓。
  * @returns {null | {sizeBase:number, entryPrice:number, unrealizedPnl:number, ...}}
  */
 export function netPositionFromViews(views = []) {
@@ -139,14 +141,19 @@ export function netPositionFromViews(views = []) {
   const shortQty = short.reduce((s, p) => s + Number(p.sizeBase ?? p.quantity ?? 0), 0);
   const sizeBase = longQty - shortQty;
   if (!sizeBase) return null;
-  const dominant = sizeBase > 0 ? long[0] : short[0];
+  const side = sizeBase > 0 ? long : short;
+  const sideQty = side.reduce((s, p) => s + Number(p.sizeBase ?? p.quantity ?? 0), 0);
+  const entryPrice = sideQty
+    ? side.reduce((s, p) => s + Number(p.entryPrice ?? 0) * Number(p.sizeBase ?? p.quantity ?? 0), 0) / sideQty
+    : 0;
+  const dominant = side[0];
   if (!dominant) return null;
   return {
     positionId: dominant.positionId ?? null,
     marketId: dominant.marketId ?? dominant.base ?? null,
     positionSide: sizeBase > 0 ? 'long' : 'short',
     sizeBase,
-    entryPrice: Number(dominant.entryPrice ?? 0),
+    entryPrice,
     markPrice: Number(dominant.markPrice ?? 0),
     liquidationPrice: dominant.liquidationPrice ?? null,
     unrealizedPnl: views.reduce((s, p) => s + Number(p.unrealizedPnl ?? 0), 0),

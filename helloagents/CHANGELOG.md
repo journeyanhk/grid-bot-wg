@@ -24,6 +24,20 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review2 复审：只读可靠性强化，2026-09-23）
+- P1 活动挂单纳入 `pending/open/partially_filled`（只查 `open` 会漏刚提交/部分成交单 → 对账误判
+  不存在 → 重复补单）；任一状态查询失败不致命，全部失败才抛出
+- P1 成交轮询改「分页 + 时间游标 + 30s 重叠窗口」：常规轮询最多 5 页（500 条），重连/恢复走全量
+  （最多 20 页），不再只取最近 50 条
+- P1 shadow 账户/持仓读取失败保留上次快照并标 stale（`proprAccountStale/proprPositionStale` +
+  `proprPositionError`），**不再把失败伪装成空仓**
+- P1 Propr/Shadow 的 error 事件统一走 `mapProprError`（分类 + 脱敏），事件被 server/SSE/通知/AI 消费也安全
+- P2 `PR_FEE_RATE` 默认留空 → 优先实测 maker 费率 0.00015（不再被 0.0005 覆盖）；`getTrades` 返回
+  内部统一视图，新增 `getRawTrades` 保留原始口径
+- P2 `netPositionFromViews` 明确仅适用于 net 模式，多条同向时按数量加权 entryPrice，并注释禁止复用于 hedge
+- 测试新增 `test/propr-shadow.test.js`（失败不假报空仓/脱敏事件/写请求恒 0）；`propr.test.js` 增补
+  活动状态完整性、150 条成交全量、内部视图、脱敏事件；`npm test` 全绿 + lint 0 error
+
 ### 新增（Propr Review 2：net 只读适配器 + Shadow + 精度/权益探测，2026-09-23）
 - `src/exchange/propr/market.js`：市场构建（net/stepSize 1e-5/stepPrice 0.1/minNotional $10/maker 0.00015）
   与取整工具；**精度与最小名义由适配器本地强制**（探针证实 API 层完全不校验）

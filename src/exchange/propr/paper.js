@@ -2,6 +2,7 @@
 // 契约与 hl/paper.js 一致（EventEmitter + fill/price/error），供 GridBot 在
 // paper 模式下无 Key 运行与回归测试。positionMode='net'（本地模拟为净仓模型）。
 import { EventEmitter } from 'node:events';
+import { PROPR_MAKER_FEE } from './market.js';
 
 // 本地兜底 BTC 市场（paper 不访问 API；精度取 HL 系 BTC 常见值，仅用于模拟）
 const FALLBACK = [
@@ -19,7 +20,7 @@ export class PaperExchange extends EventEmitter {
     super();
     this.mode = 'paper'; this.network = 'mainnet'; this.dataSource = 'synthetic';
     this.balance = Number(opts.startBalance || 10_000); this.equity = this.balance;
-    this.feeRate = Number(opts.feeRate || 0.0005);
+    this.feeRate = Number(opts.feeRate || PROPR_MAKER_FEE);
     this.markets = new Map(); this.orders = new Map(); this.positions = new Map(); this.prices = new Map();
     this.realizedPnl = 0; this.lastOkAt = Date.now(); this._seq = 0; this._timer = null;
     this._setMarkets(FALLBACK);

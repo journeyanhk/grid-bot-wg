@@ -214,7 +214,7 @@ export function getConfig() {
     tradePollMs: Number(process.env.PR_TRADE_POLL_MS || 3000),
     reconcileMs: Number(process.env.PR_RECONCILE_MS || 15000),
     timeoutMs: Number(process.env.PR_TIMEOUT_MS || 30000),
-    feeRate: Number(process.env.PR_FEE_RATE || 0.0005),
+    feeRate: optionalNumber('PR_FEE_RATE'), // 空=用实测 maker 费率（不覆盖市场值）
     startBalance: Number(process.env.PAPER_BALANCE || 10000),
     proxy: process.env.PR_PROXY || globalProxy,
   };

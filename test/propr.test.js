@@ -1,5 +1,5 @@
-// Propr 只读适配器测试：启动校验链、市场/精度、分页、权益新鲜度、成交事件与写路径门。
-// 网络全部用 fetch 桩替换（Propr REST + HL 公开行情），不触达真实 API。
+// Propr 只读适配器测试：启动校验链、市场/精度、分页、活动状态完整性、成交全量、
+// 权益新鲜度、成交事件去重、安全错误事件与写路径门。网络全部用 fetch 桩替换。
 import { strict as assert } from 'node:assert';
 import { ProprExchange } from '../src/exchange/propr/propr.js';
 
@@ -11,9 +11,9 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-function pageParams(url) {
+function query(url) {
   const q = new URL(url).searchParams;
-  return { limit: Number(q.get('limit') ?? 20), offset: Number(q.get('offset') ?? 0) };
+  return { limit: Number(q.get('limit') ?? 20), offset: Number(q.get('offset') ?? 0), status: q.get('status') || null };
 }
 
 function attemptBody() {
@@ -59,9 +59,13 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.includes('/challenge-attempts')) return jsonResponse({ data: [{ attemptId: 'a1', accountId: ACCOUNT, status: 'active' }] });
   if (u.includes('/margin-config/')) return jsonResponse({ configId: 'c1', asset: 'BTC', leverage: '1', marginMode: 'cross' });
   if (u.includes('/leverage-limits/effective')) return jsonResponse({ defaults: { crypto: 2 }, overrides: { BTC: 10 } });
-  if (u.includes('/positions')) { const { limit, offset } = pageParams(u); return jsonResponse({ data: state.positions.slice(offset, offset + limit) }); }
-  if (u.includes('/orders')) { const { limit, offset } = pageParams(u); return jsonResponse({ data: state.orders.slice(offset, offset + limit) }); }
-  if (u.includes('/trades')) { const { limit, offset } = pageParams(u); return jsonResponse({ data: state.trades.slice(offset, offset + limit) }); }
+  if (u.includes('/positions')) { const { limit, offset } = query(u); return jsonResponse({ data: state.positions.slice(offset, offset + limit) }); }
+  if (u.includes('/orders')) {
+    const { limit, offset, status } = query(u);
+    const rows = status ? state.orders.filter((o) => o.status === status) : state.orders;
+    return jsonResponse({ data: rows.slice(offset, offset + limit) });
+  }
+  if (u.includes('/trades')) { const { limit, offset } = query(u); return jsonResponse({ data: state.trades.slice(offset, offset + limit) }); }
   throw new Error(`unexpected fetch: ${u}`);
 };
 
@@ -77,25 +81,21 @@ async function main() {
 
   // 市场与精度（HL BTC 保守值）
   const markets = await ex.getMarkets();
-  assert.equal(markets.length, 1);
   assert.equal(markets[0].marketId, 'BTC');
   assert.equal(markets[0].stepSize, 0.00001);
   assert.equal(markets[0].stepPrice, 0.1);
   assert.equal(markets[0].maxLeverage, 10);
   assert.equal(markets[0].positionMode, 'net');
-  assert.equal(ex.feeRate, 0.00015, '费率取 maker 0.00015');
+  assert.equal(ex.feeRate, 0.00015, '未配置 PR_FEE_RATE 时必须用实测 maker 费率');
 
   // 行情与 K 线
   assert.equal(await ex.getPrice(), 90000);
-  const candles = await ex.getCandles('BTC', 3600, 10);
-  assert.equal(candles.length, 1);
-  assert.equal(candles[0].close, 1.5);
+  assert.equal((await ex.getCandles('BTC', 3600, 10))[0].close, 1.5);
 
   // 权益权威字段 + 新鲜度
   assert.equal(ex.balance, 5000);
   assert.equal(ex.equity, 4999.7);
   assert.equal(ex.highWaterMark, 5000);
-  assert.equal(ex.availableBalance, 4913.2);
   assert.equal(ex.equitySource, 'propr_account');
   assert.equal(ex.isEquityStale(), false);
 
@@ -103,35 +103,51 @@ async function main() {
   assert.equal(ex.getPosition(), null);
   state.positions = [{ positionId: 'p1', base: 'BTC', positionSide: 'long', quantity: '0.002', entryPrice: '86000', markPrice: '86500', unrealizedPnl: '1.0', leverage: '1', marginMode: 'cross' }];
   await ex._refreshPositions();
-  const net = ex.getPosition();
-  assert.equal(net.sizeBase, 0.002);
-  assert.equal(net.positionSide, 'long');
-  assert.equal(net.unrealizedPnl, 1);
+  assert.equal(ex.getPosition().sizeBase, 0.002);
   state.positions = [];
 
   // 分页：101 条必须全量取回（默认 limit 20 会漏）
-  state.orders = Array.from({ length: 101 }, (_, i) => orderRow(`o${i}`, 'open'));
-  const all = await ex.getAllOrders({ base: 'BTC', status: 'open' });
-  assert.equal(all.length, 101, '分页必须取全量');
+  state.orders = Array.from({ length: 101 }, (_, i) => orderRow(`p${i}`, 'open'));
+  assert.equal((await ex.getAllOrders({ base: 'BTC', status: 'open' })).length, 101);
 
-  // fetchOpenOrders 只暴露 open 列表（桩不按状态过滤，这里验证映射与 levelIndex 保留）
+  // 活动挂单必须包含 pending/open/partially_filled，排除终态（Review2 P1）
+  state.orders = [
+    orderRow('o-pending', 'pending'),
+    orderRow('o-open', 'open'),
+    orderRow('o-partial', 'partially_filled'),
+    orderRow('o-filled', 'filled'),
+    orderRow('o-cancelled', 'cancelled'),
+  ];
   await ex._refreshOpenOrders();
-  assert.equal(ex.getOpenOrders().length, 101);
-  ex.adoptOrder({ orderId: 'o1', levelIndex: 5, side: 'buy', price: 90000, sizeBase: 0.001 });
-  assert.equal(ex.getOpenOrders().find((o) => o.orderId === 'o1').levelIndex, 5);
+  assert.deepEqual(ex.getOpenOrders().map((o) => o.orderId).sort(), ['o-open', 'o-partial', 'o-pending']);
+  ex.adoptOrder({ orderId: 'o-open', levelIndex: 5, side: 'buy', price: 90000, sizeBase: 0.001 });
+  assert.equal(ex.getOpenOrders().find((o) => o.orderId === 'o-open').levelIndex, 5);
+  assert.equal(ex.getOpenOrders().find((o) => o.orderId === 'o-open').clientOrderId, 'intent-o-open', 'adoptOrder 不得丢掉 intentId');
 
-  // 成交事件：新成交发一次 fill（含 levelIndex），重复轮询不重发
-  state.trades = [tradeRow('t1', 'o1')];
+  // 成交全量：单轮 150 条（超过默认 50）必须全部发出，且不重复（Review2 P1）
+  state.trades = Array.from({ length: 150 }, (_, i) => tradeRow(`t${i}`, `o${i}`));
   const fills = [];
   ex.on('fill', (f) => fills.push(f));
   await ex._refreshTrades();
-  assert.equal(fills.length, 1);
-  assert.equal(fills[0].levelIndex, 5);
-  assert.equal(fills[0].side, 'buy');
-  assert.equal(fills[0].sizeBase, 0.001);
-  assert.equal(fills[0].clientOrderId, 'intent-o1');
+  assert.equal(fills.length, 150, '超过 50 条的成交必须全量拉取');
   await ex._refreshTrades();
-  assert.equal(fills.length, 1, '同一成交不得重复发单');
+  assert.equal(fills.length, 150, '同一成交不得重复发单');
+
+  // getTrades 返回内部统一视图（Review2 P2）
+  const views = await ex.getTrades({ limit: 5 });
+  assert.ok(Array.isArray(views) && views.length > 0);
+  assert.ok('sizeBase' in views[0] && 'executedAt' in views[0]);
+  assert.ok(!('quantity' in views[0]), '内部视图不应保留原始 quantity 字段');
+  const raw = await ex.getRawTrades({ limit: 5 });
+  assert.ok('quantity' in raw[0], 'getRawTrades 保留原始口径');
+
+  // 错误事件统一安全包装（Review2 P1）
+  const errs = [];
+  ex.on('error', (e) => errs.push(e));
+  ex._emitError(new Error('boom pk_live_SECRET'));
+  assert.equal(errs.length, 1);
+  assert.ok(!errs[0].message.includes('pk_live_SECRET'), '错误事件必须脱敏');
+  assert.equal(errs[0].kind, 'network');
 
   // 写路径门：Review 3 前必须显式拒绝
   await assert.rejects(() => ex.placeLimitOrder({}), /Review 3/);

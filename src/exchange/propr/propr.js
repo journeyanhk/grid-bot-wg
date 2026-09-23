@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events';
 import { ProprClient } from './propr-sdk.js';
 import { ProprStartupError } from './errors.js';
 import { buildMarket, toEpochMs, PROPR_MAKER_FEE } from './market.js';
-import { mapProprOrder, mapProprPosition, mapProprTrade, netPositionFromViews } from './mapper.js';
+import { mapProprOrder, mapProprPosition, mapProprTrade, mapProprError, netPositionFromViews, LIVE_STATUSES } from './mapper.js';
 import { createDispatcher } from '../../proxy.js';
 import { logger } from '../../log.js';
 import { maskAccountId } from '../../redact.js';
@@ -23,6 +23,10 @@ const CANDLE_INTERVALS = new Map([
 const PAGE_LIMIT = 100;
 const MAX_PAGES = 20;
 const EQUITY_STALE_MS = 60_000;
+// 成交轮询：常规轮询最多翻 5 页（500 条），并在游标前留 30s 重叠窗口防边界漏单；
+// 重连/恢复走 full 全量（最多 MAX_PAGES 页）。
+const TRADE_OVERLAP_MS = 30_000;
+const TRADE_MAX_PAGES = 5;
 
 export class ProprExchange extends EventEmitter {
   constructor(cfg = {}) {
@@ -60,7 +64,8 @@ export class ProprExchange extends EventEmitter {
     this._cfg = cfg;
     this._positions = [];
     this._orders = new Map();       // orderId → 内部订单视图（含 levelIndex）
-    this._seenTrades = new Set();   // 去重：避免重启后重复补单
+    this._seenTrades = new Set();   // 去重：避免重启/重叠窗口重复补单
+    this._lastTradeAt = 0;          // 成交时间游标（epoch ms）
     this._price = 0;
     this._priceTimer = null;
     this._pollTimer = null;
@@ -100,7 +105,8 @@ export class ProprExchange extends EventEmitter {
       base: this.base, quote: this.quote, marginConfig, leverageLimits,
       markPrice: await this._fetchMidPrice().catch(() => 0),
     });
-    this.feeRate = Number(this._cfg.feeRate ?? this.market.makerFee);
+    // 费率：配置留空时用实测市场 maker 费率（0.00015），不覆盖市场值（Review2 P2）
+    this.feeRate = Number.isFinite(this._cfg.feeRate) ? this._cfg.feeRate : this.market.makerFee;
 
     await this._refreshEquity();
     await this._refreshPositions();
@@ -233,14 +239,32 @@ export class ProprExchange extends EventEmitter {
 
   // ── 订单 ──────────────────────────────────────────────────────────────────
 
+  /**
+   * 活动挂单 = pending / open / partially_filled（Review2 P1）。
+   * 只查 open 会漏掉刚提交（pending）与部分成交（partially_filled）的订单，
+   * 导致对账误判订单不存在并重复补单。任一状态查询失败不致命，但全部失败必须抛出。
+   */
   async _refreshOpenOrders() {
-    const rows = await this.getAllOrders({ base: this.base, status: 'open' });
+    const results = await Promise.allSettled(
+      LIVE_STATUSES.map((status) => this.getAllOrders({ base: this.base, status })),
+    );
     const live = new Map();
-    for (const raw of rows) {
-      const known = this._orders.get(String(raw.orderId));
-      const view = mapProprOrder(raw, { levelIndex: known?.levelIndex ?? null });
-      live.set(view.orderId, view);
+    let ok = 0;
+    let firstErr = null;
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        ok += 1;
+        for (const raw of r.value) {
+          const id = String(raw.orderId);
+          if (live.has(id)) continue;
+          const known = this._orders.get(id);
+          live.set(id, mapProprOrder(raw, { levelIndex: known?.levelIndex ?? null }));
+        }
+      } else if (!firstErr) {
+        firstErr = r.reason;
+      }
     }
+    if (!ok) throw firstErr ?? new Error('活动挂单刷新全部失败');
     this._orders = live;
   }
 
@@ -276,23 +300,45 @@ export class ProprExchange extends EventEmitter {
 
   // ── 成交 ──────────────────────────────────────────────────────────────────
 
+  /** 分页拉取成交：full=true 用于重连/恢复（全量，最多 MAX_PAGES 页）；常规轮询用游标+重叠窗口。 */
+  async _pullTrades({ full = false } = {}) {
+    const maxPages = full ? MAX_PAGES : TRADE_MAX_PAGES;
+    const out = [];
+    for (let page = 0; page < maxPages; page++) {
+      const batch = await this.client.getTrades({ base: this.base, limit: PAGE_LIMIT, offset: page * PAGE_LIMIT });
+      const mapped = (batch || []).map(mapProprTrade);
+      out.push(...mapped);
+      if (!batch || batch.length < PAGE_LIMIT) break;
+      const oldest = mapped.reduce((min, t) => Math.min(min, t.executedAt || Infinity), Infinity);
+      if (!full && this._lastTradeAt > 0 && oldest < this._lastTradeAt - TRADE_OVERLAP_MS) break;
+    }
+    return out;
+  }
+
   async _seedTrades() {
-    const rows = await this.client.getTrades({ base: this.base, limit: 50 });
-    for (const raw of rows) {
-      const t = mapProprTrade(raw);
+    const rows = await this._pullTrades({ full: true });
+    for (const t of rows) {
       if (t.tradeId) this._seenTrades.add(t.tradeId);
+      if (t.executedAt > this._lastTradeAt) this._lastTradeAt = t.executedAt;
     }
   }
 
-  async _refreshTrades() {
-    const rows = (await this.client.getTrades({ base: this.base, limit: 50 })).map(mapProprTrade);
+  async _refreshTrades({ full = false } = {}) {
+    const rows = await this._pullTrades({ full });
+    // 游标对所有行推进（含已处理行），保证下一轮窗口正确
+    for (const t of rows) {
+      if (t.executedAt > this._lastTradeAt) this._lastTradeAt = t.executedAt;
+    }
+    const floor = this._lastTradeAt > 0 ? this._lastTradeAt - TRADE_OVERLAP_MS : 0;
     const fresh = [];
     for (const t of rows) {
       if (!t.tradeId || this._seenTrades.has(t.tradeId)) continue;
+      if (!full && floor > 0 && t.executedAt < floor) continue;
       this._seenTrades.add(t.tradeId);
       fresh.push(t);
     }
-    for (const t of fresh.reverse()) {
+    fresh.sort((a, b) => a.executedAt - b.executedAt);
+    for (const t of fresh) {
       const known = this._orders.get(t.orderId);
       this.realizedPnl += Number(t.realizedPnl || 0) - Number(t.fee || 0);
       this.emit('fill', {
@@ -308,12 +354,16 @@ export class ProprExchange extends EventEmitter {
     }
   }
 
-  async getTrades(params = {}) { return this.client.getTrades({ base: this.base, ...params }); }
+  /** 原始成交（保持 Propr 字段口径）。 */
+  async getRawTrades(params = {}) { return this.client.getTrades({ base: this.base, ...params }); }
 
-  /** 审计用：按时间窗拉取成交（executedAt >= sinceMs）。 */
+  /** 内部统一成交视图（与其它路径同口径，Review2 P2）。 */
+  async getTrades(params = {}) { return (await this.getRawTrades(params)).map(mapProprTrade); }
+
+  /** 审计用：按时间窗拉取成交（全量分页后过滤 executedAt >= sinceMs）。 */
   async fetchTradesWindow(sinceMs = 0) {
-    const rows = await this.getAllTrades({ base: this.base });
-    return rows.map(mapProprTrade).filter((t) => t.executedAt >= Number(sinceMs || 0));
+    const rows = await this._pullTrades({ full: true });
+    return rows.filter((t) => t.executedAt >= Number(sinceMs || 0));
   }
 
   // ── 权益（权威字段 + 新鲜度，ADR-004）─────────────────────────────────────
@@ -364,8 +414,9 @@ export class ProprExchange extends EventEmitter {
   }
 
   _emitError(err) {
-    const mapped = { kind: 'unknown', statusCode: null, code: null, message: err?.message ?? String(err) };
-    logger.warn('propr', `Propr 轮询异常: ${mapped.message}`, mapped);
+    // 统一走 mapProprError（分类 + 脱敏）：事件会被 server/SSE/通知/AI 直接消费（Review2 P1）
+    const mapped = mapProprError(err);
+    logger.warn('propr', `Propr 轮询异常(${mapped.kind}): ${mapped.message}`, mapped);
     if (this.listenerCount('error') > 0) {
       this.emit('error', Object.assign(new Error(mapped.message), mapped));
     }
