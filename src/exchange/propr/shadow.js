@@ -216,4 +216,24 @@ export class ShadowExchange extends PaperExchange {
     }
     this.lastOkAt = Date.now();
   }
+
+  /** 仪表盘公开信息（shadow 写请求恒为 0；Propr 快照失败时标 stale，不伪装空仓）。 */
+  getPublicInfo() {
+    return {
+      exchange: 'Propr',
+      mode: 'shadow',
+      accountIdMasked: maskAccountId(this._cfg.accountId),
+      attemptId: this.attemptId,
+      positionMode: 'net',
+      tradingLocked: false,
+      writeRequests: 0,
+      proprEquity: this.proprEquity,
+      proprNetPosition: this.proprNetPosition,
+      proprAccountStale: this.proprAccountStale,
+      proprAccountError: this.proprAccountError,
+      proprPositionStale: this.proprPositionStale,
+      proprPositionError: this.proprPositionError,
+      price: this.prices.get(this._marketId()) ?? null,
+    };
+  }
 }

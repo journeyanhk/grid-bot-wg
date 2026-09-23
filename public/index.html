@@ -45,6 +45,7 @@ html[data-theme="light"] {
   --lr-color:#0891b2; --lr-bg:#22d3ee14;
   --hl-color:#a855f7; --hl-bg:#a855f714;
   --va-color:#f43f5e; --va-bg:#f43f5e14;
+  --pr-color:#0d9488; --pr-bg:#14b8a614;
   --radius:8px;
 }
 @media (prefers-color-scheme: light) {
@@ -58,6 +59,7 @@ html[data-theme="light"] {
     --lr-color:#0891b2; --lr-bg:#22d3ee14;
   --hl-color:#a855f7; --hl-bg:#a855f714;
   --va-color:#f43f5e; --va-bg:#f43f5e14;
+  --pr-color:#0d9488; --pr-bg:#14b8a614;
     --radius:8px;
   }
 }
@@ -145,6 +147,7 @@ body {
 .ov-card.lr::before { background: var(--lr-color); }
 .ov-card.hl::before { background: var(--hl-color); }
 .ov-card.va::before { background: var(--va-color); }
+.ov-card.propr::before { background: var(--pr-color); }
 .ov-exname {
   font-size: 12px; font-weight: 700; letter-spacing: .4px; margin-bottom: 10px;
   display: flex; align-items: center; gap: 8px;
@@ -214,6 +217,7 @@ input:focus, select:focus { outline: none; border-color: var(--pur); }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 600; }
 .badge-paper { background: #3b82f618; color: #93c5fd; border: 1px solid #3b82f640; }
 .badge-live { background: #ef444418; color: #fca5a5; border: 1px solid #ef444440; }
+.badge-propr { background: var(--pr-bg); color: var(--pr-color); border: 1px solid #14b8a640; }
 .badge-real { background: #22c55e18; color: #86efac; border: 1px solid #22c55e40; }
 .badge-syn { background: #f59e0b18; color: #fcd34d; border: 1px solid #f59e0b40; }
 .badge-run { background: #22c55e18; color: #86efac; border: 1px solid #22c55e40; }
@@ -675,6 +679,35 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div id="ov-va-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
       <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('va', this)">🔌 重连交易所（不动挂单/持仓）</button>
       <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('va')">进入 Variational 控制台 →</button>
+    </div>
+    <div class="ov-card propr">
+      <div class="ov-exname" style="color:var(--pr-color)">
+        <span class="run-dot" id="ov-propr-dot"></span>
+        Propr 挑战账户
+        <span id="ov-propr-badge" class="badge badge-propr" style="margin-left:auto">PAPER</span>
+      </div>
+      <div id="ov-propr-health" class="exhealth eh-idle">—</div>
+      <div class="ov-sub" id="ov-propr-mode" style="margin-top:6px">—</div>
+      <div class="ov-sub" id="ov-propr-acct">账户 —</div>
+      <div class="ov-sub" id="ov-propr-lock">—</div>
+      <div class="ov-sub" id="ov-propr-eqsrc">—</div>
+      <div class="ov-sub" id="ov-propr-extra" style="margin-bottom:6px">—</div>
+      <div class="ov-pnl" id="ov-propr-pnl">—</div>
+      <div class="ov-sub" id="ov-propr-ret">收益率 —</div>
+      <div style="margin-top:10px">
+        <div class="ov-stat"><span class="lbl">余额</span><span class="val" id="ov-propr-bal">—</span></div>
+        <div class="ov-stat"><span class="lbl">权益</span><span class="val" id="ov-propr-eq">—</span></div>
+        <div class="ov-stat"><span class="lbl">已实现</span><span class="val" id="ov-propr-rpnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">未实现</span><span class="val" id="ov-propr-upnl">—</span></div>
+        <div class="ov-stat"><span class="lbl">交易量</span><span class="val" id="ov-propr-vol">—</span></div>
+        <div class="ov-stat"><span class="lbl">完成网格</span><span class="val" id="ov-propr-rungs">—</span></div>
+        <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-propr-price">—</span></div>
+        <div class="ov-stat"><span class="lbl">当前市场</span><span class="val" id="ov-propr-mkt">—</span></div>
+      </div>
+      <div class="ov-position" id="ov-propr-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <div class="operation-issue" id="ov-propr-issue" style="display:none"></div>
+      <div id="ov-propr-gridcfg" class="gridcfg" style="display:none"></div>
+      <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('propr', this)">🔌 重连交易所（不动挂单/持仓）</button>
     </div>
   </div>
 
@@ -2418,7 +2451,7 @@ function updateConnStatus() {
   el.className = 'conn ' + cls;
   txt.textContent = label;
   el.title = '后端连接状态' + (lastBeat ? `（最后更新 ${Math.round(age / 1000)} 秒前）` : '');
-  if (lastBeat && age >= 10000) ['de','ex','rs','lr','hl','va'].forEach((p) => setExHealth(p, lastOverview[p]?.health, false));
+  if (lastBeat && age >= 10000) ['de','ex','rs','lr','hl','va','propr'].forEach((p) => setExHealth(p, lastOverview[p]?.health, false));
 }
 setInterval(updateConnStatus, 1000);
 updateConnStatus();
@@ -2588,17 +2621,78 @@ function renderOverviewPosition(prefix, d) {
     + `<div class="ov-stat"><span class="lbl">未实现盈亏</span><span class="val">${pnlHtml(p.unrealizedPnl)}</span></div>`;
 }
 
+// Propr 挑战账户卡片：模式/账户/锁定态/权益来源（独立于其它交易所，不并入汇总）
+const PR_MODE_TEXT = {
+  shadow: 'SHADOW · 只读 Propr + 本地模拟（写请求恒为 0）',
+  'sim-write': 'SIM-WRITE · Free Trial API 写入（模拟盘）',
+  challenge: 'CHALLENGE · 付费挑战 API 写入（模拟盘）',
+  paper: 'PAPER · 纯本地模拟（不访问 API）',
+};
+function renderProprCard(d) {
+  const info = d.exchangeInfo || {};
+  const modeEl = $('ov-propr-mode');
+  if (modeEl) modeEl.textContent = PR_MODE_TEXT[info.mode || d.mode] || (info.mode || d.mode || '—');
+  const acctEl = $('ov-propr-acct');
+  if (acctEl) acctEl.textContent = '账户 ' + (info.accountIdMasked || '—') + (info.positionMode ? ` · 持仓模式 ${info.positionMode}` : '');
+
+  const lockEl = $('ov-propr-lock');
+  if (lockEl) {
+    if (info.tradingLocked) {
+      lockEl.textContent = '🔴 交易已锁定（禁止开仓）：' + (info.lockReason || '未知');
+      lockEl.style.color = 'var(--red)';
+    } else if (info.ordersSnapshotStale) {
+      lockEl.textContent = '🟡 挂单快照不完整（已禁止开仓）：' + (info.ordersSnapshotError || '');
+      lockEl.style.color = 'var(--yel)';
+    } else {
+      lockEl.textContent = '🟢 交易正常';
+      lockEl.style.color = '';
+    }
+  }
+
+  const eqEl = $('ov-propr-eqsrc');
+  if (eqEl) {
+    const pe = info.proprEquity;
+    if (pe) {
+      const stale = info.proprPositionStale || info.proprAccountStale ? ' · ⚠️ 刷新失败，沿用上次快照' : '';
+      eqEl.textContent = `Propr 真实账户权益 ${fmt(pe.balance)} USDC（只读快照${stale}）· 上方余额/权益为本地模拟账户`;
+    } else if (info.equitySource) {
+      const src = info.equitySource === 'propr_account' ? 'Propr 权威字段' : info.equitySource;
+      eqEl.textContent = `权益来源：${src}${info.equityStale ? ' · ⚠️ 已过期' : ''}`;
+    } else {
+      eqEl.textContent = '—';
+    }
+  }
+
+  // 未启动网格时 lastPrice 为空，用适配器缓存价兜底显示
+  const priceEl = $('ov-propr-price');
+  if (priceEl && d.lastPrice == null && info.price != null) priceEl.textContent = fmtPrice(info.price);
+
+  const extraEl = $('ov-propr-extra');
+  if (extraEl) {
+    const parts = [];
+    if (info.highWaterMark != null) parts.push(`高水位 ${fmt(info.highWaterMark)}`);
+    if (info.availableBalance != null) parts.push(`可用 ${fmt(info.availableBalance)}`);
+    if (info.intents != null) parts.push(`本地意图 ${info.intents}`);
+    if (info.openOrdersTracked != null) parts.push(`跟踪挂单 ${info.openOrdersTracked}`);
+    if (info.proprNetPosition) parts.push(`Propr 净仓 ${fmt(Number(info.proprNetPosition.sizeBase), 8)}`);
+    extraEl.textContent = parts.length ? parts.join(' · ') : '—';
+  }
+}
+
 function renderOverview(data) {
   lastOverview = data;
   // 三所汇总
   let totEquity = 0, totBalance = 0, totPnl = 0, totRealized = 0, totUnrealized = 0, totVolume = 0, totRungs = 0;
   let running = 0;
 
-  ['de','ex','rs','lr','hl','va'].forEach(p => {
+  ['de','ex','rs','lr','hl','va','propr'].forEach(p => {
     const d = data[p];
     if (!d) return;
     // 总览只展示有金额在运行的交易所：live + 有余额 + 运行中，否则隐藏卡片（v1.6.0）
-    const visible = d.mode === 'live' && (d.balance > 0) && d.running;
+    // Propr 例外：paper 之外（shadow/sim-write/challenge）常驻显示，便于随时看到模式/账户/锁定态
+    const visible = p === 'propr'
+      ? d.mode !== 'paper'
+      : (d.mode === 'live' && (d.balance > 0) && d.running);
     const card = document.querySelector('.ov-card.' + p);
     if (card) card.style.display = visible ? '' : 'none';
     if (!visible) return;
@@ -2616,7 +2710,7 @@ function renderOverview(data) {
     dot.className = 'run-dot' + (d.running ? ' on' : '');
     const badge = $(`ov-${p}-badge`);
     badge.textContent = d.mode?.toUpperCase() || 'PAPER';
-    badge.className = 'badge ' + (d.mode === 'live' ? 'badge-live' : 'badge-paper');
+    badge.className = 'badge ' + (d.mode === 'live' ? 'badge-live' : d.mode === 'paper' ? 'badge-paper' : 'badge-propr');
     setExHealth(p, d.health, true);
 
     $(`ov-${p}-pnl`).innerHTML = `<span class="${cls(d.totalPnl)}">${signed(d.totalPnl)}</span>`;
@@ -2630,6 +2724,7 @@ function renderOverview(data) {
     $(`ov-${p}-price`).textContent = d.lastPrice ?? '—';
     $(`ov-${p}-mkt`).textContent = d.config?.displayName ?? '—';
     renderOverviewPosition(p, d);
+    if (p === 'propr') renderProprCard(d);
     const issueBox = $(`ov-${p}-issue`);
     if (issueBox) {
       issueBox.style.display = d.operationalIssue ? '' : 'none';

@@ -2049,6 +2049,7 @@ export class GridBot {
       } : null,
       operationalIssue: this._operationalIssue ?? this.ex.operationalIssue ?? null,
       apiWalletAddress: this.ex.apiWalletAddress ?? null,
+      exchangeInfo: this.ex.getPublicInfo?.() ?? null,
       realizedPnl: realized,
       unrealizedPnl: unrealized,
       totalPnl,

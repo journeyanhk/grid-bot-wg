@@ -99,14 +99,18 @@
   > 备注: 同上，改为在 5A.2 覆盖净仓补单方向。
 
 ## 6. 接入 GridBot 与 server（Review 4）
-- [ ] 6.1 在 `src/server.js` 完成第 7 所注册全部插入点（import/校验/实例化/restore/错误监听/AI 映射/日历/Liveness/SSE/路由分区/初始化/续跑/孤儿检测/启动横幅），验证 why.md#影响范围
-- [ ] 6.2 在 `src/server.js` + 前端标注 Propr 模式与账户（如"Propr API 写入 / Free Trial / 市场模拟 / 非真实资金"），依赖任务 6.1
-- [ ] 6.3 打通 `PR_MODE=shadow` 与 `sim-write` 启动冒烟，确认 Propr 卡片与市场列表可见，依赖任务 6.1、3.6
+> 已完成（2026-09-23）：后端 ~20 处插入点全部接入；前端新增独立 Propr 挑战账户卡片
+> （模式/账户/锁定态/权益来源，不并入三所汇总）；server 级 shadow 与 sim-write 双模式冒烟通过。
+- [√] 6.1 在 `src/server.js` 完成第 7 所注册全部插入点（import/预检查/实例化/restore/错误监听/AI 注释/日历/Liveness/SSE/路由分区/overview/初始化/续跑/看门狗/孤儿检测/启动横幅/代理配置）
+- [√] 6.2 在 `src/server.js` + 前端标注 Propr 模式与账户（卡片含 SHADOW/SIM-WRITE/CHALLENGE 文案、掩码账户、锁定/快照状态、权益来源；余额/权益栏注明为本地模拟账户）
+- [√] 6.3 打通 `PR_MODE=shadow` 与 `sim-write` 启动冒烟，确认 Propr 卡片与市场列表可见（shadow 写请求 0、sim-write 权益取真实账户）
 
 ## 7. Challenge 风控层
 - [ ] 7.1 在 `src/risk/propr-challenge.js` 实现 UTC 日切、权益派生（`equitySource`）、日损/回撤计算，验证 how.md#实现要点
 - [ ] 7.2 在 `src/risk/propr-challenge.js` 实现分级 OK/WARNING/REDUCE_ONLY/HALT/LOCKED/BREACHED 与向 bot 下发指令，依赖任务 7.1
 - [ ] 7.3 在 `src/server.js` + 前端接入 Propr 面板（账户/模式/状态/日损/回撤/净仓/延迟/锁定原因），依赖任务 6.1、7.2
+  > 备注: 总览卡片（模式/账户/锁定态/权益来源/真实账户权益）已在 Review 4 完成；待风控层落地后补齐日损/回撤使用率与一键解锁
+- [ ] 7.4 【可选】AI 集成：Propr 目前独立于 AI 快照流（`EXNAMES` 与 per-key JSON 按 5 所硬编码，且 marketId 为字符串），如需纳入需扩展 AI 提示词与面板
 
 ## 8. 对账、恢复与异常
 - [ ] 8.1 在 `src/exchange/propr/propr.js` 实现断线重连与成交补偿（基于 getTrades 恢复，且只补一次反向单），依赖任务 4.4

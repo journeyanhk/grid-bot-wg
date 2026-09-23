@@ -789,4 +789,28 @@ export class ProprExchange extends EventEmitter {
     }
     return { open: [...this._orders.values()], unmatched };
   }
+
+  /** 仪表盘公开信息（不含任何凭证；accountId 已掩码）。 */
+  getPublicInfo() {
+    return {
+      exchange: 'Propr',
+      mode: this.mode,
+      accountIdMasked: maskAccountId(this.accountId),
+      attemptId: this.attemptId,
+      positionMode: this.positionMode,
+      tradingLocked: this.tradingLocked,
+      lockReason: this.lockReason,
+      ordersSnapshotStale: this.ordersSnapshotStale,
+      ordersSnapshotError: this.ordersSnapshotError,
+      equitySource: this.equitySource,
+      equityFreshAt: this.equityFreshAt,
+      equityStale: this.isEquityStale(),
+      highWaterMark: this.highWaterMark,
+      availableBalance: this.availableBalance,
+      totalUnrealizedPnl: this.totalUnrealizedPnl,
+      intents: this._intents.size,
+      openOrdersTracked: this._orders.size,
+      price: this._price || null,
+    };
+  }
 }

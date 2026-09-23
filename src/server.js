@@ -8,13 +8,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { getConfig, ROOT } from './config.js';
+import { getConfig, ROOT, validateProprConfig } from './config.js';
 import { createExchange as createDeExchange } from './exchange/de/index.js';
 import { createExchange as createExExchange } from './exchange/ex/index.js';
 import { createExchange as createRsExchange } from './exchange/rs/index.js';
 import { createExchange as createLrExchange } from './exchange/lr/index.js';
 import { createExchange as createHlExchange } from './exchange/hl/index.js';
 import { createExchange as createVaExchange } from './exchange/va/index.js';
+import { createExchange as createProprExchange } from './exchange/propr/index.js';
 import { GridBot } from './bot.js';
 import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
@@ -78,6 +79,18 @@ logger.info('server', `启动 v${APP_VERSION}`);
   }
 }
 
+// ── Propr 模式预检查（四模式护栏；不满足直接给出可操作提示后退出）─────────────
+// Propr 不是 live/paper 二分：paper 之外（shadow/sim-write/challenge）必须显式配置
+// API Key 与 accountId，challenge 还需 PR_ALLOW_CHALLENGE=YES。护栏在工厂内也会再校验一次。
+try {
+  validateProprConfig(cfg.propr);
+} catch (e) {
+  console.error('\n[启动失败] Propr 配置不满足启动护栏：\n');
+  console.error('  ' + (e?.message || e));
+  console.error('\n请修改 .env 后重试（PR_MODE=paper 可跳过 Propr）。\n');
+  process.exit(1);
+}
+
 // ── 代理设置 ─────────────────────────────────────────────────────────────────
 const proxyResult = await setupProxies(cfg);
 if (proxyResult.used) {
@@ -126,6 +139,12 @@ vaExchange.onNotify = (p) => notifier.send({
 const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
   onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
+// Propr 挑战账户：独立第 7 所（ADR-005）。PR_MODE=paper/shadow/sim-write/challenge，
+// 工厂内已做四模式护栏；shadow 为只读+本地模拟（写请求恒为 0）。
+const proprExchange = createProprExchange(cfg.propr);
+const proprBot = new GridBot(proprExchange, { onChange: (s) => saveSnapshot('propr', s),
+  onAlert: (a) => notifier.send({ source: 'propr', message: `[Propr] ${a.message}`, level: a.level, key: a.key ? 'propr:' + a.key : undefined }) });
+
 // Restore cumulative stats / config from the previous run (display continuity).
 // Trading does NOT auto-resume; stray-order cleanup happens after each exchange
 // finishes init (see below).
@@ -135,14 +154,17 @@ rsBot.restore(loadSnapshot('rs'));
 lrBot.restore(loadSnapshot('lr'));
 hlBot.restore(loadSnapshot('hl'));
 vaBot.restore(loadSnapshot('va'));
+proprBot.restore(loadSnapshot('propr'));
 
 // Belt-and-suspenders: ensure every exchange always has an 'error' listener so a
 // stray emit can never crash the process (the GridBot also attaches one).
-for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange, vaExchange]) {
+for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange, vaExchange, proprExchange]) {
   ex.on('error', (e) => { logger.error('exchange', e?.message || String(e)); });
 }
 
 // ── AI 服务（哨兵/日报/分析/对话/出区间建议）────────────────────────────────
+// 说明：AI 服务的快照/提示词按 5 所硬编码（EXNAMES + 固定 per-key JSON），Propr 是
+// 独立的挑战账户且 marketId 为字符串（'BTC'），本阶段不并入 AI 流（见 task 7.4）。
 const aiService = createAiService({
   bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
   exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
@@ -154,7 +176,7 @@ aiService.start();
 const vaAudit = createAuditService({ bot: vaBot, exchange: vaExchange, source: 'va' });
 
 // ── 事件日历调度器：CPI/FOMC/非农 前后 ±window 分钟预警；可选自动暂停入场侧 ──
-const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot };
+const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot, propr: proprBot };
 let _calPrevTick = Date.now();
 const _calTimer = setInterval(() => {
   try {
@@ -219,12 +241,14 @@ const _LIVENESS_TARGETS = [
   { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
   { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
   { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
+  // Propr 无 live 模式：sim-write/challenge（真实 API 写入）需纳入失联告警；shadow 只读不告警
+  { prefix: 'propr', name: 'Propr', ex: proprExchange, bot: proprBot, liveModes: ['sim-write', 'challenge'] },
 ];
 const _wdTimer = setInterval(() => {
   const now = Date.now();
-  for (const { prefix, name, ex, bot } of _LIVENESS_TARGETS) {
+  for (const { prefix, name, ex, bot, liveModes } of _LIVENESS_TARGETS) {
     try {
-      const watched = ex?.mode === 'live' && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
+      const watched = (liveModes ?? ['live']).includes(ex?.mode) && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
       if (!watched) { _livenessStale.delete(prefix); continue; }
       const ageMs = now - ex.lastOkAt;
       if (ageMs > LIVENESS_STALE_MS) {
@@ -251,6 +275,7 @@ const rsClients = new Set();
 const lrClients = new Set();
 const hlClients = new Set();
 const vaClients = new Set();
+const proprClients = new Set();
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 const MIME = {
@@ -407,6 +432,7 @@ const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsCl
 const lrHandler = makeExchangeHandler('/api/lr', lrBot, lrExchange, cfg.lr, lrClients, 'RHC Lighter');
 const hlHandler = makeExchangeHandler('/api/hl', hlBot, hlExchange, cfg.hl, hlClients, 'Entropy');
 const vaHandler = makeExchangeHandler('/api/va', vaBot, vaExchange, cfg.va, vaClients, 'Variational');
+const proprHandler = makeExchangeHandler('/api/propr', proprBot, proprExchange, cfg.propr, proprClients, 'Propr');
 
 // ── 鉴权守卫（VPS 安全）──────────────────────────────────────────────────────
 // 三层防护：
@@ -523,6 +549,7 @@ const server = http.createServer(async (request, res) => {
         lr: pick(lrBot.getState(), cfg.lr.mode),
         hl: pick(hlBot.getState(), cfg.hl.mode),
         va: pick(vaBot.getState(), cfg.va.mode),
+        propr: pick(proprBot.getState(), cfg.propr.mode),
       });
     }
 
@@ -542,6 +569,7 @@ const server = http.createServer(async (request, res) => {
         lr: pick(lrBot.getState(), cfg.lr.mode),
         va: pick(vaBot.getState(), cfg.va.mode),
         hl: pick(hlBot.getState(), cfg.hl.mode),
+        propr: pick(proprBot.getState(), cfg.propr.mode),
       };
       res.write(`data: ${JSON.stringify(initial, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}\n\n`);
       const overviewClients = server._overviewClients;
@@ -611,13 +639,14 @@ const server = http.createServer(async (request, res) => {
         ex: process.env.EXTENDED_PROXY || '',
         rs: process.env.RISEX_PROXY || '',
         lr: process.env.LIGHTER_PROXY || '',
+        propr: process.env.PR_PROXY || '',
       });
     }
 
     if (p === '/api/env' && request.method === 'POST') {
       try {
         const { key, value } = await readBody(request);
-        const PROXY_KEYS = ['GLOBAL_PROXY','DECIBEL_PROXY','EXTENDED_PROXY','RISEX_PROXY','LIGHTER_PROXY'];
+        const PROXY_KEYS = ['GLOBAL_PROXY','DECIBEL_PROXY','EXTENDED_PROXY','RISEX_PROXY','LIGHTER_PROXY','PR_PROXY'];
         const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK','SERVERCHAN_SENDKEY','CALENDAR_ALERT_MINUTES','CALENDAR_AUTO_PAUSE'];
         if (!PROXY_KEYS.includes(key) && !AI_KEYS.includes(key)) return send(res, 400, { error: '不允许修改该字段: ' + key });
         // SECURITY: the value is written verbatim into .env. Reject anything that
@@ -701,6 +730,10 @@ const server = http.createServer(async (request, res) => {
     if (p.startsWith('/api/va/')) {
       return await vaHandler(request, res, p.slice('/api/va'.length), url);
     }
+    // Propr 挑战账户（独立第 7 所）
+    if (p.startsWith('/api/propr/')) {
+      return await proprHandler(request, res, p.slice('/api/propr'.length), url);
+    }
 
     // ── 静态文件 ──────────────────────────────────────────────────────────
     let file = p === '/' ? '/index.html' : p;
@@ -747,6 +780,10 @@ setInterval(() => {
     const data = `data: ${stringify(vaBot.getState())}\n\n`;
     for (const r of vaClients) { try { r.write(data); } catch { vaClients.delete(r); } }
   }
+  if (proprClients.size > 0) {
+    const data = `data: ${stringify(proprBot.getState())}\n\n`;
+    for (const r of proprClients) { try { r.write(data); } catch { proprClients.delete(r); } }
+  }
   if (server._overviewClients.size > 0) {
     const deState = deBot.getState();
     const exState = exBot.getState();
@@ -754,6 +791,7 @@ setInterval(() => {
     const lrState = lrBot.getState();
     const hlState = hlBot.getState();
     const vaState = vaBot.getState();
+    const proprState = proprBot.getState();
     const overview = {
       de: pick(deState, cfg.de.mode),
       ex: pick(exState, cfg.ex.mode),
@@ -761,6 +799,7 @@ setInterval(() => {
       lr: pick(lrState, cfg.lr.mode),
       hl: pick(hlState, cfg.hl.mode),
       va: pick(vaState, cfg.va.mode),
+      propr: pick(proprState, cfg.propr.mode),
     };
     const data = `data: ${stringify(overview)}\n\n`;
     for (const r of server._overviewClients) { try { r.write(data); } catch { server._overviewClients.delete(r); } }
@@ -788,6 +827,7 @@ function pick(s, mode) {
     position: s.position ?? null,
     operationalIssue: s.operationalIssue ?? null,
     apiWalletAddress: s.apiWalletAddress ?? null,
+    exchangeInfo: s.exchangeInfo ?? null, // Propr 等适配器的模式/账户/锁定等公开信息
     dynamic: s.dynamic ?? null,   // 动态网格状态（计数/自动停机/影子）供总览渲染
   };
 }
@@ -831,6 +871,7 @@ await Promise.all([
   initExchange(lrExchange, 'RHC Lighter', cfg.lr),
   initExchange(hlExchange, 'Entropy', cfg.hl),
   initExchange(vaExchange, 'Variational', cfg.va),
+  initExchange(proprExchange, 'Propr', cfg.propr),
 ]);
 
 // ── 崩溃恢复 / 续跑 ────────────────────────────────────────────────────────────
@@ -860,6 +901,7 @@ await Promise.all([
   resumeIfWasRunning(lrBot, lrExchange, 'lr'),
   resumeIfWasRunning(hlBot, hlExchange, 'hl'),
   resumeIfWasRunning(vaBot, vaExchange, 'va'),
+  resumeIfWasRunning(proprBot, proprExchange, 'propr'),
 ]);
 
 // ── 续跑看门狗（Review22 / 9·21）────────────────────────────────────────────
@@ -867,8 +909,8 @@ await Promise.all([
 // -> 自动退避重连（1/2/5/15 分，封顶永续）+ 补续跑（≥3 次尝试）+ 响亮告警
 // （卡片红 + notify 每 30 分钟重复）+ 10 分钟兜底撤单（仅撤单、永不动仓位）。
 const resumeGuard = createResumeGuard({
-  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
-  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot, propr: proprBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange, propr: proprExchange },
   loadSnapshot, notifier, logger,
 });
 resumeGuard.start();
@@ -895,6 +937,7 @@ await Promise.all([
   detectOrphanPosition(deBot, deExchange),
   detectOrphanPosition(exBot, exExchange),
   detectOrphanPosition(rsBot, rsExchange),
+  detectOrphanPosition(proprBot, proprExchange),
 ]);
 
 server.listen(cfg.port, cfg.host, () => {
@@ -910,6 +953,7 @@ server.listen(cfg.port, cfg.host, () => {
   console.log(`  RHC      [${cfg.lr.mode.toUpperCase()}]  ${cfg.lr.network}`);
   console.log(`  Entropy  [${cfg.hl.mode.toUpperCase()}]  ${cfg.hl.network} (${cfg.hl.dex})`);
   console.log(`  Variational [${cfg.va.mode.toUpperCase()}]  ${cfg.va.network}`);
+  console.log(`  Propr    [${cfg.propr.mode.toUpperCase()}]  ${cfg.propr.apiUrl}${cfg.propr.mode === 'shadow' ? '（只读+本地模拟）' : cfg.propr.mode === 'paper' ? '（本地模拟）' : '（API 写入·模拟盘）'}`);
   console.log(`${'─'.repeat(52)}`);
   if (cfg.de.mode === 'paper' || cfg.ex.mode === 'paper' || cfg.rs.mode === 'paper') {
     console.log('  ⚠ 部分交易所为模拟模式，不涉及真实资金。');

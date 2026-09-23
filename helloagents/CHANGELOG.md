@@ -24,6 +24,21 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 新增（Propr Review 4：接入 GridBot 与 server，2026-09-23）
+- `src/server.js` 第 7 所完整接入：Propr 四模式预检查（失败给可操作提示后退出）、工厂实例化、
+  `propr` 快照键 restore、错误监听、日历暂停、Liveness 看门狗（`liveModes=['sim-write','challenge']`）、
+  SSE 客户端、`/api/propr/*` 路由、overview（API/SSE 初值/推送）、初始化、续跑、续跑看门狗、孤儿持仓探测、
+  启动横幅、`PR_PROXY` 纳入代理配置与 `/api/env` 白名单
+- `src/bot.js`：`getState()` 透传 `exchangeInfo`（适配器公开信息，`getPublicInfo()`）
+- `ProprExchange/ShadowExchange.getPublicInfo()`：模式、掩码账户、持仓模式、交易锁定/原因、
+  挂单快照完整性、权益来源与新鲜度、本地意图/挂单计数、价格（**不含任何凭证**）
+- 前端 `public/index.html`：新增独立「Propr 挑战账户」总览卡片（常驻显示于 paper 之外），
+  含 SHADOW/SIM-WRITE/CHALLENGE 文案、掩码账户、锁定/快照状态、Propr 真实权益（并注明余额/权益栏为本地模拟账户）、
+  重连按钮；不并入三所汇总口径
+- 说明：AI 服务快照/提示词按 5 所硬编码，Propr 本阶段不并入（登记 task 7.4）
+- 验证：`npm test` 全绿 + lint 0 error + HTML 交叉核对通过；server 级 shadow 与 sim-write 双模式冒烟通过
+  （shadow 写请求 0、价格 86563.5；sim-write 权益取真实账户 4999.60、未锁定）
+
 ### 修复（Review3 复审：写路径安全，2026-09-23）
 - P0 `cancelOrder` 权威复核：不依赖未验证的 `orderId` 过滤器——orderId 直查 + **全状态分页扫描**兜底，
   返回三态 `found/missing/query_failed`；仅「查到且终态」或「查不到但有成交佐证」才为 true，
