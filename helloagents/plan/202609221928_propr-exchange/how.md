@@ -96,7 +96,8 @@
    `pending/open/partially_filled/filled/cancelled/rejected/expired` 双向映射；`unknown` 一律锁定。
 
 8. **挑战风控**（`src/risk/propr-challenge.js`）：
-   - 权益来源优先级：Propr 可得字段（`ChallengeAttemptPhase.startingBalance` + `Position.unrealizedPnl` + `Trade.realizedPnl/fee`）；不可直接得则标 `equitySource='derived'` 并降权。
+   - 权益来源（ADR-004 已升级）：优先 `ChallengeAttempt.account` 权威字段（`marginBalance/balance/highWaterMark/availableBalance`）；
+     字段缺失或过期时才降级为派生并标 `equitySource='derived'` 降权。
    - UTC 日切：每日 `00:00 UTC` 重置 `startOfDayEquity`。
    - 分级：`OK → WARNING(阈值50%) → REDUCE_ONLY(内部日损线) → HALT(内部总回撤线) → LOCKED(状态未知) / BREACHED(平台失效)`。
    - 与 `GridBot` 风控解耦：作为独立守卫订阅 bot 状态与账户快照，向 bot 下发"禁止开仓/仅减仓/停止"。
@@ -136,6 +137,11 @@ sequenceDiagram
 **理由:** 避免架构性返工；净仓聚合是有损转换，不可逆。
 **替代方案:** 适配器内直接聚合净仓 → 拒绝原因: hedge 下丢失方向信息，无法正确补 reduce-only 单。
 **影响:** 阶段 5 出现 net/hedge 两分支；`GridBot` 在 hedge 分支需最小能力扩展（能力位驱动，默认关闭，不影响 6 家现有适配器）。
+**探针结论（2026-09-23，实测）:** **Propr 为 net（单向净仓）模式**。净多 0.002 时提交
+`sell/positionSide=short/reduceOnly=false`，成交被归一化为 `type=reduce, positionSide=long`
+（`positionSizeBefore=0.002 → 0.001`），未产生独立空腿。故 **阶段 5A（net）生效，5B（hedge）取消**；
+`positionSide` 仍全程保真仅作审计/对账字段，下单必须携带正确值（服务端会归一化）。
+详见 `docs/propr-api-contract.md#4`。
 
 ### ADR-002: vendor 官方 SDK 源码为 ESM，新增 ulid 依赖
 **上下文:** `propr-sdk` 不在 npm（已实测 404），官方为复制粘贴 TS 源码；intentId 需 ULID。
@@ -151,12 +157,17 @@ sequenceDiagram
 **替代方案:** side+price+size+时间窗模糊匹配 → 拒绝原因: 精度/部分成交下易误匹配。
 **影响:** 需要本地 intent 日志（内存 + `.state.json`）。
 
-### ADR-004: 权益派生 + derived 降权
-**上下文:** JS/Python SDK 均无 account equity/balance 端点。
-**决策:** 以 `startingBalance + ΣunrealizedPnl + ΣrealizedPnl − fee` 派生权益，标 `equitySource='derived'`；来源不可信或数据过期时禁止新开仓。
-**理由:** 无法取得权威权益时的保守兜底；为未来若有权益端点预留切换。
-**替代方案:** 信任本地推算不降权 → 拒绝原因: 漏算资金费/平台调整/部分成交会低估回撤。
-**影响:** 内部阈值留足安全边际（日损 1%、回撤 3%）。
+### ADR-004: 权益来源以权威字段为准（探针升级，原「派生 + 降权」降为兜底）
+**上下文:** 原判断基于 SDK 无权益端点，拟用 `startingBalance + ΣPnL − fee` 派生并降权。
+**探针发现（2026-09-23）:** `getChallengeAttempt(attemptId)` 返回体含 **`account` 权益对象**：
+`balance / marginBalance / crossWalletBalance / availableBalance / maxWithdrawAmount / highWaterMark /
+totalUnrealizedPnl / crossPositionMargin / crossOrderMargin / totalMaintenanceMargin / marginLevel`。
+**决策:** 权益以 `account.marginBalance`（或 `balance`）为准，权威来源；日损 = `balance − 当日 UTC 起点 balance`，
+回撤 = `highWaterMark − balance`。仅当该字段缺失/过期时才降级为派生并标 `equitySource='derived'` 降权。
+**理由:** 权威字段消除资金费/平台调整/部分成交的推算误差，日损与回撤口径可靠。
+**替代方案:** 坚持本地派生 → 拒绝原因: 与平台口径不一致，可能低估回撤而触线。
+**影响:** 风控实现更简单、更准；需增加「权益新鲜度」校验（updatedAt 与本地时钟偏差、拉取失败即 LOCKED）。
+详见 `docs/propr-api-contract.md#1`。
 
 ### ADR-005: Propr 作为独立第 7 所，不混入现有循环
 **上下文:** 现有 6 所硬编码于 `server.js`；Propr 是挑战账户，语义特殊。

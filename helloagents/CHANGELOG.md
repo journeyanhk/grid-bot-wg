@@ -24,6 +24,17 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 变更（Day-0 探针实测冻结，2026-09-23）
+- 契约冻结 `docs/propr-api-contract.md`：**Propr 为 net 单向净仓**（`sell/positionSide=short` 被归一化为
+  `type=reduce`，反向单直接减仓）→ 阶段 5A（net）生效、5B（hedge）取消，GridBot 无需改造
+- **权益权威可得**：`getChallengeAttempt().account` 含 `balance/marginBalance/highWaterMark/availableBalance`
+  → ADR-004 由「派生+降权」升级为「权威字段+新鲜度校验」
+- 幂等实测：同一 intentId 重复提交 → HTTP 500 + code 13084 `order_saga_idempotency_check_failed`，
+  无重复订单；`errors.js` 新增 `isIdempotencyConflict()`，分类 `idempotency_conflict` 且不可重试
+- `asset` 口径 = `"BTC"`；maker 0.00015 / taker 0.00045；quantity 0.001 与 1 位小数价格实测接受
+- 网络：`api.propr.xyz` 本机 DNS 被污染，探针新增 `PR_PROXY` 代理支持（undici dispatcher）
+- 探针新增 `discover` 命令定位正确 accountId（原 `.env` 误填 userId 导致 403）
+
 ### 修复（Review1 复审 P0/P1）
 - P0 启动护栏接入真实入口：新增 `src/exchange/propr/index.js` 工厂，`createExchange()` 先执行
   `validateProprConfig()` 再分流，脚本/测试/未来入口均无法绕过

@@ -23,14 +23,15 @@
 - [√] 1.11 【Review1 复审 P1】`package-lock.json` 对齐 1.7.0；新增 `src/exchange/propr/paper.js`（paper 端到端可用）
 
 ## 2. 契约探测与冻结（探针门）
-> 备注: 2.1–2.4 脚本已实现（`scripts/propr-probe.mjs`，含只读链/订单链/幂等链/持仓链与写权限门），
-> 待 `.env` 配置 `PROPR_API_KEY`/`PROPR_ACCOUNT_ID` 后运行并冻结 2.5/2.6。
-- [ ] 2.1 在 `scripts/propr-probe.mjs` 实现只读链探针（health/healthServices/getUser/setup/getChallenges/getChallengeAttempts/getChallengeAttempt/getPositions/getOrders/getTrades/getMarginConfig/getLeverageLimits），输出原始结构与脱敏摘要，验证 why.md#需求-Propr-只读适配器契约探测-Day-0-契约探测，依赖任务 1.1、1.3
-- [ ] 2.2 在 `scripts/propr-probe.mjs` 实现订单链探针（远离市价最小量限价单 → 查 open → 校验 side/positionSide/reduceOnly → cancel → 复查消失），依赖任务 2.1
-- [ ] 2.3 在 `scripts/propr-probe.mjs` 实现幂等链探针（固定 intentId → createOrders → 重复发送 → 查 open/trades 确认无重复），依赖任务 2.2
-- [ ] 2.4 在 `scripts/propr-probe.mjs` 实现持仓链探针（极小多仓/空仓 → 按 positionSide 读取 → 分别 reduce-only 平仓 → 确认独立消失），依赖任务 2.2
-- [ ] 2.5 在 `docs/propr-api-contract.md` 冻结结论：①hedge vs net（含"返回 positionSide 但实际聚合"情况 C）②`asset` 用 `BTC` 还是 `BTC/USDC` ③quantity/price 精度与最小名义 ④intentId 幂等实测 ⑤时间戳单位/错误结构/权益可得性；依赖任务 2.1–2.4
-- [ ] 2.6 依据 2.5 确定 `PR_POSITION_MODE` 落地路径（net 走阶段 5A / hedge 走阶段 5B），并回填 how.md#ADR-001；依赖任务 2.5
+> 已完成（2026-09-23）：`discover` 修正 accountId（原误填 user id → 403）；`readonly`/`order`/`idempotency`/`position`
+> 全部跑通。契约冻结于 `docs/propr-api-contract.md`。关键结论：**net 净仓**、**权益权威可得**、
+> **intentId 幂等有效（冲突码 13084）**、**asset="BTC"**、maker 0.00015 / taker 0.00045、**必须走 PR_PROXY**。
+- [√] 2.1 在 `scripts/propr-probe.mjs` 实现只读链探针（health/healthServices/getUser/setup/getChallenges/getChallengeAttempts/getChallengeAttempt/getPositions/getOrders/getTrades/getMarginConfig/getLeverageLimits），输出原始结构与脱敏摘要，验证 why.md#需求-Propr-只读适配器契约探测-Day-0-契约探测，依赖任务 1.1、1.3
+- [√] 2.2 在 `scripts/propr-probe.mjs` 实现订单链探针（远离市价最小量限价单 → 查 open → 校验 side/positionSide/reduceOnly → cancel → 复查消失），依赖任务 2.1
+- [√] 2.3 在 `scripts/propr-probe.mjs` 实现幂等链探针（固定 intentId → createOrders → 重复发送 → 查 open/trades 确认无重复），依赖任务 2.2
+- [√] 2.4 在 `scripts/propr-probe.mjs` 实现持仓链探针（多空独立性判定 + 只平净额清理），依赖任务 2.2
+- [√] 2.5 在 `docs/propr-api-contract.md` 冻结结论：①hedge vs net=**net** ②`asset`=**"BTC"** ③精度（0.001/1 位小数实测接受）④intentId 幂等=**有效，13084 冲突码** ⑤时间戳/错误结构/权益=**account 权威字段**；依赖任务 2.1–2.4
+- [√] 2.6 依据 2.5 确定 `PR_POSITION_MODE` 落地路径：**net 走阶段 5A，5B 取消**，已回填 how.md#ADR-001；依赖任务 2.5
 
 ## 3. 只读适配器与 Shadow（Review 2）
 - [ ] 3.1 在 `src/exchange/propr/market.js` 实现 `buildMarket()` 与精度取整工具，验证 how.md#实现要点，依赖任务 2.5
@@ -40,6 +41,9 @@
 - [ ] 3.5 在 `src/exchange/propr/shadow.js` 实现 ShadowExchange（读 Propr + 本地撮合，写方法一律抛 `ProprReadOnlyError` 并锁定），验证 why.md#需求-四级运行模式与安全护栏-Shadow-模式绝对只读，依赖任务 3.3
 - [ ] 3.6 在 `src/exchange/propr/index.js` 实现 `createExchange(cfg)` 四模式工厂，依赖任务 3.4、3.5
 - [ ] 3.7 【Review1 复审要求】分页处理：官方默认 `limit:20/offset:0`，BTC 网格挂单与成交会超页，需实现 `getAllOrders/getAllTrades/getAllPositions`（或适配器内显式翻页），不得默认结果完整，依赖任务 3.3
+- [ ] 3.8 【探针遗留】精度专项探测：用拒单边界确定 stepSize/stepPrice/minOrderSize/minOrderNotional，回填 `market.js` 与 `docs/propr-api-contract.md#2`，依赖任务 3.1
+- [ ] 3.9 【探针发现】代理接入：适配器需支持 `PR_PROXY`（undici dispatcher），否则本机 DNS 污染下 API 不可达，依赖任务 3.3
+- [ ] 3.10 【探针发现】权益读取：`getChallengeAttempt().account` 权威字段解析（`balance/marginBalance/highWaterMark/availableBalance`）+ 新鲜度校验，供风控层使用，依赖任务 3.2
 
 ## 4. 写路径与幂等（Review 3）
 - [ ] 4.1 在 `src/exchange/propr/propr.js` 实现 `placeLimitOrder/placeLimitOrders`（统一走 createOrders+自有 intentId，结果与输入等长），验证 why.md#需求-Propr-交易适配器-批量铺网与幂等，依赖任务 3.3
@@ -48,14 +52,17 @@
 - [ ] 4.4 在 `src/exchange/propr/propr.js` 实现本地 intent 日志与 `reconcileOrders()`（按 intentId 匹配），依赖任务 4.3
 - [ ] 4.5 【Review1 复审要求】适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，依赖任务 4.1
 
-## 5A. 持仓模式落地 — net 分支（仅当探针=net）
+## 5A. 持仓模式落地 — net 分支（探针已确认，本分支生效）
 - [ ] 5A.1 在 `src/exchange/propr/propr.js` 实现 `getPosition` 返回带符号净仓，`positionMode='net'`，验证 how.md#ADR-001，依赖任务 2.6
 - [ ] 5A.2 在 `test/propr.test.js` 覆盖净值降级补单方向正确性，依赖任务 5A.1
 
-## 5B. 持仓模式落地 — hedge 分支（仅当探针=hedge）
-- [ ] 5B.1 在 `src/exchange/propr/propr.js` 暴露 `positionMode='hedge'` 与双边 `getPositions()`，下单携带正确 `positionSide`，验证 why.md#需求-Propr-交易适配器-多空并存hedge-分支，依赖任务 2.6
-- [ ] 5B.2 在 `src/bot.js` 以能力位（默认关闭）最小扩展 hedge 下单与双边净库存控制，不影响现有 6 家适配器，依赖任务 5B.1
-- [ ] 5B.3 在 `test/propr.test.js` 覆盖多空并存不误合并、reduce-only 方向正确，依赖任务 5B.2
+## 5B. 持仓模式落地 — hedge 分支（探针结论为 net，本分支取消）
+- [-] 5B.1 在 `src/exchange/propr/propr.js` 暴露 `positionMode='hedge'` 与双边 `getPositions()`
+  > 备注: 探针实测 Propr 为 net 净仓（反向单被归一化为 reduce），无 hedge 语义，本分支取消。
+- [-] 5B.2 在 `src/bot.js` 以能力位最小扩展 hedge 下单与双边净库存控制
+  > 备注: 同上，GridBot 无需改造，降低回归风险。
+- [-] 5B.3 在 `test/propr.test.js` 覆盖多空并存不误合并、reduce-only 方向正确
+  > 备注: 同上，改为在 5A.2 覆盖净仓补单方向。
 
 ## 6. 接入 GridBot 与 server（Review 4）
 - [ ] 6.1 在 `src/server.js` 完成第 7 所注册全部插入点（import/校验/实例化/restore/错误监听/AI 映射/日历/Liveness/SSE/路由分区/初始化/续跑/孤儿检测/启动横幅），验证 why.md#影响范围

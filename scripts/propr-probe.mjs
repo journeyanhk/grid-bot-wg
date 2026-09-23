@@ -15,7 +15,10 @@
 //  4) 全部输出经脱敏（accountId 仅前 4+后 4；密钥不入日志）。
 //
 // 依赖：PROPR_API_KEY / PROPR_ACCOUNT_ID 已写入 .env（勿提交仓库）。
+// 代理：Node fetch 不自动读取系统代理；若 api.propr.xyz 不可达，可显式指定
+//   PR_PROXY=http://127.0.0.1:10808 node scripts/propr-probe.mjs readonly
 import { getConfig } from '../src/config.js';
+import { createDispatcher } from '../src/proxy.js';
 import { ProprClient, ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
 import { redactRecord, maskAccountId } from '../src/redact.js';
 import { ulid } from 'ulid';
@@ -23,7 +26,7 @@ import { ulid } from 'ulid';
 const argv = process.argv.slice(2);
 const cmd = argv.find((a) => !a.startsWith('-')) || 'readonly';
 const allowWrite = argv.includes('--allow-write');
-const VALID = ['readonly', 'order', 'idempotency', 'position', 'all'];
+const VALID = ['discover', 'readonly', 'order', 'idempotency', 'position', 'all'];
 
 const cfg = getConfig().propr;
 const BASE = cfg.base || 'BTC';
@@ -43,9 +46,9 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
-function requireCreds() {
+function requireCreds(needAccount = true) {
   if (!cfg.apiKey) throw new Error('缺少 PROPR_API_KEY（写入 .env，勿提交仓库）。');
-  if (!cfg.accountId) throw new Error('缺少 PROPR_ACCOUNT_ID（显式指定，禁止自动发现）。');
+  if (needAccount && !cfg.accountId) throw new Error('缺少 PROPR_ACCOUNT_ID（显式指定，禁止自动发现）。');
 }
 
 // 参考价：Propr 无公开行情端点，用底层交易所 Hyperliquid 的 allMids（公开、免鉴权）
@@ -116,6 +119,43 @@ async function cancelTracked() {
     try { await client.cancelOrder(id); } catch { /* 已成交/已撤由对账复核 */ }
   }
   createdOrderIds.clear();
+}
+
+// ── 账户发现（仅认证，不依赖 accountId；用于修正 PROPR_ACCOUNT_ID）──────────
+
+async function probeDiscover() {
+  const user = redactRecord(await client.getUser());
+  const seen = new Map();
+  for (const status of [undefined, 'active', 'passed', 'failed']) {
+    try {
+      const rows = await client.getChallengeAttempts(status ? { status, limit: 50 } : { limit: 50 });
+      for (const r of rows) {
+        if (!seen.has(r.attemptId)) seen.set(r.attemptId, { status: r.status, accountId: r.accountId, attemptId: r.attemptId, challengeId: r.challengeId, currentPhaseId: r.currentPhaseId });
+      }
+    } catch (err) {
+      log(`getChallengeAttempts(${status ?? 'all'}) 失败`, { message: err?.message, statusCode: err?.statusCode });
+    }
+  }
+  const attempts = [...seen.values()];
+  const configured = cfg.accountId;
+
+  // 完整 accountId 只落本地 runtime 文件（供修正 .env），控制台仅打印掩码
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const dir = path.resolve(process.cwd(), '.runtime');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'propr-discover.json');
+  fs.writeFileSync(file, JSON.stringify({ user, attempts, configured }, null, 2), { mode: 0o600 });
+
+  log('── 账户发现（控制台掩码，完整值已写入 .runtime/propr-discover.json）──');
+  console.log(JSON.stringify(redactRecord({
+    user,
+    configuredAccountId: configured,
+    configuredMatchesAny: attempts.some((a) => a.accountId === configured),
+    attempts: attempts.map((a) => ({ ...a, accountId: maskAccountId(a.accountId) })),
+  }), null, 2));
+  log(`完整账户 ID 候选已写入 ${file}（已 gitignore），请据此修正 .env 的 PROPR_ACCOUNT_ID`);
+  return attempts;
 }
 
 // ── 只读链 ────────────────────────────────────────────────────────────────
@@ -243,68 +283,91 @@ async function probeIdempotency() {
   };
 }
 
-// ── 写链：持仓（多空是否独立，判定 hedge/net/聚合）──────────────────────────
+// ── 写链：持仓（判定 hedge/net）──────────────────────────────────────────
+// 判定法：基线空仓 → 市价开多 2 份 → 市价开空 1 份（positionSide=short, reduceOnly=false）。
+//   hedge → 持仓出现 long 2 + short 1（两腿独立）
+//   net   → 持仓只剩 long 1（反向单直接净额对冲）
+// 清理：只平当前净额（reduceOnly），不触碰任何非本探针产生的仓位。
+
+function slimPos(p) { return { side: p.positionSide, qty: p.quantity, entry: p.entryPrice, upnl: p.unrealizedPnl }; }
 
 async function probePosition() {
   const before = await client.getPositions({ base: BASE, status: 'open' });
   const beforeLong = before.filter((p) => p.positionSide === 'long').reduce((s, p) => s + Number(p.quantity), 0);
   const beforeShort = before.filter((p) => p.positionSide === 'short').reduce((s, p) => s + Number(p.quantity), 0);
-  log('持仓基线:', { long: beforeLong, short: beforeShort });
-
-  const result = { baselineLong: beforeLong, baselineShort: beforeShort, longOpened: false, shortOpened: false, coexist: null, verdict: 'unknown' };
-
-  // 开多（仅当基线无多仓，避免触碰用户仓位）
-  if (beforeLong === 0) {
-    try {
-      await client.createOrders([buildMarketRecord({ side: 'buy', positionSide: 'long', quantity: QTY, asset: BASE })]);
-      openedLegs.push({ positionSide: 'long', quantity: QTY });
-      result.longOpened = true;
-      await sleep(2000);
-      log('开多后持仓:', (await client.getPositions({ base: BASE, status: 'open' })).map((p) => ({ side: p.positionSide, qty: p.quantity })));
-    } catch (err) {
-      log('开多失败:', { message: err?.message, statusCode: err?.statusCode });
-    }
-  } else {
-    log('基线已有多仓，跳过开多测试（不触碰用户仓位）');
+  if (beforeLong || beforeShort) {
+    log('基线存在 BTC 持仓，跳过持仓链（不触碰用户仓位）:', { long: beforeLong, short: beforeShort });
+    return { skipped: true, baselineLong: beforeLong, baselineShort: beforeShort };
   }
 
-  // 开空（仅当基线无空仓）
-  if (beforeShort === 0) {
-    try {
-      await client.createOrders([buildMarketRecord({ side: 'sell', positionSide: 'short', quantity: QTY, asset: BASE })]);
-      openedLegs.push({ positionSide: 'short', quantity: QTY });
-      result.shortOpened = true;
-      await sleep(2000);
-      const after = await client.getPositions({ base: BASE, status: 'open' });
-      log('开空后持仓:', after.map((p) => ({ side: p.positionSide, qty: p.quantity })));
-      const sides = after.map((p) => p.positionSide);
-      result.coexist = result.longOpened && sides.includes('long') && sides.includes('short');
-      result.verdict = result.coexist ? 'hedge' : (sides.length === 1 ? 'net' : 'aggregated_or_unknown');
-    } catch (err) {
-      log('开空失败:', { message: err?.message, statusCode: err?.statusCode });
-    }
-  } else {
-    log('基线已有空仓，跳过开空测试（不触碰用户仓位）');
-  }
+  const qty = Number(QTY);
+  const result = { baselineLong: 0, baselineShort: 0, steps: [], verdict: 'unknown' };
 
-  // 平掉本探针开出的腿（只平自己开的量）
-  for (const leg of openedLegs) {
-    const closeSide = leg.positionSide === 'long' ? 'sell' : 'buy';
+  // 1) 市价开多 2 份
+  await client.createOrders([buildMarketRecord({ side: 'buy', positionSide: 'long', quantity: qty * 2, asset: BASE })]);
+  await sleep(2500);
+  const p1 = await client.getPositions({ base: BASE, status: 'open' });
+  result.steps.push({ step: 'open_long_2x', positions: p1.map(slimPos) });
+
+  // 2) 反向市价开空 1 份（positionSide=short，reduceOnly=false）
+  let shortErr = null;
+  try {
+    await client.createOrders([buildMarketRecord({ side: 'sell', positionSide: 'short', quantity: qty, asset: BASE })]);
+  } catch (err) {
+    shortErr = { message: err?.message, statusCode: err?.statusCode, code: err?.code };
+  }
+  await sleep(2500);
+  const p2 = await client.getPositions({ base: BASE, status: 'open' });
+  result.steps.push({ step: 'open_short_1x', positions: p2.map(slimPos), error: shortErr });
+
+  const long2 = p2.filter((p) => p.positionSide === 'long').reduce((s, p) => s + Number(p.quantity), 0);
+  const short2 = p2.filter((p) => p.positionSide === 'short').reduce((s, p) => s + Number(p.quantity), 0);
+  if (long2 > 0 && short2 > 0) result.verdict = 'hedge';
+  else if (long2 > 0 && short2 === 0 && long2 < qty * 2) result.verdict = 'net';
+  else if (long2 + short2 === 0) result.verdict = 'net';
+  else result.verdict = 'unknown';
+
+  // 侧证：最近成交记录里的 positionSide / positionSizeBefore
+  const trades = await client.getTrades({ base: BASE, limit: 10 });
+  result.recentTrades = trades.map((t) => ({
+    side: t.side, positionSide: t.positionSide, type: t.type, qty: t.quantity,
+    realizedPnl: t.realizedPnl, positionSizeBefore: t.positionSizeBefore, isLiquidation: t.isLiquidation,
+  }));
+
+  // 3) 清理：只平当前净额
+  const after = await client.getPositions({ base: BASE, status: 'open' });
+  for (const p of after) {
+    const closeSide = p.positionSide === 'long' ? 'sell' : 'buy';
     try {
-      await client.createOrders([buildMarketRecord({ side: closeSide, positionSide: leg.positionSide, quantity: leg.quantity, asset: BASE, reduceOnly: true, closePosition: true })]);
-      log(`平仓（${leg.positionSide}）完成`);
+      await client.createOrders([buildMarketRecord({ side: closeSide, positionSide: p.positionSide, quantity: Number(p.quantity), asset: BASE, reduceOnly: true, closePosition: true })]);
+      log(`清理平仓（${p.positionSide} ${p.quantity}）完成`);
     } catch (err) {
-      log(`平仓（${leg.positionSide}）失败:`, { message: err?.message, statusCode: err?.statusCode });
+      log(`清理平仓（${p.positionSide}）失败:`, { message: err?.message, statusCode: err?.statusCode });
     }
   }
-  openedLegs.length = 0;
-  await sleep(2000);
-  const afterClose = await client.getPositions({ base: BASE, status: 'open' });
-  log('平仓后持仓:', afterClose.map((p) => ({ side: p.positionSide, qty: p.quantity })));
+  await sleep(2500);
+  const final = await client.getPositions({ base: BASE, status: 'open' });
+  result.finalPositions = final.map(slimPos);
+  if (final.length) console.error(`[警告] 仍有残留仓位: ${JSON.stringify(final.map(slimPos))}，请人工检查`);
   return result;
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function maskProxy(url) {
+  return String(url).replace(/\/\/([^:@/]+):[^@/]+@/, '//$1:***@');
+}
+
+/** 代理支持：Node fetch 默认不走系统代理，配置了 PR_PROXY/GLOBAL_PROXY 时手动挂 dispatcher。 */
+async function applyProxy() {
+  if (!cfg.proxy) return false;
+  const dispatcher = await createDispatcher(cfg.proxy);
+  if (!dispatcher) throw new Error(`代理无法初始化: ${maskProxy(cfg.proxy)}`);
+  const { setGlobalDispatcher } = await import('undici');
+  setGlobalDispatcher(dispatcher);
+  log(`已启用代理 ${maskProxy(cfg.proxy)}`);
+  return true;
+}
 
 // ── 主流程 ────────────────────────────────────────────────────────────────
 
@@ -312,15 +375,20 @@ let client;
 
 async function main() {
   if (!VALID.includes(cmd)) throw new Error(`未知命令 ${cmd}，允许值：${VALID.join('|')}`);
-  if (cmd !== 'readonly' && !allowWrite) {
+  if (!['discover', 'readonly'].includes(cmd) && !allowWrite) {
     throw new Error(`命令 ${cmd} 会向 Propr 发送写请求，必须显式加 --allow-write 才执行。`);
   }
-  requireCreds();
+  requireCreds(cmd !== 'discover');
   if (!cfg.allowedAccountIds.length) {
     log('提示: 未配置 PROPR_ALLOWED_ACCOUNT_IDS 白名单（建议在 .env 中加上当前账户）');
   }
+  await applyProxy();
 
   client = new ProprClient({ apiKey: cfg.apiKey, baseUrl: cfg.apiUrl, timeout: cfg.timeoutMs });
+  if (cmd === 'discover') {
+    await probeDiscover();
+    return;
+  }
   await client.setup(cfg.accountId);
   log(`已绑定账户 ${maskAccountId(client.accountId)}，模式=${cfg.mode}，命令=${cmd}，写权限=${allowWrite ? '开启' : '关闭'}`);
 

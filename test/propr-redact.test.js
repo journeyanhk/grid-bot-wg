@@ -4,7 +4,7 @@ import { strict as assert } from 'node:assert';
 import { maskAccountId, redactSecrets, redactRecord, safeError } from '../src/redact.js';
 import { logger } from '../src/log.js';
 import { validateProprConfig } from '../src/config.js';
-import { ProprReadOnlyError, UnknownOrderStateError, classifyProprError, isRetryableProprError, isAuthError } from '../src/exchange/propr/errors.js';
+import { ProprReadOnlyError, UnknownOrderStateError, classifyProprError, isRetryableProprError, isAuthError, isIdempotencyConflict } from '../src/exchange/propr/errors.js';
 import { ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
 
 {
@@ -109,6 +109,14 @@ import { ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
   assert.equal(isRetryableProprError(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })), true);
   assert.equal(isAuthError(new ProprAPIError(403, null, 'forbidden')), true);
   assert.equal(isAuthError(new ProprAPIError(400, null, 'bad')), false);
+
+  // Day-0 实测：重复 intentId → HTTP 500 + code 13084（幂等冲突，不可当 5xx 重试）
+  const idem = new ProprAPIError(500, 13084, '[500] 13084: order_saga_idempotency_check_failed');
+  assert.equal(isIdempotencyConflict(idem), true);
+  assert.equal(classifyProprError(idem), 'idempotency_conflict');
+  assert.equal(isRetryableProprError(idem), false, '幂等冲突绝不能重试');
+  assert.equal(isIdempotencyConflict(new ProprAPIError(500, null, 'internal')), false);
+  assert.equal(isRetryableProprError(new ProprAPIError(500, null, 'internal')), true);
 }
 
 console.log('propr-redact.test.js 全部通过');

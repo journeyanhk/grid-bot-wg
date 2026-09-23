@@ -41,9 +41,10 @@ export function isTimeoutError(err) {
   );
 }
 
-/** 可安全重试的 API 错误（限频与 5xx）。 */
+/** 可安全重试的 API 错误（限频与 5xx）。幂等冲突例外：虽然 HTTP 500，但不可重试。 */
 export function isRetryableProprError(err) {
   if (isTimeoutError(err)) return true;
+  if (isIdempotencyConflict(err)) return false;
   const status = err?.statusCode;
   return status === 429 || (typeof status === 'number' && status >= 500);
 }
@@ -53,6 +54,16 @@ export function isAuthError(err) {
   return err?.statusCode === 401 || err?.statusCode === 403;
 }
 
+/**
+ * Propr 幂等冲突：重复 intentId 提交返回 HTTP 500 + code 13084
+ * （order_saga_idempotency_check_failed）。语义是"该 intentId 已在处理/已存在"，
+ * 必须按 intentId 对账后返回既有订单，**绝不能当作可重试 5xx 盲目重试**。
+ * 该结论来自 Day-0 探针实测（2026-09-23）。
+ */
+export function isIdempotencyConflict(err) {
+  return err?.code === 13084 || /idempotency_check_failed/i.test(String(err?.message || ''));
+}
+
 /** 归一化错误分类（用于日志与告警文案）。 */
 export function classifyProprError(err) {
   if (err instanceof ProprReadOnlyError) return 'read_only';
@@ -60,6 +71,7 @@ export function classifyProprError(err) {
   if (err instanceof ProprStartupError) return 'startup';
   if (isTimeoutError(err)) return 'timeout';
   if (err instanceof ProprAPIError) {
+    if (isIdempotencyConflict(err)) return 'idempotency_conflict';
     if (err.statusCode === 429) return 'rate_limited';
     if (isAuthError(err)) return 'auth';
     if (err.statusCode >= 500) return 'server';
