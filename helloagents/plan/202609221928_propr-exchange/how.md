@@ -166,7 +166,11 @@ totalUnrealizedPnl / crossPositionMargin / crossOrderMargin / totalMaintenanceMa
 回撤 = `highWaterMark − balance`。仅当该字段缺失/过期时才降级为派生并标 `equitySource='derived'` 降权。
 **理由:** 权威字段消除资金费/平台调整/部分成交的推算误差，日损与回撤口径可靠。
 **替代方案:** 坚持本地派生 → 拒绝原因: 与平台口径不一致，可能低估回撤而触线。
-**影响:** 风控实现更简单、更准；需增加「权益新鲜度」校验（updatedAt 与本地时钟偏差、拉取失败即 LOCKED）。
+**影响:** 风控实现更简单、更准；需增加「权益新鲜度」校验（拉取失败或超时未刷新即 LOCKED）。
+**刷新时效实测（2026-09-23，`equity` 命令）:** `balance`/`availableBalance` 开平仓**即时**更新；
+`unrealizedPnl`/`marginBalance` 延迟 **≤30s**；⚠️ `account.updatedAt` 粒度粗（跨 4 次采样不变），
+**不可作新鲜度依据** → 必须用本地拉取时刻 `equityFreshAt`。日损用 `balance`、回撤用
+`highWaterMark − balance`、浮亏用 `marginBalance`（容忍 ≤30s 延迟）。
 详见 `docs/propr-api-contract.md#1`。
 
 ### ADR-005: Propr 作为独立第 7 所，不混入现有循环

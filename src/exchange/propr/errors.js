@@ -61,7 +61,7 @@ export function isAuthError(err) {
  * 该结论来自 Day-0 探针实测（2026-09-23）。
  */
 export function isIdempotencyConflict(err) {
-  return err?.code === 13084 || /idempotency_check_failed/i.test(String(err?.message || ''));
+  return String(err?.code) === '13084' || /idempotency_check_failed/i.test(String(err?.message || ''));
 }
 
 /** 归一化错误分类（用于日志与告警文案）。 */

@@ -24,6 +24,17 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review2 复审：探针安全强化，2026-09-23）
+- P0 asset fallback 收敛：仅明确 400 参数错误才换口径；超时/网络/429/5xx 一律先按 intentId 对账，
+  对账不到即报未知订单态并停止创建（杜绝重复下单）
+- P0 持仓链改 try/finally：以真实 `getPositions()` 循环平至空仓（最多 4 轮），残留则 P0 告警 + 非零退出码
+- P0 非 `discover` 命令严格绑定 `PROPR_ACCOUNT_ID`（抛 `ProprStartupError`），禁止静默回退 `active[0]`
+- P1 权益检测修正到 `challengeAttempt.account` + `balance` 硬断言
+- P1 幂等/撤单复核改为跨全部订单状态 + cancel 响应/终态/成交数多重信号
+- P1 `13084` 识别兼容字符串；契约文档拆分「已冻结 / 待验证」并收窄权益措辞
+- 新增 `equity` 命令实测权益刷新时效：`balance`/`availableBalance` 即时、`unrealizedPnl` ≤30s、
+  ⚠️ `account.updatedAt` 粒度粗不可作新鲜度依据（须用本地 `equityFreshAt`）
+
 ### 变更（Day-0 探针实测冻结，2026-09-23）
 - 契约冻结 `docs/propr-api-contract.md`：**Propr 为 net 单向净仓**（`sell/positionSide=short` 被归一化为
   `type=reduce`，反向单直接减仓）→ 阶段 5A（net）生效、5B（hedge）取消，GridBot 无需改造

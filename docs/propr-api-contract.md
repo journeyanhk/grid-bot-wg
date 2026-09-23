@@ -4,7 +4,7 @@
 - **环境:** Production `https://api.propr.xyz/v1`（Propr 官方：所有账户均为模拟账户）
 - **账户:** $5K Free Trial（`type=paper`，`exchange=hyperliquid`，`currency=USDC`）
 - **方法:** `scripts/propr-probe.mjs`（discover / readonly / order / idempotency / position）
-- **结论一句话:** 接口可用、intentId 幂等有效、**持仓为 net（单向净仓）**、**权益权威可得**。
+- **结论一句话:** 接口可用、intentId 幂等有效、**持仓为 net（单向净仓）**、**权益字段权威可读**（更新时效已实测）。
 
 ---
 
@@ -52,8 +52,29 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 ```
 
 - `phases[]` 另有 `startingBalance` / `endingBalance`（active phase 下 `endingBalance="0"`，**不可当权益用**）。
-- ⇒ **权益权威可得**：日损 = `balance − 当日 UTC 起点 balance`；回撤 = `highWaterMark − balance`（或 `marginBalance`）。
-- ⇒ ADR-004 由「派生 + derived 降权」升级为「权威字段 + 新鲜度校验」；派生逻辑仅作降级兜底。
+- ⇒ 权益字段权威可读：日损 = `balance − 当日 UTC 起点 balance`；回撤 = `highWaterMark − balance`（或 `marginBalance`）。
+- ⇒ ADR-004 升级为「权威字段 + 新鲜度校验」；派生逻辑仅作降级兜底。
+
+### 1.1 权益刷新时效（2026-09-23 实测，`equity` 命令）
+
+| 采样点 | balance | availableBalance | marginBalance | uPnL |
+|---|---|---|---|---|
+| baseline | 4999.776345 | 4999.776345 | 4999.776345 | 0 |
+| 开仓 +0s | 4999.737402 | **4913.196402** | 4999.737402 | 0 |
+| 开仓 +10s | 4999.737402 | 4913.196402 | 4999.737402 | 0 |
+| 开仓 +30s | 4999.737402 | 4913.168902 | **4999.709902** | **−0.0275** |
+| 开仓 +60s | 4999.737402 | 4913.191902 | 4999.732902 | −0.0045 |
+| 平仓 +10s | 4999.682466 | 4999.682466 | 4999.682466 | 0 |
+
+结论：
+
+- **`balance`（已实现盈亏+手续费）即时更新**：开仓瞬间扣 taker 费、平仓瞬间结算 realizedPnl；
+- **`availableBalance`（保证金占用）即时更新**：开仓立即锁定 ~86.5 USDC，平仓立即释放；
+- **`unrealizedPnl` / `marginBalance` 延迟 ≤30s**（+0/+10s 为 0，+30s 出现，+60s 再次变化）；
+- ⚠️ **`account.updatedAt` 粒度粗，不可作为权益新鲜度依据**：跨 +0/+10/+30/+60s 四次采样保持
+  `02:47:37.739Z` 不变，仅在平仓后才跳到 `02:49:22.495Z`。新鲜度必须用**本地拉取时间戳** `equityFreshAt`。
+- ⇒ 风控实现：`equitySource='propr_account'`、`equityFreshAt=本地拉取时刻`、超时未刷新 → `TRADING_LOCKED`；
+  日损用 `balance`（即时可信），回撤用 `highWaterMark − balance`（可信），浮亏判断用 `marginBalance`（容忍 ≤30s 延迟）。
 
 ---
 
@@ -128,10 +149,31 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 
 ---
 
-## 7. 待补（Review 2 专项）
+## 7. 冻结状态
 
-- [ ] stepSize / stepPrice / minOrderSize / minOrderNotional 精确边界（拒单试探）
-- [ ] 部分成交行为（`partially_filled` 与 `cumulativeQuantity` 更新时机）
-- [ ] 挂单/成交的更新延迟（轮询 vs WS）
-- [ ] WS 事件实测（`order.filled` / `trade.created` / `position.updated`）
-- [ ] 平台风控字段（挑战日损/回撤口径）与 Free Trial 差异
+### 已冻结（有实测依据）
+
+1. Propr 账户为模拟账户（`type=paper`、`exchange=hyperliquid`、`currency=USDC`）
+2. Base URL 与认证方式（`X-API-Key`，1200 req/min）
+3. `accountId` 必须使用 challenge account ID（**不是 userId**，误填导致 403）
+4. **positionMode = net（单向净仓）**
+5. `positionSide` 不是独立 hedge leg（服务端按净仓归一化）
+6. `createOrders` 保留调用方 `intentId`
+7. 重复 `intentId` 不产生重复订单
+8. `13084` 为幂等冲突，不可按 5xx 重试
+9. `account` 对象含权威权益字段，且**刷新时效已实测**（`balance`/`availableBalance` 即时，
+   `unrealizedPnl`/`marginBalance` ≤30s，`updatedAt` 不可作新鲜度依据）
+10. BTC `asset` 口径 = `"BTC"`
+11. 已观测精度：`quantity 0.001`、价格 1 位小数被接受
+12. 本机访问必须走代理（`PR_PROXY`）
+
+### 待验证（Review 2 专项）
+
+1. `stepSize` / `minOrderSize` / `minNotional` 精确边界（拒单试探）
+2. `highWaterMark` 更新规则（需盈利场景观测）
+3. Free Trial 与付费 Challenge 的风控差异
+4. 部分成交更新时机（`partially_filled` 与 `cumulativeQuantity`）
+5. WebSocket 事件语义（`order.filled` / `trade.created` / `position.updated`）
+6. 订单列表分页完整性（`limit:20/offset:0`）
+7. 市价单在快速行情下的成交与滑点
+8. 挑战日损/回撤日切是否与 UTC 一致（Free Trial 无风控约束，需付费账户验证）

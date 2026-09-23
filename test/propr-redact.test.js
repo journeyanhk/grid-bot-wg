@@ -117,6 +117,8 @@ import { ProprAPIError } from '../src/exchange/propr/propr-sdk.js';
   assert.equal(isRetryableProprError(idem), false, '幂等冲突绝不能重试');
   assert.equal(isIdempotencyConflict(new ProprAPIError(500, null, 'internal')), false);
   assert.equal(isRetryableProprError(new ProprAPIError(500, null, 'internal')), true);
+  // code 可能是数字或字符串（不同 JSON 错误路径）
+  assert.equal(isIdempotencyConflict(new ProprAPIError(500, '13084', 'x')), true);
 }
 
 console.log('propr-redact.test.js 全部通过');

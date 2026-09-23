@@ -33,6 +33,16 @@
 - [√] 2.5 在 `docs/propr-api-contract.md` 冻结结论：①hedge vs net=**net** ②`asset`=**"BTC"** ③精度（0.001/1 位小数实测接受）④intentId 幂等=**有效，13084 冲突码** ⑤时间戳/错误结构/权益=**account 权威字段**；依赖任务 2.1–2.4
 - [√] 2.6 依据 2.5 确定 `PR_POSITION_MODE` 落地路径：**net 走阶段 5A，5B 取消**，已回填 how.md#ADR-001；依赖任务 2.5
 
+## 2R. Review2 复审修复（探针安全强化，2026-09-23）
+- [√] 2R.1 【P0】asset fallback 仅允许明确 400 参数错误触发；超时/网络/429/5xx 一律先按 intentId 对账，对账不到即报未知订单态并停止创建
+- [√] 2R.2 【P0】`probePosition()` 改 try/finally，清理以真实 `getPositions()` 为准循环平至空仓（最多 4 轮），残留则 P0 告警 + 非零退出码；移除对内存 `openedLegs` 的依赖
+- [√] 2R.3 【P0】非 `discover` 命令严格绑定 `PROPR_ACCOUNT_ID`（`bindConfiguredAccount()` 抛 `ProprStartupError`），禁止回退 `active[0]`
+- [√] 2R.4 【P1】权益字段检测修正到 `challengeAttempt.account` + `balance` 硬断言；`equityFieldsPresent` 用 `Object.hasOwn`
+- [√] 2R.5 【P1】幂等/撤单复核改为跨全部状态查询（`pending/open/partially_filled/filled/cancelled/rejected/expired`），并增加 cancel 响应/终态/成交数多重信号
+- [√] 2R.6 【P1】`13084` 识别兼容字符串（`String(err?.code) === '13084'`）
+- [√] 2R.7 【Review2 新增】`equity` 命令：开/持仓/平仓后按 0/10/30/60s 采样权益刷新时效（实测：balance/available 即时、uPnL ≤30s、`updatedAt` 不可用）
+- [√] 2R.8 契约文档收窄措辞并拆分「已冻结 / 待验证」两节（`docs/propr-api-contract.md#7`）
+
 ## 3. 只读适配器与 Shadow（Review 2）
 - [ ] 3.1 在 `src/exchange/propr/market.js` 实现 `buildMarket()` 与精度取整工具，验证 how.md#实现要点，依赖任务 2.5
 - [ ] 3.2 在 `src/exchange/propr/mapper.js` 实现 `mapProprOrder/mapProprPosition/mapProprTrade/mapProprMargin/mapProprError` 纯函数，依赖任务 1.4、2.5
@@ -43,7 +53,8 @@
 - [ ] 3.7 【Review1 复审要求】分页处理：官方默认 `limit:20/offset:0`，BTC 网格挂单与成交会超页，需实现 `getAllOrders/getAllTrades/getAllPositions`（或适配器内显式翻页），不得默认结果完整，依赖任务 3.3
 - [ ] 3.8 【探针遗留】精度专项探测：用拒单边界确定 stepSize/stepPrice/minOrderSize/minOrderNotional，回填 `market.js` 与 `docs/propr-api-contract.md#2`，依赖任务 3.1
 - [ ] 3.9 【探针发现】代理接入：适配器需支持 `PR_PROXY`（undici dispatcher），否则本机 DNS 污染下 API 不可达，依赖任务 3.3
-- [ ] 3.10 【探针发现】权益读取：`getChallengeAttempt().account` 权威字段解析（`balance/marginBalance/highWaterMark/availableBalance`）+ 新鲜度校验，供风控层使用，依赖任务 3.2
+- [ ] 3.10 【探针发现】权益读取：`getChallengeAttempt().account` 权威字段解析（`balance/marginBalance/highWaterMark/availableBalance`）+ 新鲜度校验（用本地 `equityFreshAt`，**不用 `updatedAt`**），供风控层使用，依赖任务 3.2
+- [√] 3.11 【探针遗留】权益刷新时效专项探测（`equity` 命令，0/10/30/60s 采样），结论已回填 `docs/propr-api-contract.md#1.1`
 
 ## 4. 写路径与幂等（Review 3）
 - [ ] 4.1 在 `src/exchange/propr/propr.js` 实现 `placeLimitOrder/placeLimitOrders`（统一走 createOrders+自有 intentId，结果与输入等长），验证 why.md#需求-Propr-交易适配器-批量铺网与幂等，依赖任务 3.3
