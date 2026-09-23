@@ -1,8 +1,11 @@
 // Propr 官方 JavaScript/TypeScript SDK 的 ESM vendor 版本。
 // 来源：https://www.propr.xyz/developers/javascript-sdk（官方“复制粘贴”分发，npm 无 propr-sdk 包）。
-// 变更：去除 TS 类型标注改为 ESM + JSDoc；错误消息在抛出前统一脱敏（Review1 P0，防止
-// API 返回文本携带凭证外泄）；其余请求路径/字段/错误语义与官方源码保持一致，
-// 升级时按官方文档逐段比对。intentId 由调用方提供（幂等键），依赖 ulid。
+// 变更（相对官方）：
+//  1) 去除 TS 类型标注改为 ESM + JSDoc；
+//  2) 错误消息在抛出前统一脱敏（Review1 P0，防止 API 返回文本携带凭证外泄）；
+//  3) 官方 `createOrder()` 会自造并覆盖 `intentId`，项目内**禁用**，故改名 `createOrderRaw()`
+//     （Review3 要求：避免误用导致幂等键失效）；项目下单一律走 `createOrders()`。
+// 其余请求路径/字段/错误语义与官方源码保持一致，升级时按官方文档逐段比对。依赖 ulid。
 import { ulid } from 'ulid';
 import { redactSecrets } from '../../redact.js';
 
@@ -138,7 +141,9 @@ export class ProprClient {
     return res.data ?? [];
   }
 
-  async createOrder(params) {
+  // ⚠️ 项目内禁用：官方原始下单接口会自造并覆盖 intentId，使幂等键失效。
+  // 项目下单必须走 createOrders()（保留调用方 intentId）。
+  async createOrderRaw(params) {
     const order = {
       accountId: this.accountId,
       intentId: ulid(),
@@ -251,25 +256,25 @@ export class ProprClient {
   // ── Convenience Methods ──
 
   async marketBuy(base, quantity, quote = 'USDC') {
-    return this.createOrder({
+    return this.createOrderRaw({
       side: 'buy', positionSide: 'long', orderType: 'market', asset: base, base, quote, quantity,
     });
   }
 
   async marketSell(base, quantity, quote = 'USDC', reduceOnly = true) {
-    return this.createOrder({
+    return this.createOrderRaw({
       side: 'sell', positionSide: 'long', orderType: 'market', asset: base, base, quote, quantity, reduceOnly,
     });
   }
 
   async limitBuy(base, quantity, price, quote = 'USDC') {
-    return this.createOrder({
+    return this.createOrderRaw({
       side: 'buy', positionSide: 'long', orderType: 'limit', asset: base, base, quote, quantity, price,
     });
   }
 
   async limitSell(base, quantity, price, quote = 'USDC', reduceOnly = true) {
-    return this.createOrder({
+    return this.createOrderRaw({
       side: 'sell', positionSide: 'long', orderType: 'limit', asset: base, base, quote, quantity, price, reduceOnly,
     });
   }
@@ -283,7 +288,7 @@ export class ProprClient {
     const pos = positions[0];
     const closeSide = pos.positionSide === 'long' ? 'sell' : 'buy';
 
-    return this.createOrder({
+    return this.createOrderRaw({
       side: closeSide,
       positionSide: pos.positionSide,
       orderType: 'market',

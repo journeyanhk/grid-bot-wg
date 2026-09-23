@@ -19,6 +19,12 @@ export const ORDER_STATUS = Object.freeze({
 /** 仍可能成交（活动）的状态。 */
 export const LIVE_STATUSES = Object.freeze(['pending', 'open', 'partially_filled']);
 
+/** 终态（不会再变化）。 */
+export const TERMINAL_STATUSES = Object.freeze(['filled', 'cancelled', 'rejected', 'expired']);
+
+/** 全部状态（对账/按 intentId 查找用）。 */
+export const ALL_STATUSES = Object.freeze([...LIVE_STATUSES, ...TERMINAL_STATUSES]);
+
 const STATUS_TO_INTERNAL = Object.freeze({
   pending: 'submitted',
   open: 'open',

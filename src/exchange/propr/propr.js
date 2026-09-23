@@ -7,10 +7,14 @@
 // 行情来源（ADR-007）：Propr 无公开行情端点，价格/K 线取自底层交易所 Hyperliquid 公开 API
 // （allMids / candleSnapshot）。标记价与 HL 中间价可能有微小差异，网格按 tick 铺单足够。
 import { EventEmitter } from 'node:events';
+import { ulid } from 'ulid';
 import { ProprClient } from './propr-sdk.js';
-import { ProprStartupError } from './errors.js';
-import { buildMarket, toEpochMs, PROPR_MAKER_FEE } from './market.js';
-import { mapProprOrder, mapProprPosition, mapProprTrade, mapProprError, netPositionFromViews, LIVE_STATUSES } from './mapper.js';
+import { ProprStartupError, UnknownOrderStateError, isIdempotencyConflict } from './errors.js';
+import { buildMarket, toEpochMs, roundQty, roundPrice, assertOrderPrecision, PROPR_MAKER_FEE } from './market.js';
+import {
+  mapProprOrder, mapProprPosition, mapProprTrade, mapProprMargin, mapProprError,
+  netPositionFromViews, LIVE_STATUSES, ALL_STATUSES,
+} from './mapper.js';
 import { createDispatcher } from '../../proxy.js';
 import { logger } from '../../log.js';
 import { maskAccountId } from '../../redact.js';
@@ -27,6 +31,9 @@ const EQUITY_STALE_MS = 60_000;
 // 重连/恢复走 full 全量（最多 MAX_PAGES 页）。
 const TRADE_OVERLAP_MS = 30_000;
 const TRADE_MAX_PAGES = 5;
+const MAX_INTENTS = 500;
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 export class ProprExchange extends EventEmitter {
   constructor(cfg = {}) {
@@ -71,6 +78,10 @@ export class ProprExchange extends EventEmitter {
     this._pollTimer = null;
     this._pollLight = false;
     this._stopped = false;
+    // 写路径（Review 3）：意图日志（幂等键 → 意图）+ 交易锁定
+    this._intents = new Map();
+    this.tradingLocked = false;
+    this.lockReason = null;
   }
 
   get orderBatchPaceMs() { return this._pollLight ? 400 : 200; }
@@ -422,16 +433,274 @@ export class ProprExchange extends EventEmitter {
     }
   }
 
-  // ── 写路径（Review 3 实现；当前显式拒绝，避免未完成幂等前误写）─────────────
+  // ── 写路径（Review 3）：intentId 幂等 + 撤单复核 + 全平 + 未知态锁定 ─────────
+  //
+  // 锁定语义：tradingLocked 只拦截**开仓/改杠杆**；撤单与平仓（降低风险）始终允许。
+  // 所有下单统一走 createOrders（保留自有 intentId）；官方 createOrderRaw 项目内禁用。
 
-  _notImplemented(action) {
-    throw new Error(`Propr ${action} 将在 Review 3 提供（写路径 + intentId 幂等 + 对账）。`);
+  _lockTrading(reason) {
+    if (this.tradingLocked) return;
+    this.tradingLocked = true;
+    this.lockReason = reason;
+    logger.error('propr', `交易锁定: ${reason}`);
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', Object.assign(new Error(reason), { kind: 'unknown_order_state' }));
+    }
   }
 
-  async setLeverage() { this._notImplemented('setLeverage'); }
-  async placeLimitOrder() { this._notImplemented('placeLimitOrder'); }
-  async placeLimitOrders() { this._notImplemented('placeLimitOrders'); }
-  async cancelOrder() { this._notImplemented('cancelOrder'); }
-  async cancelAll() { this._notImplemented('cancelAll'); }
-  async closePosition() { this._notImplemented('closePosition'); }
+  unlockTrading(reason = '人工解锁') {
+    if (!this.tradingLocked) return;
+    this.tradingLocked = false;
+    this.lockReason = null;
+    logger.warn('propr', `交易解锁: ${reason}`);
+  }
+
+  isTradingLocked() { return this.tradingLocked; }
+
+  _assertCanOpen() {
+    if (this.tradingLocked) throw new Error(`Propr 交易已锁定（${this.lockReason}），拒绝开仓/改杠杆`);
+  }
+
+  _rememberIntent(intent) {
+    this._intents.set(intent.intentId, intent);
+    while (this._intents.size > MAX_INTENTS) this._intents.delete(this._intents.keys().next().value);
+  }
+
+  getIntents() { return [...this._intents.values()]; }
+
+  _buildRecord({ side, positionSide, price, sizeBase, reduceOnly = false, intentId, orderType = 'limit', timeInForce = 'GTC', closePosition = false }) {
+    const record = {
+      accountId: this.accountId,
+      intentId,
+      exchange: 'hyperliquid',
+      type: orderType,
+      side,
+      positionSide,
+      productType: 'perp',
+      timeInForce,
+      asset: this.base,
+      base: this.base,
+      quote: this.quote,
+      quantity: String(sizeBase),
+      reduceOnly: !!reduceOnly,
+      closePosition: !!closePosition,
+    };
+    if (price != null) record.price = String(price);
+    return record;
+  }
+
+  /** 按 intentId 跨全部状态查找（对账核心；只查 open 会漏 pending/partial 与终态）。 */
+  async _findOrdersByIntent(intentId) {
+    const found = new Map();
+    for (const status of ALL_STATUSES) {
+      const rows = await this.getAllOrders({ base: this.base, status }).catch(() => []);
+      for (const raw of rows) if (raw.intentId === intentId) found.set(String(raw.orderId), raw);
+    }
+    return [...found.values()];
+  }
+
+  async _getOrderById(orderId) {
+    try {
+      const rows = await this.client.getOrders({ orderId, limit: 5 });
+      return (rows || []).find((r) => String(r.orderId) === String(orderId)) ?? null;
+    } catch { return null; }
+  }
+
+  _adoptCreated(raw, intent) {
+    intent.state = 'accepted';
+    intent.orderId = String(raw.orderId);
+    const view = mapProprOrder(raw, { levelIndex: intent.levelIndex });
+    this._orders.set(view.orderId, view);
+    return { orderId: view.orderId, price: view.price, sizeBase: view.sizeBase, clientOrderId: intent.intentId, status: view.status };
+  }
+
+  /**
+   * 下单异常恢复（核心幂等）：
+   * - 先按 intentId 对账；命中 → 返回既有订单，绝不重复创建；
+   * - 明确 400 参数错误（非幂等冲突）→ 视为未创建，抛原错；
+   * - 其余（超时/网络/429/5xx/13084 对账不到）→ 未知态：锁定交易并抛 UnknownOrderStateError。
+   */
+  async _recoverIntent(err, intent) {
+    const existing = await this._findOrdersByIntent(intent.intentId).catch(() => []);
+    if (existing.length) {
+      logger.warn('propr', `下单异常但已按 intentId 对账到订单（不重复创建）: ${intent.intentId}`, mapProprError(err));
+      intent.state = 'reconciled';
+      return { ...this._adoptCreated(existing[0], intent), reconciled: true };
+    }
+    if (err?.statusCode === 400 && !isIdempotencyConflict(err)) {
+      this._intents.delete(intent.intentId);
+      throw err;
+    }
+    intent.state = 'unknown';
+    this._lockTrading(`订单状态未知（intentId=${intent.intentId}, ${mapProprError(err).kind}），需人工核查`);
+    throw new UnknownOrderStateError(`订单状态未知（intentId=${intent.intentId}），已锁定交易`, { intentId: intent.intentId, cause: mapProprError(err) });
+  }
+
+  async placeLimitOrder(order = {}) {
+    this._assertCanOpen();
+    const marketId = String(order.marketId ?? this.base);
+    if (marketId !== this.base) throw new Error(`Propr 适配器仅支持 ${this.base}，收到 ${marketId}`);
+    const price = roundPrice(order.price, this.market);
+    const sizeBase = roundQty(order.sizeBase, this.market);
+    assertOrderPrecision({ price, sizeBase }, this.market);
+    const positionSide = order.positionSide ?? (order.side === 'buy' ? 'long' : 'short');
+    const intent = {
+      intentId: order.clientOrderId || ulid(), marketId, side: order.side, positionSide,
+      price, sizeBase, reduceOnly: !!order.reduceOnly, levelIndex: order.levelIndex ?? null,
+      state: 'created', createdAt: Date.now(),
+    };
+    this._rememberIntent(intent);
+    const record = this._buildRecord({ side: intent.side, positionSide, price, sizeBase, reduceOnly: intent.reduceOnly, intentId: intent.intentId });
+    try {
+      const rows = await this.client.createOrders([record]);
+      const raw = rows?.[0];
+      if (!raw?.orderId) throw new UnknownOrderStateError(`下单未返回 orderId（intentId=${intent.intentId}）`, { intentId: intent.intentId });
+      return this._adoptCreated(raw, intent);
+    } catch (err) {
+      return this._recoverIntent(err, intent);
+    }
+  }
+
+  async placeLimitOrders(orders = []) {
+    this._assertCanOpen();
+    if (!orders.length) return [];
+    const prepared = orders.map((order) => {
+      const price = roundPrice(order.price, this.market);
+      const sizeBase = roundQty(order.sizeBase, this.market);
+      assertOrderPrecision({ price, sizeBase }, this.market);
+      const positionSide = order.positionSide ?? (order.side === 'buy' ? 'long' : 'short');
+      const intent = {
+        intentId: order.clientOrderId || ulid(), marketId: this.base, side: order.side, positionSide,
+        price, sizeBase, reduceOnly: !!order.reduceOnly, levelIndex: order.levelIndex ?? null,
+        state: 'created', createdAt: Date.now(),
+      };
+      this._rememberIntent(intent);
+      return { intent, record: this._buildRecord({ side: intent.side, positionSide, price, sizeBase, reduceOnly: intent.reduceOnly, intentId: intent.intentId }) };
+    });
+
+    let rows = [];
+    let batchErr = null;
+    try {
+      rows = await this.client.createOrders(prepared.map((p) => p.record));
+    } catch (err) {
+      batchErr = err;
+    }
+
+    const byIntent = new Map((rows || []).map((r) => [r.intentId, r]));
+    const results = prepared.map((p) => {
+      const raw = byIntent.get(p.intent.intentId);
+      return raw?.orderId ? this._adoptCreated(raw, p.intent) : null;
+    });
+    if (results.every(Boolean)) return results;
+
+    if (batchErr?.statusCode === 400 && !isIdempotencyConflict(batchErr)) {
+      for (const p of prepared) this._intents.delete(p.intent.intentId);
+      throw batchErr;
+    }
+    // 缺失项逐个对账；对不上则锁定（结果必须与输入等长，GridBot 强校验）
+    for (let i = 0; i < prepared.length; i++) {
+      if (results[i]) continue;
+      const p = prepared[i];
+      const existing = await this._findOrdersByIntent(p.intent.intentId).catch(() => []);
+      if (existing.length) results[i] = { ...this._adoptCreated(existing[0], p.intent), reconciled: true };
+      else p.intent.state = 'unknown';
+    }
+    const stillMissing = prepared.filter((p) => p.intent.state === 'unknown');
+    if (stillMissing.length) {
+      this._lockTrading(`批量下单 ${stillMissing.length} 笔状态未知（intentId=${stillMissing.map((p) => p.intent.intentId).join(',')}），已锁定`);
+      throw new UnknownOrderStateError(`批量下单部分状态未知（${stillMissing.length} 笔）`, { intents: stillMissing.map((p) => p.intent.intentId) });
+    }
+    return results;
+  }
+
+  /** 撤单并复核真实状态（不信任官方 400=已撤/已成交 的吞并语义）；降风险操作，锁定期间仍允许。 */
+  async cancelOrder(_marketId, orderId) {
+    const id = String(orderId);
+    try { await this.client.cancelOrder(id); } catch (err) { if (err?.statusCode !== 400) throw err; }
+    let after = await this._getOrderById(id);
+    if (after && LIVE_STATUSES.includes(after.status)) {
+      try { await this.client.cancelOrder(id); } catch { /* ignore */ }
+      await sleep(1200);
+      after = await this._getOrderById(id);
+      if (after && LIVE_STATUSES.includes(after.status)) {
+        logger.warn('propr', `撤单后订单仍活动: ${id} status=${after.status}`);
+        return false;
+      }
+    }
+    this._orders.delete(id);
+    return true;
+  }
+
+  async cancelAll() {
+    await this._refreshOpenOrders().catch(() => {});
+    const targets = [...this._orders.values()];
+    let ok = true;
+    for (const o of targets) {
+      const done = await this.cancelOrder(this.base, o.orderId).catch(() => false);
+      if (!done) ok = false;
+    }
+    await this._refreshOpenOrders().catch(() => {});
+    if (this._orders.size > 0) ok = false;
+    return ok;
+  }
+
+  /** 全平：遍历全部非零持仓逐个市价 reduceOnly 平仓，循环复核至空（官方 closePosition 只平 [0]）。 */
+  async closePosition() {
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const positions = await this.client.getPositions({ base: this.base, status: 'open' });
+      if (!positions.length) { this._positions = []; return true; }
+      for (const p of positions) {
+        const closeSide = p.positionSide === 'long' ? 'sell' : 'buy';
+        const intentId = ulid();
+        this._rememberIntent({
+          intentId, marketId: this.base, side: closeSide, positionSide: p.positionSide,
+          price: null, sizeBase: Number(p.quantity), reduceOnly: true, levelIndex: null,
+          state: 'created', createdAt: Date.now(),
+        });
+        const record = this._buildRecord({
+          side: closeSide, positionSide: p.positionSide, sizeBase: Number(p.quantity),
+          reduceOnly: true, intentId, orderType: 'market', timeInForce: 'IOC', closePosition: true,
+        });
+        try {
+          const rows = await this.client.createOrders([record]);
+          if (rows?.[0]?.orderId) this._orders.set(String(rows[0].orderId), mapProprOrder(rows[0], { levelIndex: null }));
+        } catch (err) {
+          logger.warn('propr', `平仓下单失败（第 ${attempt} 轮, ${p.positionSide}）: ${mapProprError(err).message}`);
+        }
+      }
+      await sleep(2000);
+    }
+    const left = await this.client.getPositions({ base: this.base, status: 'open' });
+    this._positions = left.map(mapProprPosition);
+    if (left.length) {
+      this._lockTrading('平仓后仍有残留仓位，需人工处理');
+      return false;
+    }
+    return true;
+  }
+
+  async setLeverage(_marketId, leverage) {
+    this._assertCanOpen();
+    const lev = Math.floor(Number(leverage));
+    if (!Number.isFinite(lev) || lev < 1) throw new Error(`杠杆非法: ${leverage}`);
+    if (lev > this.market.maxLeverage) throw new Error(`杠杆 ${lev} 超过 ${this.base} 上限 ${this.market.maxLeverage}`);
+    const config = await this.client.getMarginConfig(this.base);
+    const updated = await this.client.updateMarginConfig(config.configId, this.base, lev, config.marginMode ?? 'cross');
+    const mapped = mapProprMargin(updated);
+    this.market = { ...this.market, leverage: mapped.leverage ?? lev, marginMode: mapped.marginMode ?? this.market.marginMode };
+    logger.info('propr', `杠杆已设为 ${this.market.leverage}x（${this.market.marginMode}）`);
+    return true;
+  }
+
+  /** 对账：刷新活动挂单并按 intentId 回填意图；返回未匹配订单供 GridBot 接纳。 */
+  async reconcileOrders() {
+    await this._refreshOpenOrders();
+    const unmatched = [];
+    for (const view of this._orders.values()) {
+      const intent = view.clientOrderId ? this._intents.get(view.clientOrderId) : null;
+      if (intent) { intent.state = 'open'; intent.orderId = view.orderId; }
+      else unmatched.push(view);
+    }
+    return { open: [...this._orders.values()], unmatched };
+  }
 }

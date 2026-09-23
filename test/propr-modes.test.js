@@ -38,12 +38,13 @@ async function main() {
   }
 
   {
-    // sim-write / challenge：护栏通过后返回真实适配器；写路径在 Review 3 前显式拒绝
+    // sim-write / challenge：护栏通过后返回真实适配器（写路径已在 Review 3 落地）
     const ex = createExchange({ mode: 'sim-write', apiKey: 'pk_live_x', accountId: 'a-1234567890', allowChallenge: false });
     assert.equal(ex.mode, 'sim-write');
     assert.equal(ex.positionMode, 'net');
     assert.equal(ex.constructor.name, 'ProprExchange');
-    await assert.rejects(() => ex.placeLimitOrder({}), /Review 3/);
+    assert.equal(ex.isTradingLocked(), false);
+    assert.equal(ex.getIntents().length, 0);
   }
 
   {

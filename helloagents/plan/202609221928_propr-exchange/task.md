@@ -68,12 +68,13 @@
 - [√] 3.11 【探针遗留】权益刷新时效专项探测（`equity` 命令，0/10/30/60s 采样），结论已回填 `docs/propr-api-contract.md#1.1`
 
 ## 4. 写路径与幂等（Review 3）
-- [ ] 4.1 在 `src/exchange/propr/propr.js` 实现 `placeLimitOrder/placeLimitOrders`（统一走 createOrders+自有 intentId，结果与输入等长），验证 why.md#需求-Propr-交易适配器-批量铺网与幂等，依赖任务 3.3
-- [ ] 4.2 在 `src/exchange/propr/propr.js` 实现 `cancelOrder/cancelAll/closePosition`（撤单先查实况、平仓自实现全平），依赖任务 4.1
-- [ ] 4.3 在 `src/exchange/propr/propr.js` 实现订单状态机与 `UnknownOrderStateError → TRADING_LOCKED` 路径，依赖任务 4.1
-- [ ] 4.4 在 `src/exchange/propr/propr.js` 实现本地 intent 日志与 `reconcileOrders()`（按 intentId 匹配），依赖任务 4.3
-- [ ] 4.5 【Review1 复审要求】适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，依赖任务 4.1
-- [ ] 4.6 【Review2 移交】`setLeverage` 实现（`getMarginConfig` → `updateMarginConfig`），含杠杆上限与挑战规则收敛校验，依赖任务 4.1
+> 已完成（2026-09-23）：真实 sim-write 冒烟通过（自有 intentId 下单 → reconcile 命中 → 撤单复核 → 无残留）。
+- [√] 4.1 在 `src/exchange/propr/propr.js` 实现 `placeLimitOrder/placeLimitOrders`（统一走 createOrders+自有 intentId，结果与输入等长），验证 why.md#需求-Propr-交易适配器-批量铺网与幂等，依赖任务 3.3
+- [√] 4.2 在 `src/exchange/propr/propr.js` 实现 `cancelOrder/cancelAll/closePosition`（撤单先查实况、平仓自实现全平），依赖任务 4.1
+- [√] 4.3 在 `src/exchange/propr/propr.js` 实现订单状态机与 `UnknownOrderStateError → TRADING_LOCKED` 路径，依赖任务 4.1
+- [√] 4.4 在 `src/exchange/propr/propr.js` 实现本地 intent 日志与 `reconcileOrders()`（按 intentId 匹配），依赖任务 4.3
+- [√] 4.5 【Review1 复审要求】适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，依赖任务 4.1
+- [√] 4.6 【Review2 移交】`setLeverage` 实现（`getMarginConfig` → `updateMarginConfig`），含杠杆上限与挑战规则收敛校验，依赖任务 4.1
 
 ## 5A. 持仓模式落地 — net 分支（探针已确认，本分支生效）
 - [√] 5A.1 在 `src/exchange/propr/propr.js` 实现 `getPosition` 返回带符号净仓，`positionMode='net'`，验证 how.md#ADR-001，依赖任务 2.6
@@ -118,8 +119,8 @@
 ## 12. 测试
 - [√] 12.1 在 `test/propr-mapper.test.js` 覆盖字段/精度/positionSide/reduceOnly/状态机映射
 - [√] 12.2 在 `test/propr-modes.test.js` 覆盖四模式写白名单（shadow 写请求数=0）、账户白名单、challenge 硬确认
-- [ ] 12.3 在 `test/propr-order-state.test.js` 覆盖超时幂等、未知态锁定、部分成交、已成交不重复补单
-- [ ] 12.4 在 `test/propr-reconcile.test.js` 覆盖断线恢复、重启恢复、重复补单保护
+- [√] 12.3 在 `test/propr-order-state.test.js` 覆盖超时幂等、未知态锁定、部分成交、已成交不重复补单
+- [√] 12.4 在 `test/propr-reconcile.test.js` 覆盖断线恢复、重启恢复、重复补单保护
 - [ ] 12.5 在 `test/propr-risk.test.js` 覆盖 UTC 日切、内部日损/回撤分级、derived 降权
 - [√] 12.6 在 `test/propr-log-redact.test.js` 覆盖日志脱敏（密钥不出现）
 - [ ] 12.7 在 `package.json` 的 `test` 脚本串联新增测试，`npm test` 全绿 + `npm run lint` 干净

@@ -24,6 +24,19 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 新增（Propr Review 3：写路径 + intentId 幂等 + 对账，2026-09-23）
+- `propr.js` 写路径：`placeLimitOrder/placeLimitOrders`（统一走 `createOrders` + 自有 ULID intentId，
+  批量结果与输入等长）、`cancelOrder/cancelAll`（撤单后按实况复核，不信任官方 400 吞并）、
+  `closePosition`（自实现全平：遍历全部持仓逐个市价 reduceOnly，循环复核至空）、`setLeverage`
+- 幂等与锁定：下单异常（超时/网络/429/5xx/13084）**先按 intentId 跨全部状态对账**，命中即返回既有订单
+  绝不重复创建；对账不到即 `TRADING_LOCKED` + `UnknownOrderStateError`；明确 400 参数错误视为未创建。
+  锁定只拦开仓/改杠杆，撤单/平仓等降风险操作始终放行
+- `reconcileOrders()`：刷新活动挂单并按 intentId 回填意图，返回未匹配订单供 GridBot 接纳
+- vendor SDK 官方 `createOrder()` 改名 `createOrderRaw()` 并标注项目内禁用（防误用导致幂等键失效）
+- 测试新增 `test/propr-order-state.test.js`（超时/13084 对账、未知态锁定、批量部分成功、部分成交、杠杆上限）
+  与 `test/propr-reconcile.test.js`（撤单复核、全平、重启不重复补单、intent 对账）；`npm test` 全绿 + lint 0 error
+- 真实 sim-write 冒烟通过：自有 intentId 下单 → reconcile 命中 → 撤单复核 → 无残留挂单/持仓
+
 ### 修复（Review2 复审：只读可靠性强化，2026-09-23）
 - P1 活动挂单纳入 `pending/open/partially_filled`（只查 `open` 会漏刚提交/部分成交单 → 对账误判
   不存在 → 重复补单）；任一状态查询失败不致命，全部失败才抛出

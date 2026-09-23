@@ -59,6 +59,15 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.includes('/challenge-attempts')) return jsonResponse({ data: [{ attemptId: 'a1', accountId: ACCOUNT, status: 'active' }] });
   if (u.includes('/margin-config/')) return jsonResponse({ configId: 'c1', asset: 'BTC', leverage: '1', marginMode: 'cross' });
   if (u.includes('/leverage-limits/effective')) return jsonResponse({ defaults: { crypto: 2 }, overrides: { BTC: 10 } });
+  if ((opts.method || 'GET') === 'POST' && u.includes('/orders')) {
+    const body = JSON.parse(opts.body);
+    const rows = body.orders.map((o, i) => ({
+      ...o, orderId: `urn:prp-order:p${i + 1}`, status: 'open', cumulativeQuantity: '0',
+      createdAt: '2026-09-23T02:00:00.000Z', updatedAt: '2026-09-23T02:00:00.000Z',
+    }));
+    state.orders.push(...rows);
+    return jsonResponse({ data: rows });
+  }
   if (u.includes('/positions')) { const { limit, offset } = query(u); return jsonResponse({ data: state.positions.slice(offset, offset + limit) }); }
   if (u.includes('/orders')) {
     const { limit, offset, status } = query(u);
@@ -149,11 +158,18 @@ async function main() {
   assert.ok(!errs[0].message.includes('pk_live_SECRET'), '错误事件必须脱敏');
   assert.equal(errs[0].kind, 'network');
 
-  // 写路径门：Review 3 前必须显式拒绝
-  await assert.rejects(() => ex.placeLimitOrder({}), /Review 3/);
-  await assert.rejects(() => ex.cancelOrder('o1'), /Review 3/);
-  await assert.rejects(() => ex.closePosition(), /Review 3/);
-  await assert.rejects(() => ex.setLeverage('BTC', 1), /Review 3/);
+  // 写路径已可用（Review 3）：本地精度强制 + 自有 intentId；不再有 "Review 3 未实现" 门
+  await assert.rejects(
+    () => ex.placeLimitOrder({ marketId: 'BTC', side: 'buy', price: 90000, sizeBase: 0.0001 }),
+    /名义价值/,
+    '低于最小名义必须本地拒绝（服务端不校验）',
+  );
+  state.orders = [];
+  await ex._refreshOpenOrders();
+  const placed = await ex.placeLimitOrder({ marketId: 'BTC', side: 'buy', price: 80000, sizeBase: 0.001, levelIndex: 2 });
+  assert.match(placed.clientOrderId, /^[0-9A-HJKMNP-TV-Z]{26}$/, '下单必须携带自有 ULID intentId');
+  assert.equal(ex.getOpenOrders().length, 1);
+  assert.equal(ex.getOpenOrders()[0].levelIndex, 2);
 
   ex.stop();
 
