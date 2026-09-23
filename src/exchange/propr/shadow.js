@@ -84,6 +84,7 @@ export class ShadowExchange extends PaperExchange {
     this.marketLastOkAt = 0;
     this.proprAccountLastOkAt = 0;
     this.proprPositionLastOkAt = 0;
+    this.initialRealEquity = null;   // Propr 真实权益（模拟账户基准，供面板对照）
     this._dispatcher = null;
     this._realPriceTimer = null;
     this._accountTimer = null;
@@ -121,6 +122,15 @@ export class ShadowExchange extends PaperExchange {
 
     await this._refreshProprAccount();
     if (this.proprAccountStale) throw new ProprStartupError('Propr 账户权益读取失败，拒绝启动 shadow');
+    // 本地模拟账户以 **Propr 真实权益** 为基准（Review：此前用 PAPER_BALANCE=10000 会导致
+    // 面板数字与真实账户不符，且 autoSizePerGrid 按 10000 放大下单量，模拟失真）。
+    const realEq = Number(this.proprEquity?.marginBalance);
+    if (Number.isFinite(realEq) && realEq > 0) {
+      this.balance = realEq;
+      this.equity = realEq;
+      this.initialRealEquity = realEq;
+      logger.info('propr', `shadow 本地模拟账户以 Propr 真实权益 ${realEq.toFixed(2)} USDC 为基准`);
+    }
     this.dataSource = 'real';
     this.lastOkAt = Date.now();
     this.start();
@@ -265,6 +275,7 @@ export class ShadowExchange extends PaperExchange {
       proprAccountError: this.proprAccountError,
       proprPositionStale: this.proprPositionStale,
       proprPositionError: this.proprPositionError,
+      initialRealEquity: this.initialRealEquity,
       price: this.prices.get(this._marketId()) ?? null,
       marketLastOkAt: this.marketLastOkAt || null,
       proprAccountLastOkAt: this.proprAccountLastOkAt || null,

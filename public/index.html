@@ -1729,6 +1729,8 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
     </div>
     <div class="panel" style="margin-bottom:14px">
       <div class="panel-title">Propr · 账户状态</div>
+      <div class="muted" id="propr-account-note" style="font-size:12px;margin-bottom:6px"></div>
+      <div id="propr-real-account" class="muted" style="font-size:12px;margin-bottom:8px"></div>
       <div class="grid-2" style="gap:10px;margin-bottom:10px">
         <div><div class="kv"><span class="lbl">运行状态</span><span class="val" id="propr-st-run">未运行</span></div>
           <div class="kv"><span class="lbl">最新价</span><span class="val" id="propr-st-price">—</span></div>
@@ -2820,7 +2822,7 @@ function renderProprCard(d) {
   const priceEl = $('ov-propr-price');
   if (priceEl && d.lastPrice == null && info.price != null) priceEl.textContent = fmtPrice(info.price);
 
-  const extraEl = $('ov-propr-extra');  if (extraEl) {
+    const extraEl = $('ov-propr-extra');  if (extraEl) {
     const parts = [];
     if (info.highWaterMark != null) parts.push(`高水位 ${fmt(info.highWaterMark)}`);
     if (info.availableBalance != null) parts.push(`可用 ${fmt(info.availableBalance)}`);
@@ -2828,6 +2830,29 @@ function renderProprCard(d) {
     if (info.openOrdersTracked != null) parts.push(`跟踪挂单 ${info.openOrdersTracked}`);
     if (info.proprNetPosition) parts.push(`Propr 净仓 ${fmt(Number(info.proprNetPosition.sizeBase), 8)}`);
     extraEl.textContent = parts.length ? parts.join(' · ') : '—';
+  }
+
+  // 详情页「账户状态」面板的口径说明 + Propr 真实账户只读快照（避免把本地模拟余额误读为真实权益）
+  const noteEl = $('propr-account-note');
+  if (noteEl) {
+    noteEl.textContent = info.mode === 'shadow'
+      ? '账户状态为本地模拟账户（shadow）：以 Propr 真实权益为基准，订单仅在本地撮合（不写 Propr）'
+      : '账户状态来自 Propr 真实账户（sim-write / challenge）';
+  }
+  const realEl = $('propr-real-account');
+  if (realEl) {
+    const pe = info.proprEquity;
+    if (pe) {
+      const stale = info.proprAccountStale || info.proprPositionStale ? ' · ⚠️ 快照刷新失败，沿用上次' : '';
+      const net = info.proprNetPosition
+        ? `${info.proprNetPosition.sizeBase > 0 ? '多' : '空'} ${fmt(Math.abs(info.proprNetPosition.sizeBase), 8)}`
+        : '无持仓';
+      realEl.innerHTML = `Propr 真实账户（只读）：权益 <b>${fmt(pe.marginBalance ?? pe.balance)}</b>`
+        + ` · 余额 ${fmt(pe.balance)} · 可用 ${fmt(pe.availableBalance)} · 高水位 ${fmt(pe.highWaterMark)}`
+        + ` · 净仓 ${net}${stale}`;
+    } else {
+      realEl.textContent = '';
+    }
   }
 
   // 挑战风控：状态 + 日损/回撤使用率（仅 sim-write/challenge 启用）
