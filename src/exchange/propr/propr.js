@@ -51,6 +51,11 @@ export class ProprExchange extends EventEmitter {
     this.dataSource = null;
     this.operationalIssue = null;
     this.lastOkAt = 0;
+    // 新鲜度分离（Review4 P1）：行情来自 HL 公开 API，账户/订单/持仓/权益来自 Propr API。
+    // 二者必须分开计时，否则「Propr API 失联但行情正常」会被看门狗误判为健康。
+    this.lastPriceOkAt = 0;
+    this.lastApiOkAt = 0;
+    this._dispatcher = null;
 
     // 账户/权益（权威字段，ADR-004）
     this.equity = 0;
@@ -95,14 +100,15 @@ export class ProprExchange extends EventEmitter {
   // ── 生命周期 ──────────────────────────────────────────────────────────────
 
   async init() {
+    // PR_PROXY 走 per-client dispatcher，绝不改全局 dispatcher（避免与其它交易所代理竞态）
     if (this._cfg.proxy) {
-      const dispatcher = await createDispatcher(this._cfg.proxy);
-      if (dispatcher) {
-        const { setGlobalDispatcher } = await import('undici');
-        setGlobalDispatcher(dispatcher);
-      }
+      this._dispatcher = await createDispatcher(this._cfg.proxy);
+      if (!this._dispatcher) throw new ProprStartupError('PR_PROXY 无法初始化，拒绝启动（避免直连）');
     }
-    this.client = new ProprClient({ apiKey: this._cfg.apiKey, baseUrl: this.apiUrl, timeout: this._cfg.timeoutMs });
+    this.client = new ProprClient({
+      apiKey: this._cfg.apiKey, baseUrl: this.apiUrl, timeout: this._cfg.timeoutMs,
+      dispatcher: this._dispatcher,
+    });
 
     await this.client.health();
     await this.client.healthServices();
@@ -182,6 +188,7 @@ export class ProprExchange extends EventEmitter {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'allMids' }),
+      ...(this._dispatcher ? { dispatcher: this._dispatcher } : {}),
     });
     if (!res.ok) throw new Error(`HL allMids HTTP ${res.status}`);
     const mids = await res.json();
@@ -204,6 +211,7 @@ export class ProprExchange extends EventEmitter {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'candleSnapshot', req: { coin: this.base, interval, startTime: start, endTime: end } }),
+      ...(this._dispatcher ? { dispatcher: this._dispatcher } : {}),
     });
     if (!res.ok) throw new Error(`HL candleSnapshot HTTP ${res.status}`);
     const rows = await res.json();
@@ -411,7 +419,7 @@ export class ProprExchange extends EventEmitter {
       const px = await this._fetchMidPrice();
       if (px > 0) {
         this._price = px;
-        this.lastOkAt = Date.now();
+        this.lastPriceOkAt = Date.now(); // 只代表行情健康，不代表 Propr API 健康（Review4 P1）
         this.emit('price', { marketId: this.base, price: px });
       }
     } catch (err) { this._emitError(err); }
@@ -423,7 +431,8 @@ export class ProprExchange extends EventEmitter {
       await this._refreshOpenOrders();
       await this._refreshTrades();
       await this._refreshEquity().catch(() => { this.equityStale = true; });
-      this.lastOkAt = Date.now();
+      this.lastApiOkAt = Date.now();
+      this.lastOkAt = this.lastApiOkAt; // 看门狗（sim-write/challenge）以此为准
     } catch (err) { this._emitError(err); }
   }
 
@@ -796,7 +805,6 @@ export class ProprExchange extends EventEmitter {
       exchange: 'Propr',
       mode: this.mode,
       accountIdMasked: maskAccountId(this.accountId),
-      attemptId: this.attemptId,
       positionMode: this.positionMode,
       tradingLocked: this.tradingLocked,
       lockReason: this.lockReason,
@@ -811,6 +819,8 @@ export class ProprExchange extends EventEmitter {
       intents: this._intents.size,
       openOrdersTracked: this._orders.size,
       price: this._price || null,
+      lastPriceOkAt: this.lastPriceOkAt || null,
+      lastApiOkAt: this.lastApiOkAt || null,
     };
   }
 }

@@ -112,6 +112,10 @@ if (proxyResult.used) {
 } else {
   console.log('[代理] 未配置（直连模式）');
 }
+// Propr 的 PR_PROXY 走 per-client dispatcher（不改全局），因此可与其它交易所代理不同
+if (cfg.propr.proxy && cfg.propr.proxy !== cfg.globalProxy) {
+  console.log('[代理] Propr 使用独立代理（per-client，不影响其它交易所）');
+}
 
 // ── 创建三个交易所和机器人 ────────────────────────────────────────────────────
 const deExchange = createDeExchange(cfg.de);
@@ -241,16 +245,18 @@ const _LIVENESS_TARGETS = [
   { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
   { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
   { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
-  // Propr 无 live 模式：sim-write/challenge（真实 API 写入）需纳入失联告警；shadow 只读不告警
-  { prefix: 'propr', name: 'Propr', ex: proprExchange, bot: proprBot, liveModes: ['sim-write', 'challenge'] },
+  // Propr 无 live 模式：sim-write/challenge（真实 API 写入）需纳入失联告警；shadow 只读不告警。
+  // 注意用 lastApiOkAt：行情来自 HL 公开 API，不能代表 Propr 账户 API 健康（Review4 P1）。
+  { prefix: 'propr', name: 'Propr', ex: proprExchange, bot: proprBot, liveModes: ['sim-write', 'challenge'], lastOkKey: 'lastApiOkAt' },
 ];
 const _wdTimer = setInterval(() => {
   const now = Date.now();
-  for (const { prefix, name, ex, bot, liveModes } of _LIVENESS_TARGETS) {
+  for (const { prefix, name, ex, bot, liveModes, lastOkKey } of _LIVENESS_TARGETS) {
     try {
-      const watched = (liveModes ?? ['live']).includes(ex?.mode) && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
+      const lastOk = Number(ex?.[lastOkKey ?? 'lastOkAt']) || 0;
+      const watched = (liveModes ?? ['live']).includes(ex?.mode) && bot?.running && lastOk > 0;
       if (!watched) { _livenessStale.delete(prefix); continue; }
-      const ageMs = now - ex.lastOkAt;
+      const ageMs = now - lastOk;
       if (ageMs > LIVENESS_STALE_MS) {
         _livenessStale.add(prefix);
         const mins = Math.round(ageMs / 60_000);

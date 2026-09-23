@@ -4,7 +4,8 @@
 //  1) 去除 TS 类型标注改为 ESM + JSDoc；
 //  2) 错误消息在抛出前统一脱敏（Review1 P0，防止 API 返回文本携带凭证外泄）；
 //  3) 官方 `createOrder()` 会自造并覆盖 `intentId`，项目内**禁用**，故改名 `createOrderRaw()`
-//     （Review3 要求：避免误用导致幂等键失效）；项目下单一律走 `createOrders()`。
+//     （Review3 要求：避免误用导致幂等键失效）；项目下单一律走 `createOrders()`；
+//  4) 支持 per-client `dispatcher`（Review4 P1：Propr 的 PR_PROXY 不得覆盖进程全局 dispatcher）。
 // 其余请求路径/字段/错误语义与官方源码保持一致，升级时按官方文档逐段比对。依赖 ulid。
 import { ulid } from 'ulid';
 import { redactSecrets } from '../../redact.js';
@@ -22,11 +23,13 @@ export class ProprAPIError extends Error {
 }
 
 export class ProprClient {
-  /** @param {{apiKey?:string, baseUrl?:string, timeout?:number}} [options] */
+  /** @param {{apiKey?:string, baseUrl?:string, timeout?:number, dispatcher?:object}} [options] */
   constructor(options = {}) {
     this.apiKey = options.apiKey || process.env.PROPR_API_KEY || '';
     this.baseUrl = options.baseUrl || process.env.PROPR_API_URL || DEFAULT_BASE_URL;
     this.timeout = options.timeout || 30_000;
+    // per-client dispatcher：避免 Propr 的 PR_PROXY 与进程全局代理互相覆盖（Review4 P1）
+    this.dispatcher = options.dispatcher || null;
     this.accountId = null;
 
     if (!this.apiKey) {
@@ -61,6 +64,7 @@ export class ProprClient {
         },
         body: options.body ? JSON.stringify(options.body) : undefined,
         signal: controller.signal,
+        ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
       });
 
       if (!response.ok) {

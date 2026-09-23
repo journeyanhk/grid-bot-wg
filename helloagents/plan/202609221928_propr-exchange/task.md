@@ -105,6 +105,15 @@
 - [√] 6.2 在 `src/server.js` + 前端标注 Propr 模式与账户（卡片含 SHADOW/SIM-WRITE/CHALLENGE 文案、掩码账户、锁定/快照状态、权益来源；余额/权益栏注明为本地模拟账户）
 - [√] 6.3 打通 `PR_MODE=shadow` 与 `sim-write` 启动冒烟，确认 Propr 卡片与市场列表可见（shadow 写请求 0、sim-write 权益取真实账户）
 
+## 6R. Review4 复审修复（接入安全，2026-09-23）
+- [√] 6R.1 【P1】新鲜度分离：`lastPriceOkAt`（HL 公开行情）与 `lastApiOkAt`（Propr API）分开计时；`_pollPrice` 只推进行情时间戳，看门狗改用 `lastOkKey='lastApiOkAt'`，杜绝"行情正常=Propr 健康"误判
+- [√] 6R.2 【P1】前端隔离：抽取 `renderExchangeCard()`；汇总循环恢复为 6 所（Propr 不计入余额/盈亏/运行数，避免 `4/3 运行中`），Propr 卡片独立渲染
+- [√] 6R.3 【P1】代理竞态：`ProprClient` 支持 per-client `dispatcher`，适配器不再调用 `setGlobalDispatcher`；HL 行情也走同一 dispatcher；启动日志标注 Propr 独立代理；`proxy.js` 注明忽略 PR_PROXY
+- [√] 6R.4 【P2】`getPublicInfo()` 移除 `attemptId`（仅保留掩码账户等非关联标识）
+- [√] 6R.5 【P2】Shadow 新鲜度细分：`marketLastOkAt` / `proprAccountLastOkAt` / `proprPositionLastOkAt`
+- [√] 6R.6 【P2】新增 `test/server-propr.test.js`：真实拉起 server（全 paper），覆盖 `/api/overview` 含 propr、`/api/propr/state|markets|stream|reconnect`
+- [√] 6R.7 适配器级测试补新鲜度分离用例（API 全挂但行情正常 → `lastApiOkAt` 不前进）
+
 ## 7. Challenge 风控层
 - [ ] 7.1 在 `src/risk/propr-challenge.js` 实现 UTC 日切、权益派生（`equitySource`）、日损/回撤计算，验证 how.md#实现要点
 - [ ] 7.2 在 `src/risk/propr-challenge.js` 实现分级 OK/WARNING/REDUCE_ONLY/HALT/LOCKED/BREACHED 与向 bot 下发指令，依赖任务 7.1

@@ -2679,20 +2679,70 @@ function renderProprCard(d) {
   }
 }
 
+// 单所卡片渲染（仅渲染，不做汇总累加）。Propr 卡片复用同一套字段 + 专属区块。
+function renderExchangeCard(p, d) {
+  const dot = $(`ov-${p}-dot`);
+  dot.className = 'run-dot' + (d.running ? ' on' : '');
+  const badge = $(`ov-${p}-badge`);
+  badge.textContent = d.mode?.toUpperCase() || 'PAPER';
+  badge.className = 'badge ' + (d.mode === 'live' ? 'badge-live' : d.mode === 'paper' ? 'badge-paper' : 'badge-propr');
+  setExHealth(p, d.health, true);
+
+  $(`ov-${p}-pnl`).innerHTML = `<span class="${cls(d.totalPnl)}">${signed(d.totalPnl)}</span>`;
+  $(`ov-${p}-ret`).innerHTML = d.returnPct != null ? `<span class="${cls(d.returnPct)}">收益率 ${d.returnPct >= 0 ? '+' : ''}${d.returnPct}%</span>` : '收益率 —';
+  $(`ov-${p}-bal`).textContent = fmt(d.balance);
+  $(`ov-${p}-eq`).textContent = fmt(d.equity);
+  $(`ov-${p}-rpnl`).innerHTML = `<span class="${cls(d.realizedPnl)}">${signed(d.realizedPnl)}</span>`;
+  $(`ov-${p}-upnl`).innerHTML = `<span class="${cls(d.unrealizedPnl)}">${signed(d.unrealizedPnl)}</span>`;
+  $(`ov-${p}-vol`).textContent = fmt(d.volume);
+  $(`ov-${p}-rungs`).textContent = `${d.completedRungs || 0} 格`;
+  $(`ov-${p}-price`).textContent = d.lastPrice ?? '—';
+  $(`ov-${p}-mkt`).textContent = d.config?.displayName ?? '—';
+  renderOverviewPosition(p, d);
+  const issueBox = $(`ov-${p}-issue`);
+  if (issueBox) {
+    issueBox.style.display = d.operationalIssue ? '' : 'none';
+    issueBox.innerHTML = issueHtml(d.operationalIssue, d.apiWalletAddress);
+  }
+
+  // 本次启动参数：启动网格后显示（下/上边界、格数、每格数量、杠杆、区间外策略），
+  // 停止后自动清空；重新启动即显示新一轮参数。调整区间后同步更新。
+  const gc = $(`ov-${p}-gridcfg`);
+  if (gc) {
+    const c = d.config;
+    if (d.running && c && c.mode === 'recovery') {
+      gc.style.display = '';
+      gc.innerHTML = `<div class="gc-title">本次启动参数</div>`
+        + `回收阶梯模式（只减仓）· 阶梯间距 <b>${c.spacing ?? '—'}</b> · 每档 <b>${c.sizeBase ?? '—'}</b>`
+        + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : `<br><span class="muted">硬止损未启用</span>`);
+    } else if (d.running && c && c.lower != null) {
+      const sl = c.outOfRangeAction === 'recover' ? '只减仓回收阶梯' : '冲破区间平仓';
+      const modeTxt = c.mode === 'long' ? '做多' : c.mode === 'short' ? '做空' : '中性';
+      gc.style.display = '';
+      gc.innerHTML = `<div class="gc-title">本次启动参数（${modeTxt}网格）</div>`
+        + `下边界 <b>${c.lower}</b> · 上边界 <b>${c.upper}</b><br>`
+        + `网格 <b>${c.gridCount}</b> 格 · 每格 <b>${c.sizeBase}</b><br>`
+        + `杠杆 <b>${c.leverage}x</b> · 区间外策略 <b>${sl}</b>`
+        + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : ``)
+        + renderDynSummary(d);
+    } else {
+      gc.style.display = 'none';
+      gc.innerHTML = '';
+    }
+  }
+}
+
 function renderOverview(data) {
   lastOverview = data;
-  // 三所汇总
+  // 汇总只含原六所；Propr 是独立的挑战账户，单独渲染、不并入余额/盈亏/运行数（Review4 P1）
   let totEquity = 0, totBalance = 0, totPnl = 0, totRealized = 0, totUnrealized = 0, totVolume = 0, totRungs = 0;
   let running = 0;
 
-  ['de','ex','rs','lr','hl','va','propr'].forEach(p => {
+  ['de','ex','rs','lr','hl','va'].forEach(p => {
     const d = data[p];
     if (!d) return;
     // 总览只展示有金额在运行的交易所：live + 有余额 + 运行中，否则隐藏卡片（v1.6.0）
-    // Propr 例外：paper 之外（shadow/sim-write/challenge）常驻显示，便于随时看到模式/账户/锁定态
-    const visible = p === 'propr'
-      ? d.mode !== 'paper'
-      : (d.mode === 'live' && (d.balance > 0) && d.running);
+    const visible = d.mode === 'live' && (d.balance > 0) && d.running;
     const card = document.querySelector('.ov-card.' + p);
     if (card) card.style.display = visible ? '' : 'none';
     if (!visible) return;
@@ -2704,59 +2754,20 @@ function renderOverview(data) {
     if (d.volume != null) totVolume += d.volume;
     totRungs += d.completedRungs || 0;
     if (d.running) running++;
-
-    // Per-exchange overview
-    const dot = $(`ov-${p}-dot`);
-    dot.className = 'run-dot' + (d.running ? ' on' : '');
-    const badge = $(`ov-${p}-badge`);
-    badge.textContent = d.mode?.toUpperCase() || 'PAPER';
-    badge.className = 'badge ' + (d.mode === 'live' ? 'badge-live' : d.mode === 'paper' ? 'badge-paper' : 'badge-propr');
-    setExHealth(p, d.health, true);
-
-    $(`ov-${p}-pnl`).innerHTML = `<span class="${cls(d.totalPnl)}">${signed(d.totalPnl)}</span>`;
-    $(`ov-${p}-ret`).innerHTML = d.returnPct != null ? `<span class="${cls(d.returnPct)}">收益率 ${d.returnPct >= 0 ? '+' : ''}${d.returnPct}%</span>` : '收益率 —';
-    $(`ov-${p}-bal`).textContent = fmt(d.balance);
-    $(`ov-${p}-eq`).textContent = fmt(d.equity);
-    $(`ov-${p}-rpnl`).innerHTML = `<span class="${cls(d.realizedPnl)}">${signed(d.realizedPnl)}</span>`;
-    $(`ov-${p}-upnl`).innerHTML = `<span class="${cls(d.unrealizedPnl)}">${signed(d.unrealizedPnl)}</span>`;
-    $(`ov-${p}-vol`).textContent = fmt(d.volume);
-    $(`ov-${p}-rungs`).textContent = `${d.completedRungs || 0} 格`;
-    $(`ov-${p}-price`).textContent = d.lastPrice ?? '—';
-    $(`ov-${p}-mkt`).textContent = d.config?.displayName ?? '—';
-    renderOverviewPosition(p, d);
-    if (p === 'propr') renderProprCard(d);
-    const issueBox = $(`ov-${p}-issue`);
-    if (issueBox) {
-      issueBox.style.display = d.operationalIssue ? '' : 'none';
-      issueBox.innerHTML = issueHtml(d.operationalIssue, d.apiWalletAddress);
-    }
-
-    // 本次启动参数：启动网格后显示（下/上边界、格数、每格数量、杠杆、区间外策略），
-    // 停止后自动清空；重新启动即显示新一轮参数。调整区间后同步更新。
-    const gc = $(`ov-${p}-gridcfg`);
-    if (gc) {
-      const c = d.config;
-      if (d.running && c && c.mode === 'recovery') {
-        gc.style.display = '';
-        gc.innerHTML = `<div class="gc-title">本次启动参数</div>`
-          + `回收阶梯模式（只减仓）· 阶梯间距 <b>${c.spacing ?? '—'}</b> · 每档 <b>${c.sizeBase ?? '—'}</b>`
-          + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : `<br><span class="muted">硬止损未启用</span>`);
-      } else if (d.running && c && c.lower != null) {
-        const sl = c.outOfRangeAction === 'recover' ? '只减仓回收阶梯' : '冲破区间平仓';
-        const modeTxt = c.mode === 'long' ? '做多' : c.mode === 'short' ? '做空' : '中性';
-        gc.style.display = '';
-        gc.innerHTML = `<div class="gc-title">本次启动参数（${modeTxt}网格）</div>`
-          + `下边界 <b>${c.lower}</b> · 上边界 <b>${c.upper}</b><br>`
-          + `网格 <b>${c.gridCount}</b> 格 · 每格 <b>${c.sizeBase}</b><br>`
-          + `杠杆 <b>${c.leverage}x</b> · 区间外策略 <b>${sl}</b>`
-          + (c.recoverMaxLossUsd ? `<br>硬止损上限 <b>${c.recoverMaxLossUsd} USDC</b>` : ``)
-          + renderDynSummary(d);
-      } else {
-        gc.style.display = 'none';
-        gc.innerHTML = '';
-      }
-    }
+    renderExchangeCard(p, d);
   });
+
+  // Propr 独立卡片：paper 之外常驻显示，便于随时看到模式/账户/锁定态（不计入上方汇总）
+  const propr = data.propr;
+  if (propr) {
+    const card = document.querySelector('.ov-card.propr');
+    const visible = propr.mode !== 'paper';
+    if (card) card.style.display = visible ? '' : 'none';
+    if (visible) {
+      renderExchangeCard('propr', propr);
+      renderProprCard(propr);
+    }
+  }
 
   // Totals
   $('tot-equity').innerHTML = `<span class="${totEquity > 0 ? '' : 'muted'}">${fmt(totEquity)}</span>`;

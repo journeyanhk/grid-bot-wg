@@ -76,19 +76,25 @@ export class ShadowExchange extends PaperExchange {
     this.proprPositionStale = false;
     this.proprPositionError = null;
     this.proprPositionFreshAt = 0;
+    // 新鲜度分离（Review4 P2）：行情 / 账户 / 持仓各自计时，避免"行情正常=账户正常"的误读
+    this.marketLastOkAt = 0;
+    this.proprAccountLastOkAt = 0;
+    this.proprPositionLastOkAt = 0;
+    this._dispatcher = null;
     this._realPriceTimer = null;
     this._accountTimer = null;
   }
 
   async init() {
+    // PR_PROXY 走 per-client dispatcher，绝不改全局 dispatcher（Review4 P1）
     if (this._cfg.proxy) {
-      const dispatcher = await createDispatcher(this._cfg.proxy);
-      if (dispatcher) {
-        const { setGlobalDispatcher } = await import('undici');
-        setGlobalDispatcher(dispatcher);
-      }
+      this._dispatcher = await createDispatcher(this._cfg.proxy);
+      if (!this._dispatcher) throw new ProprStartupError('PR_PROXY 无法初始化，拒绝启动（避免直连）');
     }
-    const raw = new ProprClient({ apiKey: this._cfg.apiKey, baseUrl: this._cfg.apiUrl, timeout: this._cfg.timeoutMs });
+    const raw = new ProprClient({
+      apiKey: this._cfg.apiKey, baseUrl: this._cfg.apiUrl, timeout: this._cfg.timeoutMs,
+      dispatcher: this._dispatcher,
+    });
     await raw.health();
     const active = await raw.getChallengeAttempts({ status: 'active' });
     const attempt = active.find((a) => a.accountId === this._cfg.accountId);
@@ -143,6 +149,7 @@ export class ShadowExchange extends PaperExchange {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'allMids' }),
+      ...(this._dispatcher ? { dispatcher: this._dispatcher } : {}),
     });
     if (!res.ok) throw new Error(`HL allMids HTTP ${res.status}`);
     const mids = await res.json();
@@ -157,7 +164,8 @@ export class ShadowExchange extends PaperExchange {
       if (!(px > 0)) return;
       const id = this._marketId();
       this.prices.set(id, px);
-      this.lastOkAt = Date.now();
+      this.marketLastOkAt = Date.now();
+      this.lastOkAt = Math.max(this.marketLastOkAt, this.proprAccountLastOkAt, this.proprPositionLastOkAt);
       this.emit('price', { marketId: id, price: px });
       this.matchTick(); // 用真实价格本地撮合，不写 Propr
     } catch (err) {
@@ -195,6 +203,7 @@ export class ShadowExchange extends PaperExchange {
       this.proprAccountStale = false;
       this.proprAccountError = null;
       this.proprEquityFreshAt = Date.now();
+      this.proprAccountLastOkAt = Date.now();
     } catch (err) {
       this.proprAccountStale = true;
       this.proprAccountError = mapProprError(err).message;
@@ -208,13 +217,14 @@ export class ShadowExchange extends PaperExchange {
       this.proprPositionStale = false;
       this.proprPositionError = null;
       this.proprPositionFreshAt = Date.now();
+      this.proprPositionLastOkAt = Date.now();
     } catch (err) {
       // 保留上次已知持仓（不回退为空数组）
       this.proprPositionStale = true;
       this.proprPositionError = mapProprError(err).message;
       this._emitSafeError(err);
     }
-    this.lastOkAt = Date.now();
+    this.lastOkAt = Math.max(this.marketLastOkAt, this.proprAccountLastOkAt, this.proprPositionLastOkAt);
   }
 
   /** 仪表盘公开信息（shadow 写请求恒为 0；Propr 快照失败时标 stale，不伪装空仓）。 */
@@ -223,7 +233,6 @@ export class ShadowExchange extends PaperExchange {
       exchange: 'Propr',
       mode: 'shadow',
       accountIdMasked: maskAccountId(this._cfg.accountId),
-      attemptId: this.attemptId,
       positionMode: 'net',
       tradingLocked: false,
       writeRequests: 0,
@@ -234,6 +243,9 @@ export class ShadowExchange extends PaperExchange {
       proprPositionStale: this.proprPositionStale,
       proprPositionError: this.proprPositionError,
       price: this.prices.get(this._marketId()) ?? null,
+      marketLastOkAt: this.marketLastOkAt || null,
+      proprAccountLastOkAt: this.proprAccountLastOkAt || null,
+      proprPositionLastOkAt: this.proprPositionLastOkAt || null,
     };
   }
 }

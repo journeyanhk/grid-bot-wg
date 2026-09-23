@@ -24,6 +24,20 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review4 复审：接入安全，2026-09-23）
+- P1 新鲜度分离：新增 `lastPriceOkAt`（HL 公开行情）与 `lastApiOkAt`（Propr 订单/持仓/成交/权益）；
+  `_pollPrice` 只推进行情时间戳，server 看门狗对 Propr 改用 `lastOkKey='lastApiOkAt'`——
+  杜绝「Propr API 失联但行情正常 → 看门狗不告警」的误判
+- P1 总览隔离：前端抽取 `renderExchangeCard()`，汇总循环恢复为原六所；Propr 独立渲染，
+  **不计入余额/盈亏/运行数**（修复 `4/3 运行中` 与账户口径混入）
+- P1 代理竞态：`ProprClient` 支持 per-client `dispatcher`（undici），Propr/Shadow 不再调用
+  `setGlobalDispatcher`，HL 行情亦走同一 dispatcher；启动日志标注「Propr 使用独立代理（per-client）」；
+  `setupProxies` 注明忽略 PR_PROXY
+- P2 `getPublicInfo()` 移除 `attemptId`；Shadow 新增 `marketLastOkAt/proprAccountLastOkAt/proprPositionLastOkAt`
+- P2 新增 server 集成测试 `test/server-propr.test.js`（真实拉起 server，覆盖 overview/state/markets/stream/reconnect）
+  与适配器级新鲜度分离用例；eslint 补 `TextDecoder/TextEncoder` 全局
+- 验证：`npm test` 全绿 + lint 0 error + HTML 核对通过；真实 shadow 冒烟三项时间戳均置位且无 attempt 泄漏
+
 ### 新增（Propr Review 4：接入 GridBot 与 server，2026-09-23）
 - `src/server.js` 第 7 所完整接入：Propr 四模式预检查（失败给可操作提示后退出）、工厂实例化、
   `propr` 快照键 restore、错误监听、日历暂停、Liveness 看门狗（`liveModes=['sim-write','challenge']`）、

@@ -120,9 +120,12 @@ export async function createDispatcher(proxyUrl) {
 }
 
 /**
- * 根据三个交易所的代理配置，设置全局 dispatcher。
+ * 根据各交易所的代理配置，设置全局 dispatcher。
  * 优先级：全局代理 > Decibel > Extended > RISEx
  * 若三者代理不同，警告用户；若需独立代理，建议分开部署。
+ *
+ * 注意（Review4 P1）：Propr 不使用本函数——它通过 ProprClient 的 per-client `dispatcher`
+ * 注入 PR_PROXY，避免在并行初始化中调用 setGlobalDispatcher 造成代理竞态。
  */
 export async function setupProxies(cfg) {
   const { globalProxy, de, ex, rs } = cfg;

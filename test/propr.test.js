@@ -4,7 +4,7 @@ import { strict as assert } from 'node:assert';
 import { ProprExchange } from '../src/exchange/propr/propr.js';
 
 const ACCOUNT = 'acc-1234567890';
-const state = { orders: [], trades: [], positions: [] };
+const state = { orders: [], trades: [], positions: [], failApi: false };
 const realFetch = globalThis.fetch;
 
 function jsonResponse(body, status = 200) {
@@ -51,6 +51,9 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.startsWith('https://api.hyperliquid.xyz/info')) {
     if (body?.type === 'allMids') return jsonResponse({ BTC: '90000' });
     if (body?.type === 'candleSnapshot') return jsonResponse([{ t: 1725000000000, o: '1', h: '2', l: '0.5', c: '1.5', v: '10' }]);
+  }
+  if (state.failApi && (u.includes('/positions') || u.includes('/orders') || u.includes('/trades') || u.includes('/challenge-attempts/a1'))) {
+    return jsonResponse({ message: 'propr api down' }, 500);
   }
   if (u.includes('/health/services')) return jsonResponse({ core: 'OK' });
   if (u.includes('/health')) return jsonResponse({ status: 'OK' });
@@ -177,6 +180,26 @@ async function main() {
   const bad = new ProprExchange({ ...cfg, accountId: 'other-account' });
   await assert.rejects(() => bad.init(), /不在 active attempts/);
   bad.stop();
+
+  {
+    // P1：行情（HL 公开 API）正常但 Propr API 全挂 → 新鲜度必须分离，
+    // 否则 server 看门狗会被行情成功误判为"Propr 健康"。
+    const ex2 = new ProprExchange(cfg);
+    await ex2.init();
+    await ex2._poll(); // 先成功一轮，置位 lastApiOkAt
+    const apiBefore = ex2.lastApiOkAt;
+    assert.ok(apiBefore > 0, '成功轮询后 lastApiOkAt 必须置位');
+
+    state.failApi = true;
+    await new Promise((r) => setTimeout(r, 5));
+    await ex2._pollPrice(); // 行情仍成功
+    await ex2._poll();      // Propr API 全失败
+    assert.ok(ex2.lastPriceOkAt > 0, '行情成功必须推进 lastPriceOkAt');
+    assert.equal(ex2.lastApiOkAt, apiBefore, 'Propr API 失败不得推进 lastApiOkAt（看门狗不得误判健康）');
+    assert.ok(ex2.getPublicInfo().lastApiOkAt === apiBefore, 'getPublicInfo 必须暴露 lastApiOkAt');
+    state.failApi = false;
+    ex2.stop();
+  }
 }
 
 main()
