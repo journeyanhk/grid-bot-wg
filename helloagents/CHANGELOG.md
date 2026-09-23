@@ -24,6 +24,18 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review6-1 复审：fail-closed 与基准持久化，2026-09-23）
+- P0 **fail closed**：风控对象构造即 `LOCKED`（原因「等待首次权益风控评估」）并设置
+  `exchange.riskGateEnabled=true` + 写入 `riskState`；适配器开仓门改严格判断——风控已启用时
+  状态缺失/未评估（null）也拒绝，不再用 `status &&` 放行
+- P0 server 在 Propr init 完成后**立即执行首次风控 tick**；非 OK/WARNING 时告警并保持 LOCKED
+- P1 高风险动作失败锁：HALT/BREACHED 动作失败后即使权益短暂恢复也维持该级别并持续重试，
+  动作成功后才回到实际评估状态（避免"动作没做完却显示 OK"）
+- P1 日初权益持久化：`riskDayKey/startOfDayEquity/initialEquity` 写入 `.state.json`（key=`proprRisk`），
+  同 UTC 日重启沿用原基准（否则重启会重置日损、漏报亏损），跨日重建
+- P1 reduce-only 降风险操作在 `tradingLocked` / 快照不完整 / 风控非正常下**均放行**（含全 reduce-only 批量）
+- 测试补齐 5 类场景；`npm test` 全绿 + lint 0 error；真实 sim-write 冒烟显示「首次风控评估通过（OK）」
+
 ### 修复（Review6 复审：风控硬约束，2026-09-23）
 - P0 风控硬拦截：适配器新增 `_assertRiskAllowsOpening()`，REDUCE_ONLY/HALT/LOCKED/BREACHED 一律拒绝
   **开仓**（reduce-only 降风险操作放行）；`setLeverage` 仅 OK/WARNING 允许——bot 未运行或手动 `/start`

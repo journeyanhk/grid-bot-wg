@@ -209,6 +209,7 @@ async function main() {
   {
     // Review6 P0：风控状态必须形成下单硬拦截（bot 未运行/手动 /start 也无法绕过）
     const ex = await freshExchange();
+    ex.riskGateEnabled = true; // 模拟风控层已接管（sim-write/challenge）
     const opening = { marketId: 'BTC', side: 'buy', price: 80000, sizeBase: 0.001, reduceOnly: false };
     const closing = { marketId: 'BTC', side: 'sell', price: 100000, sizeBase: 0.001, reduceOnly: true };
 
@@ -224,11 +225,47 @@ async function main() {
     ex.riskState = { status: 'REDUCE_ONLY' };
     await assert.rejects(() => ex.setLeverage('BTC', 1), /风控状态/);
 
-    // WARNING 允许开仓；风控未启用（null，如 paper/shadow）也允许
+    // WARNING 允许开仓；风控未启用（riskGateEnabled=false，如 paper/shadow）也允许
     ex.riskState = { status: 'WARNING' };
     assert.ok((await ex.placeLimitOrder(opening)).orderId);
+    ex.riskGateEnabled = false;
     ex.riskState = null;
     assert.ok((await ex.placeLimitOrder(opening)).orderId);
+    ex.stop();
+  }
+
+  {
+    // Review6-1 P0：风控门 fail closed —— 已启用但状态未评估（null）必须拒绝开仓，绝不因"还没评估"放行
+    const ex = await freshExchange();
+    const opening = { marketId: 'BTC', side: 'buy', price: 80000, sizeBase: 0.001, reduceOnly: false };
+    ex.riskGateEnabled = true;
+    ex.riskState = null;
+    await assert.rejects(() => ex.placeLimitOrder(opening), /未评估|风控状态/);
+    await assert.rejects(() => ex.placeLimitOrders([opening]), /未评估|风控状态/);
+
+    // 未启用风控门（paper/shadow）→ 放行
+    ex.riskGateEnabled = false;
+    assert.ok((await ex.placeLimitOrder(opening)).orderId);
+
+    // 已启用 + OK → 放行
+    ex.riskGateEnabled = true;
+    ex.riskState = { status: 'OK' };
+    assert.ok((await ex.placeLimitOrder(opening)).orderId);
+    ex.stop();
+  }
+
+  {
+    // Review6-1：tradingLocked（未知订单态）下 reduce-only 降风险操作必须放行，开仓仍拒绝
+    const ex = await freshExchange();
+    const opening = { marketId: 'BTC', side: 'buy', price: 80000, sizeBase: 0.001, reduceOnly: false };
+    const closing = { marketId: 'BTC', side: 'sell', price: 100000, sizeBase: 0.001, reduceOnly: true };
+    ex.tradingLocked = true;
+    ex.lockReason = '测试锁定';
+    await assert.rejects(() => ex.placeLimitOrder(opening), /已锁定/);
+    const res = await ex.placeLimitOrder(closing);
+    assert.ok(res.orderId, '锁定期间 reduce-only 必须放行');
+    const batch = await ex.placeLimitOrders([closing]);
+    assert.equal(batch.length, 1, '全 reduce-only 批量必须放行');
     ex.stop();
   }
 }

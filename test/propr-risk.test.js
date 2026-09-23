@@ -160,6 +160,73 @@ async function main() {
     assert.equal(bot.stopCalls.length, 0);
     risk.stop();
   }
+
+  {
+    // Review6-1 P0：构造即 fail closed —— 首次评估前 LOCKED，且接管适配器风控门
+    const ex = mkExchange();
+    const risk = new ProprChallengeRisk({ exchange: ex, bot: mkBot(), logger: silent, cfg: { riskPollMs: 60000 } });
+    assert.equal(risk.getState().status, 'LOCKED', '首次评估前必须 LOCKED');
+    assert.equal(risk.getState().reason, '等待首次权益风控评估');
+    assert.equal(ex.riskGateEnabled, true, '构造时必须接管适配器风控门');
+    assert.equal(ex.riskState.status, 'LOCKED', '构造时必须写入 riskState');
+    risk.stop();
+  }
+
+  {
+    // Review6-1 P1：HALT 动作失败后，权益短暂恢复也不得回到 OK（失败锁），直到动作成功
+    const ex = mkExchange();
+    const bot = mkBot();
+    const risk = new ProprChallengeRisk({ exchange: ex, bot, logger: silent, notifier: { send() {} }, cfg: { internalDailyStopPct: 0.01, internalMaxDrawdownPct: 0.03, riskPollMs: 60000 } });
+    await risk.tick();
+    assert.equal(risk.getState().status, 'OK');
+
+    bot.failStopFor(1);
+    ex.equity = 5000 * 0.97;
+    await risk.tick();
+    assert.equal(risk.getState().status, 'HALT');
+    assert.ok(risk.actionError);
+    assert.equal(risk.getState().actionFailureStatus, 'HALT');
+
+    ex.equity = 5000; // 权益短暂恢复
+    await risk.tick(); // 锁存 → 仍按 HALT 重试动作（本次成功）
+    assert.equal(risk.actionError, null, '重试成功后清除 actionError');
+    assert.equal(risk.getState().status, 'HALT', '动作刚完成的本轮不得直接回到 OK');
+    await risk.tick(); // 下一轮才按实际评估回到 OK
+    assert.equal(risk.getState().status, 'OK');
+    risk.stop();
+  }
+
+  {
+    // Review6-1 P1：同 UTC 日重启必须沿用原日初权益（否则日损基准被重置）；跨日才重建
+    const store = {};
+    const loadSnapshot = (k) => store[k] ?? null;
+    const saveSnapshot = (k, v) => { store[k] = v; };
+
+    const ex1 = mkExchange({ equity: 4900, highWaterMark: 4900 });
+    const risk1 = new ProprChallengeRisk({ exchange: ex1, bot: mkBot(), logger: silent, cfg: { riskPollMs: 60000 }, loadSnapshot, saveSnapshot });
+    await risk1.tick();
+    assert.equal(risk1.startOfDayEquity, 4900);
+    assert.equal(store.proprRisk.startOfDayEquity, 4900, '日初权益必须持久化到快照');
+    risk1.stop();
+
+    // 模拟进程重启：同日、权益已跌到 4800 → 沿用 4900 基准 → 日损 2% → REDUCE_ONLY
+    const ex2 = mkExchange({ equity: 4800, highWaterMark: 4900 });
+    const risk2 = new ProprChallengeRisk({ exchange: ex2, bot: mkBot(), logger: silent, cfg: { riskPollMs: 60000 }, loadSnapshot, saveSnapshot });
+    risk2.start();
+    await risk2.tick();
+    assert.equal(risk2.startOfDayEquity, 4900, '同日重启必须沿用原日初权益');
+    assert.equal(risk2.getState().status, 'REDUCE_ONLY', '未计入当日亏损会导致风控漏报');
+    risk2.stop();
+
+    // 跨日：基准重置为当前权益
+    store.proprRisk = { ...store.proprRisk, riskDayKey: String(utcDayStart() - 24 * 3600_000) };
+    const ex3 = mkExchange({ equity: 4800, highWaterMark: 4800 });
+    const risk3 = new ProprChallengeRisk({ exchange: ex3, bot: mkBot(), logger: silent, cfg: { riskPollMs: 60000 }, loadSnapshot, saveSnapshot });
+    risk3.start();
+    await risk3.tick();
+    assert.equal(risk3.startOfDayEquity, 4800, '跨日后基准重置为当前权益');
+    risk3.stop();
+  }
 }
 
 main().then(() => console.log('propr-risk.test.js 全部通过')).catch((err) => { console.error(err); process.exit(1); });

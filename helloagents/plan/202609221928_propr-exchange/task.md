@@ -131,6 +131,15 @@
 - [√] 7R.7 测试补齐：风控分级（权益口径/未实现亏损）、动作失败重试、恢复解除暂停、适配器硬拦截（4 状态 × 开仓拒绝 + reduce-only 放行 + 杠杆限制）、**bot 未运行时忽略 fill**
 - [√] 7R.8 真实 sim-write 硬拦截冒烟：HALT 在发往 API 之前拒绝开仓；REDUCE_ONLY 下 reduce-only 放行
 
+## 7S. Review6-1 复审修复（fail-closed 与基准持久化，2026-09-23）
+- [√] 7S.1 【P0】fail closed：风控构造即 `LOCKED`（原因「等待首次权益风控评估」）并接管 `exchange.riskGateEnabled`；适配器改为严格判断（状态缺失/未评估也拒绝开仓，不再用 `status &&` 放行）
+- [√] 7S.2 【P0】server 在 Propr init 完成后**立即执行首次 `risk.tick()`**；评估非 OK/WARNING 时告警并保持 LOCKED（`/start` 与下单均被拒）
+- [√] 7S.3 【P1】高风险动作失败锁：HALT/BREACHED 动作失败后即使权益短暂恢复也维持该级别并持续重试，动作成功后才允许回到 OK
+- [√] 7S.4 【P1】日初权益持久化：`riskDayKey/startOfDayEquity/initialEquity` 写入 `.state.json`（key=`proprRisk`）；同 UTC 日重启沿用原基准，跨日重建
+- [√] 7S.5 【P1】reduce-only 降风险操作在 `tradingLocked`/快照不完整/风控非正常下**均放行**（单笔与全 reduce-only 批量）
+- [√] 7S.6 测试补齐：构造即 LOCKED、风控门未评估拒绝、动作失败锁存、日初权益持久化、reduce-only 放行
+- [√] 7S.7 真实 sim-write 冒烟：`首次风控评估通过（OK）`、`/api/propr/risk` 返回权益/日初/高水位/使用率
+
 ## 8. 对账、恢复与异常
 - [√] 8.1 在 `src/exchange/propr/propr.js` 实现断线重连与成交补偿（`reconnect()` → `init({resume:true})` 全量成交对账，emit 断线期间缺失 fill，tradeId 去重保证只补一次），依赖任务 4.4
 - [√] 8.2 处理部分成交（每笔成交按实际成交量发 fill，bot 侧按实际量补同量对腿；尘埃仓守卫沿用 bot），依赖任务 4.4

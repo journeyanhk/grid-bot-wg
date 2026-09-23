@@ -87,7 +87,7 @@ export function evaluateRisk({
 }
 
 export class ProprChallengeRisk {
-  constructor({ exchange, bot, notifier, logger: log = logger, cfg = {} } = {}) {
+  constructor({ exchange, bot, notifier, logger: log = logger, cfg = {}, loadSnapshot, saveSnapshot } = {}) {
     this.exchange = exchange;
     this.bot = bot;
     this.notifier = notifier;
@@ -102,14 +102,24 @@ export class ProprChallengeRisk {
     this.initialEquity = null;
     this.startOfDayEquity = null;
     this._dayKey = null;
-    this.status = null;
-    this.reason = null;
-    this.actionError = null;      // 动作失败原因（不为空则每 tick 重试降风险动作）
-    this._pausedByRisk = false;   // 是否由本层暂停过开仓（恢复时据此解除）
+    // fail closed（Review6-1 P0）：首次权益评估完成前一律 LOCKED，绝不因"还没评估"而放行开仓
+    this.status = STATUS.LOCKED;
+    this.reason = '等待首次权益风控评估';
+    this.actionError = null;
+    this._actionFailureStatus = null;  // HALT/BREACHED 动作失败锁：完成前不因权益恢复而回到 OK
+    this._pausedByRisk = false;        // 是否由本层暂停过开仓（恢复时据此解除）
     this._timer = null;
+    this._persist = { load: loadSnapshot, save: saveSnapshot };
+
+    // 构造即接管适配器的风控门（适配器 fail-closed 依赖 riskGateEnabled）
+    if (this.exchange) {
+      this.exchange.riskGateEnabled = true;
+      this.exchange.riskState = this.getState();
+    }
   }
 
   start() {
+    this._restore();
     if (!this._timer) {
       this._timer = setInterval(() => { this.tick().catch(() => {}); }, this.pollMs);
       this._timer.unref?.();
@@ -117,6 +127,31 @@ export class ProprChallengeRisk {
   }
 
   stop() { if (this._timer) clearInterval(this._timer); this._timer = null; }
+
+  /** 从快照恢复当日基准：同一 UTC 日沿用原日初权益，跨日则重新建立（Review6-1 P1）。 */
+  _restore() {
+    try {
+      const snap = this._persist.load?.('proprRisk');
+      if (!snap) return;
+      if (String(snap.riskDayKey) === String(utcDayStart())) {
+        this._dayKey = String(snap.riskDayKey);
+        this.startOfDayEquity = Number(snap.startOfDayEquity) || null;
+        this.initialEquity = Number(snap.initialEquity) || null;
+        this.log.info('propr-risk', `已恢复当日风控基准：日初权益 ${this.startOfDayEquity}`);
+      }
+    } catch { /* 持久化失败不影响风控 */ }
+  }
+
+  _save() {
+    try {
+      this._persist.save?.('proprRisk', {
+        riskDayKey: this._dayKey,
+        startOfDayEquity: this.startOfDayEquity,
+        initialEquity: this.initialEquity,
+        updatedAt: Date.now(),
+      });
+    } catch { /* 持久化失败不影响风控 */ }
+  }
 
   getState() {
     const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number((Number(v) * 100).toFixed(4)));
@@ -129,6 +164,7 @@ export class ProprChallengeRisk {
       statusLabel: STATUS_LABEL[this.status] || null,
       reason: this.reason,
       actionError: this.actionError,
+      actionFailureStatus: this._actionFailureStatus,
       initialEquity: this.initialEquity,
       startOfDayEquity: this.startOfDayEquity,
       currentEquity: this.currentEquity ?? null,
@@ -162,9 +198,16 @@ export class ProprChallengeRisk {
       this._dayKey = String(dayStart);
       if (Number.isFinite(currentEquity)) this.startOfDayEquity = currentEquity;
       this.log.info('propr-risk', `UTC 日切：日初权益重置为 ${this.startOfDayEquity}`);
+      this._save();
     }
-    if (this.initialEquity == null) this.initialEquity = Number(ex.startingBalance) || (Number.isFinite(currentEquity) ? currentEquity : null);
-    if (this.startOfDayEquity == null && Number.isFinite(currentEquity)) this.startOfDayEquity = currentEquity;
+    if (this.initialEquity == null) {
+      this.initialEquity = Number(ex.startingBalance) || (Number.isFinite(currentEquity) ? currentEquity : null);
+      this._save();
+    }
+    if (this.startOfDayEquity == null && Number.isFinite(currentEquity)) {
+      this.startOfDayEquity = currentEquity;
+      this._save();
+    }
 
     const equityUsable = typeof ex.isEquityStale === 'function' ? !ex.isEquityStale() : false;
     const r = evaluateRisk({
@@ -187,18 +230,29 @@ export class ProprChallengeRisk {
     this.equityFreshAt = ex.equityFreshAt ?? null;
     this.updatedAt = Date.now();
 
-    const changed = this.status !== r.status;
-    this.status = r.status;
+    // HALT/BREACHED 动作未完成前不得因短暂权益恢复而回到 OK（Review6-1 P1：失败锁）
+    let effective = r.status;
+    if (this.actionError && (this._actionFailureStatus === STATUS.HALT || this._actionFailureStatus === STATUS.BREACHED)) {
+      effective = this._actionFailureStatus;
+    }
+    const changed = this.status !== effective;
+    this.status = effective;
     this.exchange.riskState = this.getState();
 
     // 状态变化或上次动作失败 → 执行/重试动作（失败不静默）
     if (changed || this.actionError) {
-      this.log.warn('propr-risk', `风控状态 ${r.status}：${r.reason}`);
+      const reason = effective === r.status
+        ? r.reason
+        : `上次 ${this._actionFailureStatus} 动作未完成，继续重试（当前评估 ${r.status}）`;
+      this.log.warn('propr-risk', `风控状态 ${effective}：${reason}`);
       try {
-        await this._apply(r.status, r.reason);
+        await this._apply(effective, reason);
         this.actionError = null;
+        this._actionFailureStatus = null;
+        this.exchange.riskState = this.getState();
       } catch (err) {
         this.actionError = redactSecrets(err?.message || String(err));
+        this._actionFailureStatus = effective;
         this.exchange.riskState = this.getState();
         this.log.error('propr-risk', `风控动作执行失败（将在下一轮重试）：${this.actionError}`);
         this._send('critical', `🔴 Propr 风控动作执行失败，请立即人工确认挂单与持仓：${this.actionError}`, 'propr:risk:action-failed');

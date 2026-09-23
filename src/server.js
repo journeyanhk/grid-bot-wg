@@ -153,7 +153,7 @@ const proprBot = new GridBot(proprExchange, { onChange: (s) => saveSnapshot('pro
 // Propr 挑战风控层：仅对真实账户模式启用（shadow 的余额是本地模拟、paper 无账户）。
 // 内部日损/总回撤达线分别触发「仅减仓（至 UTC 日切）」与「撤单+平仓+停机」。
 const proprRisk = (cfg.propr.mode === 'sim-write' || cfg.propr.mode === 'challenge')
-  ? new ProprChallengeRisk({ exchange: proprExchange, bot: proprBot, notifier, logger, cfg: cfg.propr })
+  ? new ProprChallengeRisk({ exchange: proprExchange, bot: proprBot, notifier, logger, cfg: cfg.propr, loadSnapshot, saveSnapshot })
   : null;
 proprRisk?.start();
 
@@ -899,6 +899,18 @@ await Promise.all([
   initExchange(vaExchange, 'Variational', cfg.va),
   initExchange(proprExchange, 'Propr', cfg.propr),
 ]);
+
+// Propr 首次风控评估必须同步完成（fail closed）：评估前 riskState=LOCKED，适配器与 /start 都会拒绝开仓。
+// 评估失败/未连接时保持 LOCKED，等后续 tick 恢复，绝不允许在未评估状态下启动网格。
+if (proprRisk) {
+  await proprRisk.tick().catch(() => {});
+  const st = proprRisk.getState();
+  if (st.status !== 'OK' && st.status !== 'WARNING') {
+    logger.warn('server', `[Propr] 首次风控评估为 ${st.status}（${st.reason}），网格启动将被拒绝直至状态恢复。`);
+  } else {
+    logger.info('server', `[Propr] 首次风控评估通过（${st.status}）`);
+  }
+}
 
 // ── 崩溃恢复 / 续跑 ────────────────────────────────────────────────────────────
 // If a bot was "running" when the process died, RESUME it: re-attach to the

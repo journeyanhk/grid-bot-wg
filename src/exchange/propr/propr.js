@@ -70,6 +70,7 @@ export class ProprExchange extends EventEmitter {
     this.attemptStatus = null;     // 挑战状态（active/passed/failed）→ 风控 BREACHED 判定
     this.startingBalance = null;   // 挑战起始余额（平台口径）
     this.riskState = null;         // 挑战风控层写入，经 getPublicInfo 透出
+    this.riskGateEnabled = false;  // 风控层启用标记：true 时开仓必须经风险状态硬拦截（fail closed）
 
     // 能力位
     this.positionMode = 'net';
@@ -490,14 +491,17 @@ export class ProprExchange extends EventEmitter {
   }
 
   /**
-   * 挑战风控硬拦截（Review6 P0）：只有 OK/WARNING 允许开仓。
-   * REDUCE_ONLY/HALT/LOCKED/BREACHED 一律拒绝**开仓**；reduce-only 降风险操作不走本检查。
-   * 关键：风控状态写入 exchange.riskState 后，即便 bot 未运行、用户手动 /start，也无法绕过。
+   * 挑战风控硬拦截（Review6 P0 / Review6-1 P0）：**fail closed**。
+   * - 风控层未启用（paper/shadow，`riskGateEnabled=false`）→ 放行；
+   * - 已启用但状态缺失/未评估（null）→ 拒绝（绝不因"还没评估"而放行）；
+   * - 仅 OK/WARNING 允许开仓；REDUCE_ONLY/HALT/LOCKED/BREACHED 一律拒绝**开仓**。
+   * reduce-only 降风险操作不走本检查，即便 tradingLocked / 快照不完整也放行。
    */
   _assertRiskAllowsOpening() {
+    if (!this.riskGateEnabled) return;
     const status = this.riskState?.status;
-    if (status && status !== 'OK' && status !== 'WARNING') {
-      throw new Error(`Propr 风控状态 ${status}，拒绝开仓（仅允许 reduce-only 降风险操作）`);
+    if (status !== 'OK' && status !== 'WARNING') {
+      throw new Error(`Propr 风控状态 ${status ?? '未评估'}，拒绝开仓（仅允许 reduce-only 降风险操作）`);
     }
   }
 
@@ -614,8 +618,13 @@ export class ProprExchange extends EventEmitter {
   }
 
   async placeLimitOrder(order = {}) {
-    this._assertCanOpen();
-    if (!order.reduceOnly) this._assertRiskAllowsOpening();
+    // reduce-only 是降风险操作：不受 tradingLocked / 快照不完整 / 风控状态限制（Review6-1）
+    if (order.reduceOnly) {
+      // 跳过开仓检查
+    } else {
+      this._assertCanOpen();
+      this._assertRiskAllowsOpening();
+    }
     const marketId = String(order.marketId ?? this.base);
     if (marketId !== this.base) throw new Error(`Propr 适配器仅支持 ${this.base}，收到 ${marketId}`);
     const price = roundPrice(order.price, this.market);
@@ -640,9 +649,12 @@ export class ProprExchange extends EventEmitter {
   }
 
   async placeLimitOrders(orders = []) {
-    this._assertCanOpen();
     if (!orders.length) return [];
-    if (orders.some((o) => !o.reduceOnly)) this._assertRiskAllowsOpening();
+    // 全为 reduce-only → 降风险批量，放行；含任一开仓单 → 走完整开仓检查
+    if (orders.some((o) => !o.reduceOnly)) {
+      this._assertCanOpen();
+      this._assertRiskAllowsOpening();
+    }
     const prepared = orders.map((order) => {
       const marketId = String(order.marketId ?? this.base);
       if (marketId !== this.base) throw new Error(`Propr 适配器仅支持 ${this.base}，收到 ${marketId}`);
