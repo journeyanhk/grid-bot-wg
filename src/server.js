@@ -751,7 +751,11 @@ const server = http.createServer(async (request, res) => {
         : { status: null, note: '当前模式未启用挑战风控（仅 sim-write/challenge）' });
     }
     // 风控非正常时提前拒绝启动：避免先改运行状态、再在铺单阶段逐个失败（Review6 P0）
+    // 未连接（dataSource=null）同样拒绝：否则 shadow 会用 paper 兜底价（95000）跑假网格
     if (p === '/api/propr/start' && request.method === 'POST') {
+      if (proprExchange.dataSource == null) {
+        return send(res, 400, { error: 'Propr 未连接（请检查 PR_PROXY / 网络后重试），拒绝启动网格' });
+      }
       const st = proprRisk?.getState();
       if (st?.status && st.status !== 'OK' && st.status !== 'WARNING') {
         return send(res, 400, { error: `Propr 风控状态 ${st.status}（${st.statusLabel || ''}）${st.actionError ? '，且上次风控动作失败：' + st.actionError : ''}，拒绝启动网格` });

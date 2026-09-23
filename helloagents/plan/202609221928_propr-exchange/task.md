@@ -107,6 +107,7 @@
 - [√] 6.4 【部署补齐】Propr 控制台 tab：复用通用 `makeExchangeCtrl`（市场/趋势、策略配置、启动/停止/调整/撤单/补格、账户状态、孤儿持仓处理、价格/网格图），概览卡片加「进入 Propr 控制台 →」
 - [√] 6.5 【部署补齐·阻断修复】GridBot 市场解析改为字符串比较（`String(m.marketId) === String(cfg.marketId)`，`_start`/`startRecovery` 两处）+ `_closeWithConfirm` 保持 marketId 原类型 + 前端 start/startRecovery 的 marketId 原值透传——Propr 的字符串 marketId（`'BTC'`）此前会导致「找不到该市场」
 - [√] 6.6 【部署补齐】Shadow 的 `getCandles` 改用真实 HL K 线（此前继承 paper 合成价，趋势监测/智能填充完全失真）
+- [√] 6.7 【部署补齐·安全】`/api/propr/start` 增加「未连接拒绝启动」：`dataSource == null`（代理/网络故障导致 init 失败）时不得用 paper 兜底价启动假网格
 
 ## 6R. Review4 复审修复（接入安全，2026-09-23）- [√] 6R.1 【P1】新鲜度分离：`lastPriceOkAt`（HL 公开行情）与 `lastApiOkAt`（Propr API）分开计时；`_pollPrice` 只推进行情时间戳，看门狗改用 `lastOkKey='lastApiOkAt'`，杜绝"行情正常=Propr 健康"误判
 - [√] 6R.2 【P1】前端隔离：抽取 `renderExchangeCard()`；汇总循环恢复为 6 所（Propr 不计入余额/盈亏/运行数，避免 `4/3 运行中`），Propr 卡片独立渲染
@@ -149,7 +150,10 @@
 
 ## 9. 四层验收（Review 5）
 - [ ] 9.1 Shadow 24h 验收：0 写请求、行情/持仓持续刷新、本地模拟网格正常、断线恢复、异常锁定，产出报告，依赖任务 6.3、7.3
+  > 验收清单已细化（11 项）见 how.md#Shadow-验收清单任务-91；越界 close 链路已用窄区间实测通过
 - [ ] 9.2 Free Trial `sim-write` 24–72h 验收：批量挂单/撤单/成交/补单/部分成交/对账/重启恢复/手动停止/自动越界/多空持仓/reduceOnly/实际限频，按 how.md 验收指标表逐项达标，依赖任务 9.1
+  > 必须按分阶段路径推进（只读→单笔远价单→撤单→单笔成交→reduce-only 平仓→断线恢复→4–6 格→15 格），
+  > 不要从 Shadow 直接切整套 15 格
 - [ ] 9.3 编写"付费前人工确认清单"并评审（8 项，见 how.md#测试与部署），依赖任务 9.2
 - [ ] 9.4 付费 Challenge 实测（1x/close/无 recover）：购买账户 + 清单全通过后，`PR_MODE=challenge` + `PR_ALLOW_CHALLENGE=YES` + 白名单启动，人工每日检查，产出实测报告，依赖任务 9.3
 
