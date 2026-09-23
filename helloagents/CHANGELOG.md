@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-09-23
+
+### 优化（Review2 影子首夜评审：P0 五项 + P1 四项 + P2 三项）
+- **P0 资金完整度**：短命交易（未跨整点）尾段费率回退到"最近已知点位"——修复首夜 95.59% 的缺口根因；资金采集诊断（连续失败计数/最后成功时间/错误）进 state 与日报
+- **P0 日报持仓/浮盈**：三组均显示"持仓 side size@price（浮 XU）/ 无持仓"；首日模式（<1天且<3笔）只报运行状态不刷决断门
+- **P0 时区统一**：日报头"本地时间 + 统计日 UTC"双标注（统计按 UTC 归属）
+- **P0 明细日志**：ENTRY 全字段（tradeId/side/price/stop/atrSource/riskUsd/score/regime）；CLOSED 全成本（reason/entry/exit/gross/fee/slip/funding/missingMs/netBaseline/netConservative/holding）
+- **P1 盘口滑点**：4 位精度 + P50/P95/Max 分布（对照情景基准 2bps 已进气净）
+- **P1 覆盖率明细**：处理K线/缺失/最大缺口进日报
+- **P2**：byExit/bySide 统计与日报退出分布（止盈/止损/移动止损/信号退出/超时）
+
+### 测试
+- shadow-quality 增至 23 例（尾段费率回退/平仓事件/统计分布/盘口精度/首日日报）；npm test 16 项全绿
+
 ## [1.7.1] - 2026-09-22
 
 ### 修复（Review1：影子决断有效性问题，部署前必修 P0/P1 全部落地）

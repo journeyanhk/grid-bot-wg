@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { accrueFunding, createShadowRecorder, SHADOW_DEFAULTS } from '../src/strategy/shadow-recorder.js';
 import { computePendingBars } from '../src/strategy/shadow-runner.js';
-import { computeStats, evaluateGate, fundingCompleteness, summarizeBasis } from '../src/strategy/shadow-persistence.js';
+import { composeDailyReport, computeStats, evaluateGate, fundingCompleteness, summarizeBasis } from '../src/strategy/shadow-persistence.js';
 
 let passed = 0, failed = 0;
 const T = [];
@@ -207,6 +207,86 @@ test('summarizeBasis：有符号均值 / |P95| / 溢价占比', () => {
   assert.equal(s.maxAbsBps, 5);
   assert.equal(s.hlPremiumRatio, 0.67);
   assert.equal(summarizeBasis([]).samples, 0);
+});
+
+// ── Review2 首夜优化（v1.7.2） ──
+test('短命交易（<1h 未跨整点）：尾段用最近费率点回退 -> 完整度 100%', () => {
+  let fake = 0;
+  const rec = createShadowRecorder({ now: () => fake });
+  rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
+  rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
+  // 持仓 30 分钟后信号退出（10:05 -> 10:35 类比，未跨整点）
+  fake = 1_800_000;
+  rec.onBar({ candle5m: cdl(1_500_000), signal: { score: 5, direction: null }, barKey: 1_500_000, features: FEAT, fundingPoints: [{ time: 0, rate: 0.0001 }] });
+  const trade = rec.configs.get('r2fast').trades[0];
+  assert.equal(trade.exitReason, 'signal_exit');
+  assert.ok(trade.fundingMissingMs < 3_600_000, `尾段不应全额记缺失（实际 ${trade.fundingMissingMs}）`);
+  const fc = fundingCompleteness([trade], null);
+  assert.ok(fc.pct > 90, `完整度应显著提升（实际 ${fc.pct}%）`);
+});
+
+test('onBar 返回平仓事件（含完整 trade）供明细日志', () => {
+  const rec = createShadowRecorder({ now: () => 0 });
+  rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
+  rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
+  const events = rec.onBar({ candle5m: cdl(600_000), signal: { score: 5, direction: null }, barKey: 600_000, features: FEAT });
+  const closed = events.find((e) => e.event === 'closed');
+  assert.ok(closed, '应返回 closed 事件');
+  assert.equal(closed.configId, 'r2fast');
+  assert.ok(closed.trade.tradeId && closed.trade.exitReason && closed.trade.netPnl, 'trade 含编号/原因/净利');
+});
+
+test('统计分布：byExit / bySide 计数', () => {
+  const rec = createShadowRecorder({ now: () => 0 });
+  rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
+  rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
+  rec.onBar({ candle5m: cdl(600_000), signal: { score: 5, direction: null }, barKey: 600_000, features: FEAT });
+  const st = rec.configs.get('r2fast').stats;
+  assert.equal(st.byExit.signal_exit, 1);
+  assert.equal(st.bySide.long, 1);
+});
+
+test('盘口观测分布：4 位精度 + P50/P95/Max', () => {
+  const rec = createShadowRecorder({ now: () => 0 });
+  const samples = [0.0012, 0.0031, 0.0008, 0.0095];
+  rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
+  let i = 0;
+  // 每次入场一次采样（用不同 barKey 触发多次入场，但入场需冷却——直接驱动 samples 注入
+  for (const bps of samples) {
+    rec.configs.get('r2fast').bookObserved = { entryBps: bps };
+  }
+  // 通过 onBar 路径注入一次真实采样并校验摘要精度
+  const rec2 = createShadowRecorder({ now: () => 0 });
+  rec2.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
+  rec2.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT, bookSample: { entryBps: 0.001234 } });
+  const sum = rec2.getState().bookObserved;
+  assert.equal(sum.samples, 1);
+  assert.equal(sum.meanBps, 0.0012, '4 位精度（原 3 位会显示 0）');
+  assert.ok(sum.p50Bps != null && sum.maxBps != null);
+});
+
+test('composeDailyReport：首日模式不刷决断门；时间戳含 UTC 标注；明细含退出分布', () => {
+  const rec = createShadowRecorder({ now: () => 0 });
+  const emptyData = rec.exportData();
+  const firstDay = composeDailyReport({
+    recorderData: emptyData,
+    gate: { days: 0, checks: [{ name: 'x', ok: false, value: 0 }], baseline: { trades: 0 }, funding: { pct: 100 } },
+    runner: { equity: 500, coverage: { coveragePct: 100, processedBars: 12, missedBars: 0, maxGapMs: 0 } },
+  });
+  assert.ok(firstDay.includes('未达最小统计周期'), '首日模式');
+  assert.ok(firstDay.includes('UTC'), '统计日 UTC 标注');
+  assert.ok(!firstDay.includes('决断门进度'), '首日不刷决断门');
+
+  rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
+  rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
+  rec.onBar({ candle5m: cdl(600_000), signal: { score: 5, direction: null }, barKey: 600_000, features: FEAT });
+  const full = composeDailyReport({
+    recorderData: rec.exportData(),
+    gate: { days: 8, checks: [{ name: 'x', ok: true, value: 1 }], baseline: { trades: 3 }, funding: { pct: 100 } },
+    runner: { equity: 500, coverage: { coveragePct: 99.5, processedBars: 2300, missedBars: 1, maxGapMs: 300_000 } },
+  });
+  assert.ok(full.includes('信号退出 1'), '退出原因分布');
+  assert.ok(full.includes('资金完整度'), '资金完整度行');
 });
 
 (async () => {

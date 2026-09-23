@@ -72,6 +72,7 @@ export function createShadowRunner(opts = {}) {
       startedAt: null, lastBarKey: null, lastHourKey: null, lastReportDay: null,
       coverage: { firstBarKey: null, lastBarKey: null, processedBars: 0, missedBars: 0, maxGapMs: 0, outageCount: 0 },
       requests: { candle: { ok: 0, fail: 0 }, funding: { ok: 0, fail: 0 }, book: { ok: 0, fail: 0 }, binance: { ok: 0, fail: 0 } },
+      fundingDiag: { ok: null, lastOkAt: null, lastError: null, consecutiveFails: 0 },
       binanceSamples: [],
       binance: { samples: 0 },
     };
@@ -117,11 +118,13 @@ export function createShadowRunner(opts = {}) {
       const end = now();
       const rows = await postInfo({ type: 'fundingHistory', coin: cfg.symbol, startTime: end - 48 * 3_600_000, endTime: end });
       bump('funding', true);
+      runner.fundingDiag = { ok: true, lastOkAt: now(), lastError: null, consecutiveFails: 0 };
       return (Array.isArray(rows) ? rows : [])
         .map((r) => ({ time: Number(r.time), rate: Number(r.fundingRate) }))
         .filter((p) => Number.isFinite(p.time) && Number.isFinite(p.rate));
     } catch (e) {
       bump('funding', false);
+      runner.fundingDiag = { ok: false, lastOkAt: runner.fundingDiag?.lastOkAt || null, lastError: String(e?.message || e), consecutiveFails: (runner.fundingDiag?.consecutiveFails || 0) + 1 };
       throw e;
     }
   }
@@ -196,7 +199,19 @@ export function createShadowRunner(opts = {}) {
     lastEvaluatedAt = now();
     lastBarClose = Number(bar.close) || lastBarClose;
     lastError = null;
-    if (events.length) logger.info?.('strategy', `[影子] ${cfg.symbol} ${signal.regime} score=${signal.score} 事件: ${events.map((e) => `${e.configId}:${e.event}`).join(', ')}`);
+    for (const ev of events) {
+      if (ev.event === 'entry') {
+        const pos = recorder.configs.get(ev.configId)?.position;
+        if (pos) {
+          const riskUsd = Math.abs(pos.avgEntry - pos.initialStop) * pos.filledSize;
+          logger.info?.('strategy', `[影子] ${ev.configId} ENTRY tradeId=${ev.tradeId} side=${ev.side} price=${pos.avgEntry} stop=${pos.stopPrice} atrSource=${pos.atrSource} atr=${pos.atr} riskUsd=${riskUsd.toFixed(2)} score=${signal.score} regime=${signal.regime}`);
+        }
+      } else if (ev.event === 'closed') {
+        const t = ev.trade;
+        logger.info?.('strategy', `[影子] ${ev.configId} CLOSED tradeId=${t.tradeId} reason=${t.exitReason} entry=${t.entryPrice} exit=${t.exitPrice} gross=${t.grossPnl} fee=${Number(t.costs?.baseline?.feeUsd || 0).toFixed(4)} slip=${Number(t.costs?.baseline?.slippageUsd || 0).toFixed(4)} funding=${t.fundingUsd} fundingMissingMs=${t.fundingMissingMs} netBaseline=${t.netPnl?.baseline} netConservative=${t.netPnl?.conservative} holding=${Math.round((t.holdingMs || 0) / 60_000)}m`);
+      }
+    }
+    if (!events.length) logger.info?.('strategy', `[影子] ${cfg.symbol} ${signal.regime} score=${signal.score} 无动作`);
     persist(); // 每根落盘：崩溃/重启后 cursor 一致，不重复驱动
     if (isLast && signal.direction) await fetchBinanceCheck(bar.close);
   }
@@ -251,7 +266,7 @@ export function createShadowRunner(opts = {}) {
     const data = recorder.exportData();
     const mtm = lastBarClose != null ? recorder.getMarkToMarket(lastBarClose) : null;
     const gate = evaluateGate(data, { equity, coverage: coverageView(), mtm: mtm?.r2fast || null });
-    const text = composeDailyReport({ recorderData: data, gate, runner: { equity, binance: runner.binance, bookObserved: recorder.getState().bookObserved, mtm } });
+    const text = composeDailyReport({ recorderData: data, gate, runner: { equity, binance: runner.binance, bookObserved: recorder.getState().bookObserved, mtm, coverage: coverageView(), fundingDiag: runner.fundingDiag } });
     logger.info?.('strategy', `[影子] 日报:\n${text}`);
     try { notifier?.send?.({ source: 'strategy', level: 'warn', key: 'strategy-shadow:daily', cooldownMs: 20 * 3600_000, message: text }); } catch { /* 推送失败不影响 */ }
   }
@@ -288,6 +303,7 @@ export function createShadowRunner(opts = {}) {
       enabled: !!timer, symbol: cfg.symbol, startedAt: runner.startedAt,
       lastBarKey: runner.lastBarKey, lastEvaluatedAt, lastError, lastBarClose,
       coverage, requests: runner.requests,
+      fundingDiag: runner.fundingDiag,
       binance: runner.binance,
       bookObserved: rec.bookObserved,
       gate,

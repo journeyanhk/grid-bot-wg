@@ -35,6 +35,7 @@ export function accrueFunding(pos, toTime, fundingPoints, { finalize = false } =
   const rates = fundingPoints
     ? new Map(fundingPoints.map((p) => [Math.floor(Number(p.time) / 3_600_000), Number(p.rate)]))
     : null;
+  const sortedPoints = fundingPoints ? [...fundingPoints].sort((a, b) => Number(a.time) - Number(b.time)) : null;
   const sign = pos.side === 'long' ? 1 : -1;
   const lastBoundary = Math.floor(toTime / 3_600_000) * 3_600_000;
   let cursor = pos.funding.accruedThrough;
@@ -54,7 +55,14 @@ export function accrueFunding(pos, toTime, fundingPoints, { finalize = false } =
     cursor = next;
   }
   if (finalize && cursor < toTime) {
-    addSeg(pos.funding.lastRate, toTime - cursor);
+    // 尾段费率回退：优先最后已知费率；若整段未跨整点（短命交易）则取 toTime 之前最近的费率点
+    let rate = pos.funding.lastRate;
+    if (rate == null && sortedPoints) {
+      for (let i = sortedPoints.length - 1; i >= 0; i--) {
+        if (Number(sortedPoints[i].time) <= toTime) { rate = Number(sortedPoints[i].rate); break; }
+      }
+    }
+    addSeg(rate, toTime - cursor);
     cursor = toTime;
   }
   pos.funding.accruedThrough = cursor;
@@ -186,8 +194,7 @@ export function createShadowRecorder(opts = {}) {
     if (stopHit) {
       const reason = pos.stopPrice === pos.initialStop ? ExitReason.STOP : ExitReason.TRAILING_STOP;
       closeRemaining(cfg, pos, pos.stopPrice, reason);
-      finalize(cfg, pos, candle);
-      return;
+      return finalize(cfg, pos, candle);
     }
 
     // 2) 分批止盈
@@ -204,8 +211,7 @@ export function createShadowRecorder(opts = {}) {
       pos.legs.push({ notional: tp.price * size, isMarket: false, kind: 'tp' });
       if (pos.closedSize >= pos.filledSize - 1e-12) { // 全部止盈完成
         pos.exitReason = ExitReason.TP_FULL; pos.exitPrice = tp.price;
-        finalize(cfg, pos, candle);
-        return;
+        return finalize(cfg, pos, candle);
       }
     }
 
@@ -229,15 +235,15 @@ export function createShadowRecorder(opts = {}) {
     // 5) 最长持仓熔断（maxHoldingHours，市价腿）
     if (now() - pos.openedAt >= shadow.maxHoldingHours * 3_600_000) {
       closeRemaining(cfg, pos, close, ExitReason.MAX_HOLDING);
-      finalize(cfg, pos, candle);
-      return;
+      return finalize(cfg, pos, candle);
     }
 
     // 6) 趋势失效退出（信号退出，市价腿）
     if (signal && cfg.tracker.shouldExit(pos.side, signal.score)) {
       closeRemaining(cfg, pos, close, ExitReason.SIGNAL_EXIT);
-      finalize(cfg, pos, candle);
+      return finalize(cfg, pos, candle);
     }
+    return null;
   }
 
   /** 收尾：成本四档 + 资金费 + 记录交易。 */
@@ -271,6 +277,10 @@ export function createShadowRecorder(opts = {}) {
     if (cfg.trades.length > shadow.maxTradesPerConfig) cfg.trades.pop();
     cfg.stats.closed++;
     if (trade.grossPnl > 0) cfg.stats.wins++;
+    if (!cfg.stats.byExit) cfg.stats.byExit = {};
+    cfg.stats.byExit[trade.exitReason] = (cfg.stats.byExit[trade.exitReason] || 0) + 1;
+    if (!cfg.stats.bySide) cfg.stats.bySide = { long: 0, short: 0 };
+    cfg.stats.bySide[trade.side] = (cfg.stats.bySide[trade.side] || 0) + 1;
     cfg.stats.grossPnl = Number((cfg.stats.grossPnl + trade.grossPnl).toFixed(4));
     cfg.stats.netPnlBaseline = Number((cfg.stats.netPnlBaseline + (netPnl.baseline || 0)).toFixed(4));
     cfg.position = null;
@@ -302,7 +312,8 @@ export function createShadowRecorder(opts = {}) {
       if (cfg.position) {
         cfg.position._fundingPoints = fundingPoints;
         accrueFunding(cfg.position, barCloseTime, fundingPoints); // 逐时段累计（含补处理的历史 K 线）
-        managePosition(cfg, candle5m, signal);
+        const closed = managePosition(cfg, candle5m, signal);
+        if (closed) results.push({ configId: cfg.def.id, event: 'closed', trade: closed });
       }
       if (!cfg.position) {
         const cooled = !cfg.cooldownUntil || !Number.isFinite(barKey) || barKey >= cfg.cooldownUntil;
@@ -349,6 +360,21 @@ export function createShadowRecorder(opts = {}) {
     return out;
   }
 
+  /** 盘口观测滑点分布（4 位精度；仅诊断，不进净 PnL）。 */
+  function bookObservedSummary() {
+    const list = bookSamples.map((x) => Number(x.entryBps)).filter(Number.isFinite).sort((a, b) => a - b);
+    if (!list.length) return { samples: 0, meanBps: null, p50Bps: null, p95Bps: null, maxBps: null };
+    const mean = list.reduce((a, b) => a + b, 0) / list.length;
+    const pct = (p) => list[Math.min(list.length - 1, Math.floor(p * list.length))];
+    return {
+      samples: list.length,
+      meanBps: Number(mean.toFixed(4)),
+      p50Bps: Number(pct(0.5).toFixed(4)),
+      p95Bps: Number(pct(0.95).toFixed(4)),
+      maxBps: Number(list[list.length - 1].toFixed(4)),
+    };
+  }
+
   function getState(markPrice = null) {
     const mtm = markPrice != null ? getMarkToMarket(markPrice) : null;
     const perConfig = {};
@@ -359,6 +385,8 @@ export function createShadowRecorder(opts = {}) {
         position: cfg.position ? {
           tradeId: cfg.position.tradeId, side: cfg.position.side, entryPrice: cfg.position.avgEntry,
           stopPrice: cfg.position.stopPrice, filledSize: cfg.position.filledSize,
+          atrSource: cfg.position.atrSource, atrValue: cfg.position.atr,
+          riskUsd: Number((Math.abs(cfg.position.avgEntry - cfg.position.initialStop) * cfg.position.filledSize).toFixed(2)),
           fundingUsd: Number(cfg.position.funding.totalUsd.toFixed(4)),
           fundingMissingMs: cfg.position.funding.missingMs,
         } : null,
@@ -367,12 +395,10 @@ export function createShadowRecorder(opts = {}) {
         recentTrades: cfg.trades.slice(0, 10),
       };
     }
-    const bookCount = bookSamples.length;
-    const bookMean = bookCount ? bookSamples.reduce((a, x) => a + x.entryBps, 0) / bookCount : null;
     return {
       evaluations, lastSignal, perConfig,
       recentSignals: signals.slice(0, 20),
-      bookObserved: { samples: bookCount, meanEntryBps: bookMean != null ? Number(bookMean.toFixed(3)) : null },
+      bookObserved: bookObservedSummary(),
       equity: shadow.equity,
     };
   }

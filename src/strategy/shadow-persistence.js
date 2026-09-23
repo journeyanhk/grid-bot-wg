@@ -147,30 +147,64 @@ export function evaluateGate(recorderData, { equity = 10_000, coverage = null, m
   return { pass: checks.every((c) => c.ok), days: Number(effDays.toFixed(1)), coverage, funding, checks, baseline: base, conservative: cons };
 }
 
-/** 日报文案（Telegram/Webhook 友好，紧凑）。 */
+const EXIT_LABELS = { tp_full: '止盈', stop: '止损', trailing_stop: '移动止损', signal_exit: '信号退出', max_holding: '超时' };
+
+/** 日报文案（Telegram/Webhook 友好，紧凑）。
+ *  时区口径（Review2）：统计一律 UTC（按日归属）；展示同时给出本地时间，避免"日"混用。 */
 export function composeDailyReport({ recorderData, gate, runner = {} } = {}) {
   const lines = [];
-  lines.push(`【策略影子日报】${new Date().toISOString().slice(0, 16).replace('T', ' ')}`);
+  const nowD = new Date();
+  const local = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}-${String(nowD.getDate()).padStart(2, '0')} ${String(nowD.getHours()).padStart(2, '0')}:${String(nowD.getMinutes()).padStart(2, '0')}`;
+  const utcDay = nowD.toISOString().slice(0, 10);
+  lines.push(`【策略影子日报】本地 ${local} · 统计日 ${utcDay}（UTC）`);
+
   const per = recorderData?.perConfig || {};
+  const r2 = per.r2fast || { trades: [], position: null };
+  const r2Base = computeStats(r2.trades, runner.equity || 10_000, 'baseline', { mtm: runner.mtm?.r2fast || null });
+
+  // 首日模式：有效天数 <1 且完整交易 <3 -> 只报运行状态，不刷决断门
+  const effDays = Number(gate?.days) || 0;
+  if (effDays < 1 && r2Base.trades < 3) {
+    const cov = runner.coverage || gate?.coverage || {};
+    lines.push('影子系统运行中（未达最小统计周期）');
+    lines.push(`覆盖率 ${cov.coveragePct ?? '—'}% · 已处理K线 ${cov.processedBars ?? '—'} · 缺失 ${cov.missedBars ?? '—'} · 最大缺口 ${Math.round((cov.maxGapMs || 0) / 60_000)} 分钟`);
+    for (const id of ['r2fast', 'balanced', 'strict']) {
+      const cfg = per[id];
+      if (!cfg) continue;
+      const pos = cfg.position;
+      lines.push(`· ${id}: 完整交易 ${computeStats(cfg.trades, runner.equity || 10_000).trades} · ${pos ? `持仓 ${pos.side} ${pos.filledSize}@${pos.entryPrice}` : '无持仓'} · 入场事件 ${cfg.stats?.entries ?? '—'}`);
+    }
+    return lines.join('\n');
+  }
+
   for (const id of ['r2fast', 'balanced', 'strict']) {
     const cfg = per[id];
     if (!cfg) continue;
     const mtm = runner.mtm?.[id] || null;
     const base = computeStats(cfg.trades, runner.equity || 10_000, 'baseline', { mtm });
-    lines.push(`· ${id}: 交易 ${base.trades} · PF ${base.pf} · 净 ${base.net}U · DD ${base.maxDrawdownPct}%${base.openMtmPnl != null ? ` · 浮动 ${base.openMtmPnl}U` : ''}`);
+    const exits = {};
+    for (const t of cfg.trades || []) exits[t.exitReason] = (exits[t.exitReason] || 0) + 1;
+    const exitTxt = Object.entries(exits).map(([k, v]) => `${EXIT_LABELS[k] || k} ${v}`).join('/') || '—';
+    const posTxt = cfg.position ? ` · 持仓 ${cfg.position.side} ${cfg.position.filledSize}@${cfg.position.entryPrice}（浮 ${base.openMtmPnl ?? '—'}U）` : ' · 无持仓';
+    lines.push(`· ${id}: 完整 ${base.trades} · 入场 ${cfg.stats?.entries ?? '—'} · ${exitTxt} · PF ${base.pf} · 净 ${base.net}U · DD ${base.maxDrawdownPct}%${posTxt}`);
   }
   if (gate) {
     const passed = gate.checks.filter((c) => c.ok).length;
     lines.push(`决断门进度 ${passed}/${gate.checks.length}（有效 ${gate.days} 天）${gate.pass ? ' ✅已达标' : ''}`);
     const failing = gate.checks.filter((c) => !c.ok).slice(0, 3);
     for (const f of failing) lines.push(`  ✗ ${f.name}（当前 ${f.value}）`);
-    if (gate.coverage) lines.push(`覆盖率 ${gate.coverage.coveragePct}% · 缺口峰值 ${Math.round((gate.coverage.maxGapMs || 0) / 60_000)} 分钟 · 资金完整度 ${gate.funding?.pct}%`);
+  }
+  const cov = runner.coverage || gate?.coverage;
+  if (cov) lines.push(`覆盖率 ${cov.coveragePct}% · 处理K线 ${cov.processedBars} · 缺失 ${cov.missedBars} · 最大缺口 ${Math.round((cov.maxGapMs || 0) / 60_000)} 分钟 · 资金完整度 ${gate?.funding?.pct ?? '—'}%`);
+  if (runner.fundingDiag && runner.fundingDiag.ok === false) {
+    lines.push(`⚠️ 资金费率采集失败（连续 ${runner.fundingDiag.consecutiveFails} 次）：${runner.fundingDiag.lastError || ''}`);
   }
   if (runner.binance && runner.binance.samples > 0) {
     lines.push(`HL/Binance 基差 均值 ${runner.binance.meanSignedBps}bps · |P95| ${runner.binance.p95AbsBps}bps · HL溢价占比 ${runner.binance.hlPremiumRatio}（样本 ${runner.binance.samples}）`);
   }
   if (runner.bookObserved?.samples > 0) {
-    lines.push(`盘口观测滑点 均值 ${runner.bookObserved.meanEntryBps}bps（样本 ${runner.bookObserved.samples}，仅诊断不进气净）`);
+    const b = runner.bookObserved;
+    lines.push(`盘口观测滑点 均值 ${b.meanBps} · P50 ${b.p50Bps} · P95 ${b.p95Bps} · Max ${b.maxBps} bps（样本 ${b.samples}，仅诊断；情景基准滑点 2bps 已进气净）`);
   }
   return lines.join('\n');
 }
