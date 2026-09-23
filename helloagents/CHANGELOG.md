@@ -21,6 +21,8 @@
 - 日志与异常脱敏（`src/redact.js`，平台层）：`pk_live_*`/Bearer/key=value 全抹除、
   accountId 仅前 4+后 4；`PROPR_API_KEY` 纳入子进程凭证隔离清单（`src/exchange/secret-env.js`）
 - 方案包 `helloagents/plan/202609221928_propr-exchange/`（why/how/task，分批 Review 交付）
+- Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
+  绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
 ### 修复（Review1 复审 P0/P1）
 - P0 启动护栏接入真实入口：新增 `src/exchange/propr/index.js` 工厂，`createExchange()` 先执行

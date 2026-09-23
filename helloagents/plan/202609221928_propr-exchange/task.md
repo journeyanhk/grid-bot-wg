@@ -23,6 +23,8 @@
 - [√] 1.11 【Review1 复审 P1】`package-lock.json` 对齐 1.7.0；新增 `src/exchange/propr/paper.js`（paper 端到端可用）
 
 ## 2. 契约探测与冻结（探针门）
+> 备注: 2.1–2.4 脚本已实现（`scripts/propr-probe.mjs`，含只读链/订单链/幂等链/持仓链与写权限门），
+> 待 `.env` 配置 `PROPR_API_KEY`/`PROPR_ACCOUNT_ID` 后运行并冻结 2.5/2.6。
 - [ ] 2.1 在 `scripts/propr-probe.mjs` 实现只读链探针（health/healthServices/getUser/setup/getChallenges/getChallengeAttempts/getChallengeAttempt/getPositions/getOrders/getTrades/getMarginConfig/getLeverageLimits），输出原始结构与脱敏摘要，验证 why.md#需求-Propr-只读适配器契约探测-Day-0-契约探测，依赖任务 1.1、1.3
 - [ ] 2.2 在 `scripts/propr-probe.mjs` 实现订单链探针（远离市价最小量限价单 → 查 open → 校验 side/positionSide/reduceOnly → cancel → 复查消失），依赖任务 2.1
 - [ ] 2.3 在 `scripts/propr-probe.mjs` 实现幂等链探针（固定 intentId → createOrders → 重复发送 → 查 open/trades 确认无重复），依赖任务 2.2
