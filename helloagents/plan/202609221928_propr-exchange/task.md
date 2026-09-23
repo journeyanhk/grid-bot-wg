@@ -44,16 +44,18 @@
 - [√] 2R.8 契约文档收窄措辞并拆分「已冻结 / 待验证」两节（`docs/propr-api-contract.md#7`）
 
 ## 3. 只读适配器与 Shadow（Review 2）
-- [ ] 3.1 在 `src/exchange/propr/market.js` 实现 `buildMarket()` 与精度取整工具，验证 how.md#实现要点，依赖任务 2.5
-- [ ] 3.2 在 `src/exchange/propr/mapper.js` 实现 `mapProprOrder/mapProprPosition/mapProprTrade/mapProprMargin/mapProprError` 纯函数，依赖任务 1.4、2.5
-- [ ] 3.3 在 `src/exchange/propr/propr.js` 实现 `init()` 启动校验链与只读方法 `getMarkets/getPrice/getCandles/getPositions/getPosition/getOrders/getTrades/setLeverage`，依赖任务 3.1、3.2
-- [ ] 3.4 在 `src/exchange/propr/paper.js` 实现本地 paper 适配器（不访问 Propr），依赖任务 3.1
-- [ ] 3.5 在 `src/exchange/propr/shadow.js` 实现 ShadowExchange（读 Propr + 本地撮合，写方法一律抛 `ProprReadOnlyError` 并锁定），验证 why.md#需求-四级运行模式与安全护栏-Shadow-模式绝对只读，依赖任务 3.3
-- [ ] 3.6 在 `src/exchange/propr/index.js` 实现 `createExchange(cfg)` 四模式工厂，依赖任务 3.4、3.5
-- [ ] 3.7 【Review1 复审要求】分页处理：官方默认 `limit:20/offset:0`，BTC 网格挂单与成交会超页，需实现 `getAllOrders/getAllTrades/getAllPositions`（或适配器内显式翻页），不得默认结果完整，依赖任务 3.3
-- [ ] 3.8 【探针遗留】精度专项探测：用拒单边界确定 stepSize/stepPrice/minOrderSize/minOrderNotional，回填 `market.js` 与 `docs/propr-api-contract.md#2`，依赖任务 3.1
-- [ ] 3.9 【探针发现】代理接入：适配器需支持 `PR_PROXY`（undici dispatcher），否则本机 DNS 污染下 API 不可达，依赖任务 3.3
-- [ ] 3.10 【探针发现】权益读取：`getChallengeAttempt().account` 权威字段解析（`balance/marginBalance/highWaterMark/availableBalance`）+ 新鲜度校验（用本地 `equityFreshAt`，**不用 `updatedAt`**），供风控层使用，依赖任务 3.2
+> 已完成（2026-09-23）：`market.js`/`mapper.js`/`propr.js`（只读）/`shadow.js`/`index.js` 全量落地，
+> 真实链路冒烟通过（shadow 与 sim-write 的 init 均无写请求）。`setLeverage` 属写路径，移至 Review 3（4.6）。
+- [√] 3.1 在 `src/exchange/propr/market.js` 实现 `buildMarket()` 与精度取整工具，验证 how.md#实现要点，依赖任务 2.5
+- [√] 3.2 在 `src/exchange/propr/mapper.js` 实现 `mapProprOrder/mapProprPosition/mapProprTrade/mapProprMargin/mapProprError` 纯函数，依赖任务 1.4、2.5
+- [√] 3.3 在 `src/exchange/propr/propr.js` 实现 `init()` 启动校验链与只读方法 `getMarkets/getPrice/getCandles/getPositions/getPosition/getOrders/getTrades`（`setLeverage` 移至 4.6），依赖任务 3.1、3.2
+- [√] 3.4 在 `src/exchange/propr/paper.js` 实现本地 paper 适配器（不访问 Propr），依赖任务 3.1
+- [√] 3.5 在 `src/exchange/propr/shadow.js` 实现 ShadowExchange（读 Propr + 真实行情本地撮合，`createReadOnlyClient()` 写方法一律抛 `ProprReadOnlyError`），验证 why.md#需求-四级运行模式与安全护栏-Shadow-模式绝对只读，依赖任务 3.3
+- [√] 3.6 在 `src/exchange/propr/index.js` 实现 `createExchange(cfg)` 四模式工厂，依赖任务 3.4、3.5
+- [√] 3.7 【Review1 复审要求】分页处理：`getAllOrders/getAllTrades/getAllPositions`（`_paginate`，默认 100/页、上限 20 页），依赖任务 3.3
+- [√] 3.8 【探针遗留】精度专项探测：**API 层完全不校验**（1e-7/5 位小数/$0.87 均接受）→ 适配器改用 HL BTC 保守值本地强制，已回填契约文档
+- [√] 3.9 【探针发现】代理接入：`init()` 支持 `PR_PROXY`（undici dispatcher），真实链路冒烟通过，依赖任务 3.3
+- [√] 3.10 【探针发现】权益读取：`getChallengeAttempt().account` 权威字段 + `equitySource='propr_account'` + 本地 `equityFreshAt` 新鲜度（`isEquityStale`），依赖任务 3.2
 - [√] 3.11 【探针遗留】权益刷新时效专项探测（`equity` 命令，0/10/30/60s 采样），结论已回填 `docs/propr-api-contract.md#1.1`
 
 ## 4. 写路径与幂等（Review 3）
@@ -62,10 +64,11 @@
 - [ ] 4.3 在 `src/exchange/propr/propr.js` 实现订单状态机与 `UnknownOrderStateError → TRADING_LOCKED` 路径，依赖任务 4.1
 - [ ] 4.4 在 `src/exchange/propr/propr.js` 实现本地 intent 日志与 `reconcileOrders()`（按 intentId 匹配），依赖任务 4.3
 - [ ] 4.5 【Review1 复审要求】适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，依赖任务 4.1
+- [ ] 4.6 【Review2 移交】`setLeverage` 实现（`getMarginConfig` → `updateMarginConfig`），含杠杆上限与挑战规则收敛校验，依赖任务 4.1
 
 ## 5A. 持仓模式落地 — net 分支（探针已确认，本分支生效）
-- [ ] 5A.1 在 `src/exchange/propr/propr.js` 实现 `getPosition` 返回带符号净仓，`positionMode='net'`，验证 how.md#ADR-001，依赖任务 2.6
-- [ ] 5A.2 在 `test/propr.test.js` 覆盖净值降级补单方向正确性，依赖任务 5A.1
+- [√] 5A.1 在 `src/exchange/propr/propr.js` 实现 `getPosition` 返回带符号净仓，`positionMode='net'`，验证 how.md#ADR-001，依赖任务 2.6
+- [√] 5A.2 在 `test/propr.test.js` 覆盖净值降级补单方向正确性（空仓→null、多仓正、空仓负、双条净额），依赖任务 5A.1
 
 ## 5B. 持仓模式落地 — hedge 分支（探针结论为 net，本分支取消）
 - [-] 5B.1 在 `src/exchange/propr/propr.js` 暴露 `positionMode='hedge'` 与双边 `getPositions()`
@@ -104,8 +107,8 @@
 - [ ] 11.2 更新 `helloagents/CHANGELOG.md` 与 `package.json` 版本号（1.7.0，注意与 dev006 的 1.7.x 冲突）
 
 ## 12. 测试
-- [ ] 12.1 在 `test/propr-mapper.test.js` 覆盖字段/精度/positionSide/reduceOnly/状态机映射
-- [ ] 12.2 在 `test/propr-modes.test.js` 覆盖四模式写白名单（shadow 写请求数=0）、账户白名单、challenge 硬确认
+- [√] 12.1 在 `test/propr-mapper.test.js` 覆盖字段/精度/positionSide/reduceOnly/状态机映射
+- [√] 12.2 在 `test/propr-modes.test.js` 覆盖四模式写白名单（shadow 写请求数=0）、账户白名单、challenge 硬确认
 - [ ] 12.3 在 `test/propr-order-state.test.js` 覆盖超时幂等、未知态锁定、部分成交、已成交不重复补单
 - [ ] 12.4 在 `test/propr-reconcile.test.js` 覆盖断线恢复、重启恢复、重复补单保护
 - [ ] 12.5 在 `test/propr-risk.test.js` 覆盖 UTC 日切、内部日损/回撤分级、derived 降权

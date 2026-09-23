@@ -73,8 +73,14 @@ export class PaperExchange extends EventEmitter {
     for (const [id, old] of this.prices) {
       const next = Math.max(1e-8, old * (1 + (Math.random() * 2 - 1) * 0.0015));
       this.prices.set(id, next); this.emit('price', { marketId: id, price: next });
+    }
+    this.matchTick();
+  }
+  /** 仅撮合（不推进价格）：shadow 用真实价格喂入后调用本方法。 */
+  matchTick() {
+    for (const [id, price] of this.prices) {
       for (const order of this.getOpenOrders(id)) {
-        if (!(order.side === 'buy' ? next <= order.price : next >= order.price)) continue;
+        if (!(order.side === 'buy' ? price <= order.price : price >= order.price)) continue;
         if (order.reduceOnly && !this._reduces(id, order.side)) { this.orders.delete(order.orderId); continue; }
         this.orders.delete(order.orderId); this._fill(id, order.side, Number(order.price), Number(order.sizeBase));
         this.emit('fill', { ...order, price: Number(order.price), sizeBase: Number(order.sizeBase) });

@@ -24,6 +24,22 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 新增（Propr Review 2：net 只读适配器 + Shadow + 精度/权益探测，2026-09-23）
+- `src/exchange/propr/market.js`：市场构建（net/stepSize 1e-5/stepPrice 0.1/minNotional $10/maker 0.00015）
+  与取整工具；**精度与最小名义由适配器本地强制**（探针证实 API 层完全不校验）
+- `src/exchange/propr/mapper.js`：订单/持仓/成交/保证金/错误映射（positionSide 保真、状态机双向、
+  净仓聚合、错误分类 + 脱敏）
+- `src/exchange/propr/propr.js`：启动校验链（health→user→严格绑定账户→margin/leverage→权益/持仓/挂单/成交种子）
+  + 只读路径 + **全量分页**（`getAllOrders/Trades/Positions`）+ HL 行情/K 线（ADR-007）+
+  权威权益与 `equityFreshAt` 新鲜度 + 成交事件去重（重启不重复补单）
+- `src/exchange/propr/shadow.js`：`createReadOnlyClient()` 写方法一律抛 `ProprReadOnlyError`（写请求恒为 0）
+  + 真实行情驱动本地撮合
+- `src/exchange/propr/index.js`：四模式工厂补全（paper/shadow/sim-write/challenge）
+- ADR-007：Propr 无行情端点，价格/K 线取自 HL 公开 API（allMids/candleSnapshot）
+- 真实链路冒烟：shadow 与 sim-write 的 init 均无写请求，市场/权益/价格读取正常
+- 测试：新增 `test/propr-mapper.test.js`、`test/propr.test.js`；扩展 `test/propr-modes.test.js`
+  （shadow 写请求数=0、四模式工厂）；`npm test` 全绿 + lint 0 error
+
 ### 修复（Review2 复审：探针安全强化，2026-09-23）
 - P0 asset fallback 收敛：仅明确 400 参数错误才换口径；超时/网络/429/5xx 一律先按 intentId 对账，
   对账不到即报未知订单态并停止创建（杜绝重复下单）

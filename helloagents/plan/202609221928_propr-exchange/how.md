@@ -173,6 +173,13 @@ totalUnrealizedPnl / crossPositionMargin / crossOrderMargin / totalMaintenanceMa
 `highWaterMark − balance`、浮亏用 `marginBalance`（容忍 ≤30s 延迟）。
 详见 `docs/propr-api-contract.md#1`。
 
+### ADR-007: 行情源使用 Hyperliquid 公开 API（Propr 无行情端点）
+**上下文:** Propr SDK 无价格/K 线端点；官方示例用 `positions[0].markPrice` 或硬编码兜底价，网格需要连续价格流。
+**决策:** 价格用 HL 公开 `allMids`（2s 轮询），K 线用 HL `candleSnapshot`；Propr 持仓的 `markPrice` 仅作交叉核对。
+**理由:** Propr 路由到 Hyperliquid，底层行情一致；公开端点免鉴权、连续可用；避免为行情再引入数据商。
+**替代方案:** 只用持仓 markPrice → 拒绝原因: 空仓时无价格，网格无法运行。
+**影响:** 价格与 Propr 内部标记价可能有微小差异（可接受，铺单按 tick 取整）；HL 行情故障时网格暂停（不新增挂单）。
+
 ### ADR-005: Propr 作为独立第 7 所，不混入现有循环
 **上下文:** 现有 6 所硬编码于 `server.js`；Propr 是挑战账户，语义特殊。
 **决策:** 按现有模式新增独立注册与面板，不改造通用循环。

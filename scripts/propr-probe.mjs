@@ -29,8 +29,8 @@ import { ulid } from 'ulid';
 const argv = process.argv.slice(2);
 const cmd = argv.find((a) => !a.startsWith('-')) || 'readonly';
 const allowWrite = argv.includes('--allow-write');
-const VALID = ['discover', 'readonly', 'order', 'idempotency', 'position', 'equity', 'all'];
-const WRITE_CMDS = ['order', 'idempotency', 'position', 'equity', 'all'];
+const VALID = ['discover', 'readonly', 'order', 'idempotency', 'position', 'precision', 'equity', 'all'];
+const WRITE_CMDS = ['order', 'idempotency', 'position', 'precision', 'equity', 'all'];
 const ORDER_STATUSES = ['pending', 'open', 'partially_filled', 'filled', 'cancelled', 'rejected', 'expired'];
 
 const cfg = getConfig().propr;
@@ -107,7 +107,7 @@ function roundPrice(px) {
   return Number(Number(px).toFixed(1));
 }
 
-function buildLimitRecord({ side, positionSide, price, asset, intentId, reduceOnly = false }) {
+function buildLimitRecord({ side, positionSide, price, asset, intentId, reduceOnly = false, quantity = QTY }) {
   return {
     accountId: cfg.accountId,
     intentId: intentId ?? ulid(),
@@ -120,7 +120,7 @@ function buildLimitRecord({ side, positionSide, price, asset, intentId, reduceOn
     asset,
     base: BASE,
     quote: QUOTE,
-    quantity: QTY,
+    quantity: String(quantity),
     price: String(price),
     reduceOnly,
     closePosition: false,
@@ -448,6 +448,59 @@ async function probePosition() {
   return result;
 }
 
+// ── 写链：精度边界（quantity/price/minNotional，用拒单试探）──────────────────
+
+async function tryLimit({ quantity, price, label, settleMs = 4000 }) {
+  const intentId = ulid();
+  try {
+    const rows = await client.createOrders([buildLimitRecord({ side: 'buy', positionSide: 'long', price, asset: BASE, intentId, quantity })]);
+    const o = rows[0] ?? null;
+    const out = { label, quantity: String(quantity), price: String(price), ok: true, orderId: o?.orderId ?? null, statusAfterSettle: null, exchangeOrderId: null };
+    if (o?.orderId) {
+      createdOrderIds.add(o.orderId);
+      if (settleMs > 0) {
+        await sleep(settleMs);
+        const after = (await client.getOrders({ orderId: o.orderId, limit: 5 }))[0] ?? null;
+        out.statusAfterSettle = after?.status ?? null;
+        out.exchangeOrderId = after?.exchangeOrderId ?? null;
+      }
+      await client.cancelOrder(o.orderId);
+      createdOrderIds.delete(o.orderId);
+    }
+    return out;
+  } catch (err) {
+    return { label, quantity: String(quantity), price: String(price), ok: false, statusCode: err?.statusCode, code: err?.code, message: String(err?.message || '').slice(0, 120) };
+  }
+}
+
+async function probePrecision() {
+  const mark = await fetchBtcMark();
+  const far = mark * 0.5;
+  const result = { mark, quantity: [], price: [], notional: [] };
+
+  // 数量精度：逐步缩小
+  for (const q of ['0.001', '0.0001', '0.00001', '0.000001', '0.0000001']) {
+    result.quantity.push(await tryLimit({ quantity: q, price: roundPrice(far), label: `qty=${q}` }));
+  }
+
+  // 价格小数位：0~5 位（HL 规则：≤5 位有效数字且小数位 ≤ 6-szDecimals）
+  for (const d of [0, 1, 2, 3, 4, 5]) {
+    result.price.push(await tryLimit({ quantity: '0.001', price: far.toFixed(d), label: `priceDecimals=${d}` }));
+  }
+
+  // 最小名义：数量小到名义价值 < $10（观察是否被拒）
+  for (const q of ['0.0001', '0.00005', '0.00001']) {
+    result.notional.push(await tryLimit({ quantity: q, price: roundPrice(mark), label: `notional≈$${(Number(q) * mark).toFixed(2)}` }));
+  }
+
+  log('精度探测汇总:', {
+    quantity: result.quantity.map((r) => ({ label: r.label, ok: r.ok, code: r.code, settled: r.statusAfterSettle, exOrder: r.exchangeOrderId ? 'yes' : 'null' })),
+    price: result.price.map((r) => ({ label: r.label, ok: r.ok, code: r.code, settled: r.statusAfterSettle, exOrder: r.exchangeOrderId ? 'yes' : 'null' })),
+    notional: result.notional.map((r) => ({ label: r.label, ok: r.ok, code: r.code, settled: r.statusAfterSettle, exOrder: r.exchangeOrderId ? 'yes' : 'null' })),
+  });
+  return result;
+}
+
 // ── 写链：权益刷新延迟（Review2 新增：开/持仓/平后 account 字段更新时效）────
 
 async function readAccountEquity(attemptId) {
@@ -517,6 +570,7 @@ async function main() {
   if (cmd === 'order' || cmd === 'all') report.order = await probeOrder();
   if (cmd === 'idempotency' || cmd === 'all') report.idempotency = await probeIdempotency();
   if (cmd === 'position' || cmd === 'all') report.position = await probePosition();
+  if (cmd === 'precision' || cmd === 'all') report.precision = await probePrecision();
   if (cmd === 'equity' || cmd === 'all') report.equity = await probeEquity();
 
   log('── 探针汇总（脱敏）──');

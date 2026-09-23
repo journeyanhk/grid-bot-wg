@@ -88,9 +88,10 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 | BTC maxLeverage | 10（平台上限；挑战规则另行收敛，第一版 1x） |
 | maker 费率 | `0.00015`（限价单 `tradingFeeRate`） |
 | taker 费率 | `0.00045`（市价成交 `feeRate`） |
-| 数量精度 | `0.001 BTC` 实测接受 |
-| 价格精度 | `43242.3`（1 位小数）实测接受 |
-| stepSize/minNotional | **待 Review 2 专项探测**（用拒单边界） |
+| 数量精度 | `0.001 BTC` 实测接受；**探针发现 1e-7 也被接受**（API 层不校验） |
+| 价格精度 | `43242.3`（1 位小数）实测接受；**探针发现 5 位小数也被接受** |
+| 精度校验 | ⚠️ **API 层完全不校验**：1e-7 数量、5 位小数价格、名义 $0.87 的限价单均被接受且 4s 后仍 `open`（`exchangeOrderId=null`） |
+| 适配器采用值 | **stepSize `1e-5` / stepPrice `0.1` / minOrderNotional `$10`**（HL BTC 保守规格，由适配器本地强制，`market.js: assertOrderPrecision`） |
 
 ---
 
@@ -164,16 +165,18 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 9. `account` 对象含权威权益字段，且**刷新时效已实测**（`balance`/`availableBalance` 即时，
    `unrealizedPnl`/`marginBalance` ≤30s，`updatedAt` 不可作新鲜度依据）
 10. BTC `asset` 口径 = `"BTC"`
-11. 已观测精度：`quantity 0.001`、价格 1 位小数被接受
+11. 精度：API 层不校验（1e-7 / 5 位小数 / $0.87 均接受）；适配器采用 HL BTC 保守值
+    `stepSize 1e-5 / stepPrice 0.1 / minNotional $10` 并本地强制
 12. 本机访问必须走代理（`PR_PROXY`）
 
 ### 待验证（Review 2 专项）
 
-1. `stepSize` / `minOrderSize` / `minNotional` 精确边界（拒单试探）
+1. ~~`stepSize` / `minOrderSize` / `minNotional` 精确边界~~ → 已完成：API 不校验，改用保守值本地强制
 2. `highWaterMark` 更新规则（需盈利场景观测）
 3. Free Trial 与付费 Challenge 的风控差异
 4. 部分成交更新时机（`partially_filled` 与 `cumulativeQuantity`）
 5. WebSocket 事件语义（`order.filled` / `trade.created` / `position.updated`）
-6. 订单列表分页完整性（`limit:20/offset:0`）
+6. 订单列表分页完整性（`limit:20/offset:0`）→ 适配器已实现全量翻页（`getAllOrders/Trades/Positions`）
 7. 市价单在快速行情下的成交与滑点
 8. 挑战日损/回撤日切是否与 UTC 一致（Free Trial 无风控约束，需付费账户验证）
+9. 限价单 `exchangeOrderId` 何时落值（4s 后仍为 null；疑为路由/成交后才写）

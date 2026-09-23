@@ -3,6 +3,8 @@
 // 其他入口创建 Propr 时可能绕过（Review1 P0）。校验顺序：先护栏，后分流。
 import { validateProprConfig } from '../../config.js';
 import { PaperExchange } from './paper.js';
+import { ShadowExchange } from './shadow.js';
+import { ProprExchange } from './propr.js';
 
 export function createExchange(cfg = {}) {
   validateProprConfig(cfg);
@@ -11,7 +13,8 @@ export function createExchange(cfg = {}) {
     return new PaperExchange({ startBalance: cfg.startBalance, feeRate: cfg.feeRate });
   }
   if (cfg.mode === 'shadow') {
-    throw new Error('Propr shadow 适配器将在 Review 2 提供（只读 Propr + 本地模拟，硬禁止写）。');
+    return new ShadowExchange(cfg);
   }
-  throw new Error(`Propr ${cfg.mode} 适配器将在 Review 3 提供（写路径 + intentId 幂等）。`);
+  // sim-write / challenge：真实 API 读写（写路径在 Review 3 完成）
+  return new ProprExchange(cfg);
 }
