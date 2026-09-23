@@ -24,6 +24,22 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review3 复审：写路径安全，2026-09-23）
+- P0 `cancelOrder` 权威复核：不依赖未验证的 `orderId` 过滤器——orderId 直查 + **全状态分页扫描**兜底，
+  返回三态 `found/missing/query_failed`；仅「查到且终态」或「查不到但有成交佐证」才为 true，
+  查询失败置 `ordersSnapshotStale` 并返回 false（宁可重试也不误报已撤）
+- P0 活动订单快照**部分失败即视为不完整**：保留旧快照 + `ordersSnapshotStale/Error`，
+  `_assertCanOpen` 直接拒绝开仓（避免失败状态的订单"消失"→ 重复铺单），恢复后自动清除
+- P1 `closePosition` 复用统一 intent 恢复：新增 `_placeReduceOnlyMarket` 走 `_recoverIntent`，
+  平仓超时/13084 先按 intentId 对账（已成交不重复发单），无法确认则锁定开仓并继续 reduce-only 重试
+- P1 成交游标顺序修正：先按上一轮游标分页，**tradeId 去重为唯一标准**，不再用时间窗口丢弃未见过的成交
+  （漏一笔成交=漏一条补单）
+- P1 `cancelAll` 快照失败时不以旧快照下结论（尽力撤已知单但返回 false）
+- P2 `placeLimitOrders` 逐个校验 `marketId`；`positionSide` 注释明确为订单意图字段而非独立持仓腿
+- 测试补齐 5 项：orderId 过滤器不可用不误报、快照部分失败保留旧快照并禁开仓、平仓超时已成交对账恢复、
+  平仓超时未确认锁定、成交跨重叠窗口不丢单；`npm test` 全绿 + lint 0 error
+- 真实 sim-write 平仓链路冒烟：市价开多 0.001 → `closePosition` → 净仓归零、未锁定
+
 ### 新增（Propr Review 3：写路径 + intentId 幂等 + 对账，2026-09-23）
 - `propr.js` 写路径：`placeLimitOrder/placeLimitOrders`（统一走 `createOrders` + 自有 ULID intentId，
   批量结果与输入等长）、`cancelOrder/cancelAll`（撤单后按实况复核，不信任官方 400 吞并）、

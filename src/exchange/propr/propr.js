@@ -13,7 +13,7 @@ import { ProprStartupError, UnknownOrderStateError, isIdempotencyConflict } from
 import { buildMarket, toEpochMs, roundQty, roundPrice, assertOrderPrecision, PROPR_MAKER_FEE } from './market.js';
 import {
   mapProprOrder, mapProprPosition, mapProprTrade, mapProprMargin, mapProprError,
-  netPositionFromViews, LIVE_STATUSES, ALL_STATUSES,
+  netPositionFromViews, LIVE_STATUSES, TERMINAL_STATUSES, ALL_STATUSES,
 } from './mapper.js';
 import { createDispatcher } from '../../proxy.js';
 import { logger } from '../../log.js';
@@ -82,6 +82,9 @@ export class ProprExchange extends EventEmitter {
     this._intents = new Map();
     this.tradingLocked = false;
     this.lockReason = null;
+    // 活动订单快照完整性（Review3 复审 P0）：任一状态查询失败即置 stale，禁止开仓
+    this.ordersSnapshotStale = false;
+    this.ordersSnapshotError = null;
   }
 
   get orderBatchPaceMs() { return this._pollLight ? 400 : 200; }
@@ -253,30 +256,31 @@ export class ProprExchange extends EventEmitter {
   /**
    * 活动挂单 = pending / open / partially_filled（Review2 P1）。
    * 只查 open 会漏掉刚提交（pending）与部分成交（partially_filled）的订单，
-   * 导致对账误判订单不存在并重复补单。任一状态查询失败不致命，但全部失败必须抛出。
+   * 导致对账误判订单不存在并重复补单。
+   * Review3 复审 P0：**任一状态查询失败即视为快照不完整**——保留旧快照、置 stale、抛错，
+   * 绝不用部分结果覆盖本地订单表（否则失败状态的订单会"消失"）。
    */
   async _refreshOpenOrders() {
     const results = await Promise.allSettled(
       LIVE_STATUSES.map((status) => this.getAllOrders({ base: this.base, status })),
     );
+    const failed = results.find((r) => r.status === 'rejected');
+    if (failed) {
+      this._markOrdersSnapshotStale(failed.reason);
+      throw failed.reason ?? new Error('活动挂单刷新失败');
+    }
     const live = new Map();
-    let ok = 0;
-    let firstErr = null;
     for (const r of results) {
-      if (r.status === 'fulfilled') {
-        ok += 1;
-        for (const raw of r.value) {
-          const id = String(raw.orderId);
-          if (live.has(id)) continue;
-          const known = this._orders.get(id);
-          live.set(id, mapProprOrder(raw, { levelIndex: known?.levelIndex ?? null }));
-        }
-      } else if (!firstErr) {
-        firstErr = r.reason;
+      for (const raw of r.value) {
+        const id = String(raw.orderId);
+        if (live.has(id)) continue;
+        const known = this._orders.get(id);
+        live.set(id, mapProprOrder(raw, { levelIndex: known?.levelIndex ?? null }));
       }
     }
-    if (!ok) throw firstErr ?? new Error('活动挂单刷新全部失败');
     this._orders = live;
+    this.ordersSnapshotStale = false;
+    this.ordersSnapshotError = null;
   }
 
   getOpenOrders() { return [...this._orders.values()]; }
@@ -336,17 +340,16 @@ export class ProprExchange extends EventEmitter {
 
   async _refreshTrades({ full = false } = {}) {
     const rows = await this._pullTrades({ full });
-    // 游标对所有行推进（含已处理行），保证下一轮窗口正确
-    for (const t of rows) {
-      if (t.executedAt > this._lastTradeAt) this._lastTradeAt = t.executedAt;
-    }
-    const floor = this._lastTradeAt > 0 ? this._lastTradeAt - TRADE_OVERLAP_MS : 0;
+    // Review3 复审 P1：tradeId 去重是最终标准，**不得用时间窗口丢弃未见过的成交**
+    //（漏一笔成交=漏一条补单；重复可由 tradeId 兜住）。游标只在最后推进，仅用于减少后续分页范围。
     const fresh = [];
     for (const t of rows) {
       if (!t.tradeId || this._seenTrades.has(t.tradeId)) continue;
-      if (!full && floor > 0 && t.executedAt < floor) continue;
       this._seenTrades.add(t.tradeId);
       fresh.push(t);
+    }
+    for (const t of rows) {
+      if (t.executedAt > this._lastTradeAt) this._lastTradeAt = t.executedAt;
     }
     fresh.sort((a, b) => a.executedAt - b.executedAt);
     for (const t of fresh) {
@@ -459,6 +462,13 @@ export class ProprExchange extends EventEmitter {
 
   _assertCanOpen() {
     if (this.tradingLocked) throw new Error(`Propr 交易已锁定（${this.lockReason}），拒绝开仓/改杠杆`);
+    if (this.ordersSnapshotStale) throw new Error(`Propr 活动订单快照不完整（${this.ordersSnapshotError}），拒绝开仓`);
+  }
+
+  _markOrdersSnapshotStale(err) {
+    this.ordersSnapshotStale = true;
+    this.ordersSnapshotError = mapProprError(err).message;
+    logger.warn('propr', `活动订单快照不完整: ${this.ordersSnapshotError}`);
   }
 
   _rememberIntent(intent) {
@@ -499,11 +509,42 @@ export class ProprExchange extends EventEmitter {
     return [...found.values()];
   }
 
-  async _getOrderById(orderId) {
+  /**
+   * 权威订单查询（Review3 复审 P0）：Day-0 未验证 `getOrders({orderId})` 过滤器是否生效，
+   * 因此先试 orderId 直查，再用**全状态分页扫描**兜底。返回三种确定语义：
+   *   { state:'found', order } | { state:'missing' }（全状态扫描成功但确实没有） | { state:'query_failed', error }
+   * 只有 found+终态 才能判定"已结束"；missing 不得当作成功。
+   */
+  async _findOrderAuthoritative(orderId) {
+    const id = String(orderId);
     try {
       const rows = await this.client.getOrders({ orderId, limit: 5 });
-      return (rows || []).find((r) => String(r.orderId) === String(orderId)) ?? null;
-    } catch { return null; }
+      const hit = (rows || []).find((r) => String(r.orderId) === id);
+      if (hit) return { state: 'found', order: hit };
+    } catch { /* 过滤器不可用：忽略，走全量扫描 */ }
+    try {
+      for (const status of ALL_STATUSES) {
+        const rows = await this.getAllOrders({ base: this.base, status });
+        const hit = rows.find((r) => String(r.orderId) === id);
+        if (hit) return { state: 'found', order: hit };
+      }
+      return { state: 'missing' };
+    } catch (err) {
+      return { state: 'query_failed', error: err };
+    }
+  }
+
+  /** 成交佐证：订单查不到时，用成交记录判断它是否已成交（只作佐证，不作唯一依据）。 */
+  async _hasTradeForOrder(orderId) {
+    const id = String(orderId);
+    try {
+      const rows = await this.client.getTrades({ orderId, limit: 5 });
+      if ((rows || []).some((r) => String(r.orderId) === id)) return true;
+    } catch { /* 过滤器不可用则走扫描 */ }
+    try {
+      const rows = await this._pullTrades({ full: false });
+      return rows.some((t) => t.orderId === id);
+    } catch { return false; }
   }
 
   _adoptCreated(raw, intent) {
@@ -565,6 +606,8 @@ export class ProprExchange extends EventEmitter {
     this._assertCanOpen();
     if (!orders.length) return [];
     const prepared = orders.map((order) => {
+      const marketId = String(order.marketId ?? this.base);
+      if (marketId !== this.base) throw new Error(`Propr 适配器仅支持 ${this.base}，收到 ${marketId}`);
       const price = roundPrice(order.price, this.market);
       const sizeBase = roundQty(order.sizeBase, this.market);
       assertOrderPrecision({ price, sizeBase }, this.market);
@@ -613,62 +656,105 @@ export class ProprExchange extends EventEmitter {
     return results;
   }
 
-  /** 撤单并复核真实状态（不信任官方 400=已撤/已成交 的吞并语义）；降风险操作，锁定期间仍允许。 */
+  /**
+   * 撤单并**权威复核**真实状态（Review3 复审 P0）：
+   * 不信任官方 400=已撤/已成交 的吞并语义，也不依赖未验证的 orderId 过滤器。
+   * 只有「查到且为终态」或「查不到但有成交佐证」才返回 true；
+   * 查询失败/无法确认一律返回 false（宁可让上层重试，也不误报已撤）。降风险操作，锁定期间仍允许。
+   */
   async cancelOrder(_marketId, orderId) {
     const id = String(orderId);
-    try { await this.client.cancelOrder(id); } catch (err) { if (err?.statusCode !== 400) throw err; }
-    let after = await this._getOrderById(id);
-    if (after && LIVE_STATUSES.includes(after.status)) {
+    try { await this.client.cancelOrder(id); } catch (err) { if (err?.statusCode !== 400) logger.warn('propr', `撤单请求异常: ${mapProprError(err).message}`); }
+
+    const first = await this._findOrderAuthoritative(id);
+    if (first.state === 'query_failed') { this._markOrdersSnapshotStale(first.error); return false; }
+    if (first.state === 'found') {
+      if (TERMINAL_STATUSES.includes(first.order.status)) { this._orders.delete(id); return true; }
+      // 仍活动：再撤一次并复核
       try { await this.client.cancelOrder(id); } catch { /* ignore */ }
       await sleep(1200);
-      after = await this._getOrderById(id);
-      if (after && LIVE_STATUSES.includes(after.status)) {
-        logger.warn('propr', `撤单后订单仍活动: ${id} status=${after.status}`);
-        return false;
-      }
+      const second = await this._findOrderAuthoritative(id);
+      if (second.state === 'query_failed') { this._markOrdersSnapshotStale(second.error); return false; }
+      if (second.state === 'found' && TERMINAL_STATUSES.includes(second.order.status)) { this._orders.delete(id); return true; }
+      logger.warn('propr', `撤单后订单仍活动: ${id} status=${second.order?.status ?? 'unknown'}`);
+      return false;
     }
-    this._orders.delete(id);
-    return true;
+    // missing：无法确认是否已结束，必须靠成交佐证
+    if (await this._hasTradeForOrder(id)) { this._orders.delete(id); return true; }
+    logger.warn('propr', `撤单后无法确认订单状态（全状态扫描无此单且无成交佐证）: ${id}`);
+    return false;
   }
 
+  /** 批量撤单：快照不完整时不使用旧快照下结论，一律返回 false（Review3 复审 P1）。 */
   async cancelAll() {
-    await this._refreshOpenOrders().catch(() => {});
+    try {
+      await this._refreshOpenOrders();
+    } catch {
+      // 快照失败：仍尽力撤掉本地已知订单，但结果必须标记为不完整
+      for (const o of [...this._orders.values()]) {
+        await this.cancelOrder(this.base, o.orderId).catch(() => false);
+      }
+      return false;
+    }
     const targets = [...this._orders.values()];
     let ok = true;
     for (const o of targets) {
       const done = await this.cancelOrder(this.base, o.orderId).catch(() => false);
       if (!done) ok = false;
     }
-    await this._refreshOpenOrders().catch(() => {});
-    if (this._orders.size > 0) ok = false;
+    try {
+      await this._refreshOpenOrders();
+      if (this._orders.size > 0) ok = false;
+    } catch {
+      ok = false;
+    }
     return ok;
+  }
+
+  /**
+   * 市价 reduce-only 平仓单：与开仓走**同一条 intent 恢复路径**（Review3 复审 P1）。
+   * 未知态会置 tradingLocked（只拦开仓；平仓本身仍可继续重试，属降风险操作）。
+   */
+  async _placeReduceOnlyMarket({ positionSide, sizeBase }) {
+    const closeSide = positionSide === 'long' ? 'sell' : 'buy';
+    const intentId = ulid();
+    const intent = {
+      intentId, marketId: this.base, side: closeSide, positionSide,
+      price: null, sizeBase, reduceOnly: true, levelIndex: null, state: 'created', createdAt: Date.now(),
+    };
+    this._rememberIntent(intent);
+    const record = this._buildRecord({
+      side: closeSide, positionSide, sizeBase, reduceOnly: true, intentId,
+      orderType: 'market', timeInForce: 'IOC', closePosition: true,
+    });
+    try {
+      const rows = await this.client.createOrders([record]);
+      const raw = rows?.[0];
+      if (!raw?.orderId) throw new UnknownOrderStateError(`平仓未返回 orderId（intentId=${intentId}）`, { intentId });
+      this._adoptCreated(raw, intent);
+      return { ok: true, orderId: intent.orderId, recovered: false };
+    } catch (err) {
+      const recovered = await this._recoverIntent(err, intent);
+      return { ok: true, orderId: recovered.orderId, recovered: true };
+    }
   }
 
   /** 全平：遍历全部非零持仓逐个市价 reduceOnly 平仓，循环复核至空（官方 closePosition 只平 [0]）。 */
   async closePosition() {
+    const retryDelayMs = Number.isFinite(this._cfg.closeRetryDelayMs) ? this._cfg.closeRetryDelayMs : 2000;
     for (let attempt = 1; attempt <= 4; attempt++) {
       const positions = await this.client.getPositions({ base: this.base, status: 'open' });
       if (!positions.length) { this._positions = []; return true; }
       for (const p of positions) {
-        const closeSide = p.positionSide === 'long' ? 'sell' : 'buy';
-        const intentId = ulid();
-        this._rememberIntent({
-          intentId, marketId: this.base, side: closeSide, positionSide: p.positionSide,
-          price: null, sizeBase: Number(p.quantity), reduceOnly: true, levelIndex: null,
-          state: 'created', createdAt: Date.now(),
-        });
-        const record = this._buildRecord({
-          side: closeSide, positionSide: p.positionSide, sizeBase: Number(p.quantity),
-          reduceOnly: true, intentId, orderType: 'market', timeInForce: 'IOC', closePosition: true,
-        });
         try {
-          const rows = await this.client.createOrders([record]);
-          if (rows?.[0]?.orderId) this._orders.set(String(rows[0].orderId), mapProprOrder(rows[0], { levelIndex: null }));
+          const res = await this._placeReduceOnlyMarket({ positionSide: p.positionSide, sizeBase: Number(p.quantity) });
+          logger.info('propr', `平仓单已提交（第 ${attempt} 轮, ${p.positionSide} ${p.quantity}${res.recovered ? ', 对账恢复' : ''}）`);
         } catch (err) {
-          logger.warn('propr', `平仓下单失败（第 ${attempt} 轮, ${p.positionSide}）: ${mapProprError(err).message}`);
+          // 未知态：_recoverIntent 已锁定开仓；继续下一轮 reduce-only 重试（降风险）
+          logger.warn('propr', `平仓状态未知（第 ${attempt} 轮, ${p.positionSide}）: ${mapProprError(err).message}`);
         }
       }
-      await sleep(2000);
+      await sleep(retryDelayMs);
     }
     const left = await this.client.getPositions({ base: this.base, status: 'open' });
     this._positions = left.map(mapProprPosition);

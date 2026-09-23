@@ -6,6 +6,7 @@ const ACCOUNT = 'acc-1234567890';
 const state = {
   orders: [], positions: [], trades: [],
   cancelMode: 'ok', cancelCalls: 0, seq: 0, lastRecords: [],
+  failStatus: null, closeBehavior: 'ok', hiddenOrderIds: [],
 };
 const realFetch = globalThis.fetch;
 
@@ -53,16 +54,20 @@ globalThis.fetch = async (url, opts = {}) => {
     return jsonResponse({ message: 'already done' }, 400); // 400：官方吞并为"已成交/已撤"
   }
   if (method === 'POST' && u.includes('/orders')) {
-    const rows = body.orders.map(makeOrder);
-    state.lastRecords = body.orders;
+    const records = body.orders;
+    state.lastRecords = records;
+    const isClose = records.some((o) => o.closePosition);
+    if (isClose && state.closeBehavior === 'timeout') throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    const rows = records.map(makeOrder);
     state.orders.push(...rows);
-    // 模拟市价 reduceOnly+closePosition 成交：清空持仓
-    if (body.orders.some((o) => o.closePosition && o.reduceOnly)) state.positions = [];
+    if (isClose) state.positions = []; // 模拟市价 reduceOnly+closePosition 成交
+    if (isClose && state.closeBehavior === 'timeout_created') throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
     return jsonResponse({ data: rows });
   }
   if (u.includes('/positions')) return jsonResponse({ data: state.positions });
   if (u.includes('/orders')) {
-    let rows = state.orders;
+    let rows = state.orders.filter((o) => !state.hiddenOrderIds.includes(o.orderId));
+    if (state.failStatus && q.get('status') === state.failStatus) return jsonResponse({ message: 'snapshot down' }, 500);
     if (q.get('orderId')) rows = rows.filter((o) => o.orderId === q.get('orderId'));
     if (q.get('status')) rows = rows.filter((o) => o.status === q.get('status'));
     const limit = Number(q.get('limit') ?? 20);
@@ -77,7 +82,7 @@ globalThis.fetch = async (url, opts = {}) => {
   throw new Error(`unexpected fetch: ${u}`);
 };
 
-const cfg = { mode: 'sim-write', apiKey: 'pk_live_test', accountId: ACCOUNT, base: 'BTC', apiUrl: 'https://api.propr.xyz/v1', timeoutMs: 5000, orderPollMs: 60000 };
+const cfg = { mode: 'sim-write', apiKey: 'pk_live_test', accountId: ACCOUNT, base: 'BTC', apiUrl: 'https://api.propr.xyz/v1', timeoutMs: 5000, orderPollMs: 60000, closeRetryDelayMs: 10 };
 
 function tradeRow(tradeId, orderId) {
   return {
@@ -90,6 +95,7 @@ function tradeRow(tradeId, orderId) {
 async function freshExchange() {
   state.orders = []; state.positions = []; state.trades = [];
   state.cancelMode = 'ok'; state.cancelCalls = 0; state.seq = 0;
+  state.failStatus = null; state.closeBehavior = 'ok'; state.hiddenOrderIds = [];
   const ex = new ProprExchange(cfg);
   await ex.init();
   return ex;
@@ -184,6 +190,74 @@ async function main() {
     assert.equal(rec.unmatched.length, 1);
     assert.equal(rec.unmatched[0].orderId, 'o-foreign');
     assert.ok(ex.getIntents().some((i) => i.orderId === res.orderId && i.state === 'open'));
+    ex.stop();
+  }
+
+  {
+    // P0：订单在所有状态扫描中都查不到（模拟 orderId 过滤器被忽略/订单不可见）
+    // → cancelOrder 绝不能误报成功
+    const ex = await freshExchange();
+    state.orders.push({ orderId: 'o-ghost', intentId: 'ig', base: 'BTC', side: 'buy', positionSide: 'long', quantity: '0.001', price: '80000', reduceOnly: false, closePosition: false, status: 'open', cumulativeQuantity: '0', createdAt: '2026-09-23T02:00:00.000Z', updatedAt: '2026-09-23T02:00:00.000Z' });
+    state.hiddenOrderIds = ['o-ghost'];
+    assert.equal(await ex.cancelOrder('BTC', 'o-ghost'), false, '查不到订单时必须返回 false（不得误报已撤）');
+    ex.stop();
+  }
+
+  {
+    // P0：活动订单快照部分失败 → 保留旧快照 + stale + 禁止开仓
+    const ex = await freshExchange();
+    await ex.placeLimitOrder({ marketId: 'BTC', side: 'buy', price: 80000, sizeBase: 0.001, levelIndex: 1 });
+    const before = ex.getOpenOrders().length;
+    state.failStatus = 'partially_filled';
+    await assert.rejects(() => ex._refreshOpenOrders(), /snapshot down/);
+    assert.equal(ex.ordersSnapshotStale, true, '任一状态失败必须置 stale');
+    assert.equal(ex.getOpenOrders().length, before, '快照失败时必须保留旧快照');
+    await assert.rejects(
+      () => ex.placeLimitOrder({ marketId: 'BTC', side: 'buy', price: 79000, sizeBase: 0.001 }),
+      /快照不完整/,
+      '快照不完整时禁止开仓',
+    );
+    state.failStatus = null;
+    await ex._refreshOpenOrders();
+    assert.equal(ex.ordersSnapshotStale, false);
+    const resumed = await ex.placeLimitOrder({ marketId: 'BTC', side: 'buy', price: 79000, sizeBase: 0.001 });
+    assert.ok(resumed.orderId, '快照恢复后应可继续开仓');
+    ex.stop();
+  }
+
+  {
+    // P1：平仓请求超时但订单已成交 → 走 intent 对账恢复，不重复发送平仓单
+    const ex = await freshExchange();
+    state.positions = [{ positionId: 'p1', base: 'BTC', positionSide: 'long', quantity: '0.001', entryPrice: '86000', markPrice: '90000', unrealizedPnl: '4', leverage: '1', marginMode: 'cross' }];
+    state.closeBehavior = 'timeout_created';
+    assert.equal(await ex.closePosition(), true);
+    assert.equal(state.positions.length, 0);
+    assert.equal(state.orders.filter((o) => o.closePosition).length, 1, '超时已成交时不得重复发送平仓单');
+    assert.equal(ex.isTradingLocked(), false, '对账恢复不应锁定');
+    ex.stop();
+  }
+
+  {
+    // P1：平仓超时且无法确认 → 继续 reduce-only 重试，最终锁定并返回 false
+    const ex = await freshExchange();
+    state.positions = [{ positionId: 'p1', base: 'BTC', positionSide: 'long', quantity: '0.001', entryPrice: '86000', markPrice: '90000', unrealizedPnl: '4', leverage: '1', marginMode: 'cross' }];
+    state.closeBehavior = 'timeout';
+    assert.equal(await ex.closePosition(), false, '无法确认平仓必须返回 false');
+    assert.equal(ex.isTradingLocked(), true, '无法确认的平仓必须锁定开仓');
+    ex.stop();
+  }
+
+  {
+    // P1：同一批成交相隔超过重叠窗口 → 所有未见过的 tradeId 都必须发 fill（漏单=漏补）
+    const ex = await freshExchange();
+    const fills = [];
+    ex.on('fill', (f) => fills.push(f));
+    state.trades = [
+      { ...tradeRow('t-a', 'o-a'), executedAt: '2026-09-23T02:00:00.000Z' },
+      { ...tradeRow('t-b', 'o-b'), executedAt: '2026-09-23T02:05:00.000Z' },
+    ];
+    await ex._refreshTrades();
+    assert.equal(fills.length, 2, '相隔 5 分钟的未处理成交不得被时间窗口丢弃');
     ex.stop();
   }
 }

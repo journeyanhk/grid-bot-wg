@@ -76,6 +76,16 @@
 - [√] 4.5 【Review1 复审要求】适配器不对外暴露官方 `createOrder()`（会覆盖 intentId），统一走 `createOrders()`；如需保留原始能力则改名 `createOrderRaw()` 并标注禁用，依赖任务 4.1
 - [√] 4.6 【Review2 移交】`setLeverage` 实现（`getMarginConfig` → `updateMarginConfig`），含杠杆上限与挑战规则收敛校验，依赖任务 4.1
 
+## 4R. Review3 复审修复（写路径安全，2026-09-23）
+- [√] 4R.1 【P0】`cancelOrder` 权威复核：orderId 直查 + **全状态分页扫描**兜底；仅「查到且终态」或「查不到但有成交佐证」返回 true；查询失败置 stale 并返回 false（不误报已撤）
+- [√] 4R.2 【P0】活动订单快照**部分失败即不完整**：保留旧快照 + `ordersSnapshotStale` + `_assertCanOpen` 禁止开仓，恢复后自动清除
+- [√] 4R.3 【P1】`closePosition` 复用统一 intent 恢复路径（`_placeReduceOnlyMarket` → `_recoverIntent`）：超时已成交对账恢复不重复发单；无法确认则锁定开仓并返回 false
+- [√] 4R.4 【P1】成交游标顺序修正：先按上一轮游标分页、**tradeId 去重为唯一标准**，不再用时间窗口丢弃未见过的成交
+- [√] 4R.5 【P1】`cancelAll` 快照失败不使用旧快照下结论（尽力撤已知单但返回 false）
+- [√] 4R.6 【P2】`placeLimitOrders` 逐个校验 `marketId`（不再静默改成 BTC）
+- [√] 4R.7 测试补齐：orderId 过滤器不可用不误报、快照部分失败保留旧快照并禁开仓、平仓超时已成交/未确认、成交跨窗口不丢单
+- [√] 4R.8 真实 sim-write 平仓链路冒烟：市价开多 0.001 → `closePosition` → 净仓归零、未锁定
+
 ## 5A. 持仓模式落地 — net 分支（探针已确认，本分支生效）
 - [√] 5A.1 在 `src/exchange/propr/propr.js` 实现 `getPosition` 返回带符号净仓，`positionMode='net'`，验证 how.md#ADR-001，依赖任务 2.6
 - [√] 5A.2 在 `test/propr.test.js` 覆盖净值降级补单方向正确性（空仓→null、多仓正、空仓负、双条净额），依赖任务 5A.1
