@@ -106,6 +106,7 @@ body {
 .tab-btn .dot-lr { color: var(--lr-color); }
 .tab-btn .dot-hl { color: var(--hl-color); }
 .tab-btn .dot-va { color: var(--va-color); }
+.tab-btn .dot-propr { color: var(--pr-color); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
@@ -476,6 +477,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
   <button class="tab-btn" onclick="switchTab('lr')"><span class="dot-lr">●</span> RHC</button>
   <button class="tab-btn" onclick="switchTab('hl')"><span class="dot-hl">●</span> Entropy</button>
   <button class="tab-btn" onclick="switchTab('va')"><span class="dot-va">●</span> Variational</button>
+  <button class="tab-btn" onclick="switchTab('propr')"><span class="dot-propr">●</span> Propr</button>
   <button class="tab-btn" onclick="switchTab('ai')">🤖 AI助手</button>
   <button class="tab-btn" onclick="switchTab('calendar')">📅 事件</button>
   <button class="tab-btn" onclick="switchTab('settings')">⚙ IP配置</button>
@@ -709,6 +711,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div class="operation-issue" id="ov-propr-issue" style="display:none"></div>
       <div id="ov-propr-gridcfg" class="gridcfg" style="display:none"></div>
       <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('propr', this)">🔌 重连交易所（不动挂单/持仓）</button>
+      <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('propr')">进入 Propr 控制台 →</button>
     </div>
   </div>
 
@@ -1620,6 +1623,154 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
 <!-- ═══════════════════════════════════════════════════════════ -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <!-- TAB: AI 助手 -->
+<div id="tab-propr" class="tab-panel">
+<div class="wrap">
+<div class="grid-left-right">
+  <div>
+    <div class="panel lr" style="margin-bottom:14px">
+      <div class="panel-title" style="color:var(--pr-color)">Propr · 市场与趋势</div>
+      <label>交易对</label>
+      <select id="propr-market"></select>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>K线周期</label>
+          <select id="propr-interval">
+            <option value="900">15m</option>
+            <option value="3600" selected>1h</option>
+            <option value="14400">4h</option>
+            <option value="86400">1d</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="btn btn-ghost" style="margin:0;padding:7px" id="propr-refresh-trend">刷新</button>
+        </div>
+      </div>
+      <div style="margin-top:10px" id="propr-rec-box" class="rec-box rec-range">
+        <div class="muted">趋势分析</div>
+        <div class="rec-tag" id="propr-rec-tag">分析中…</div>
+        <div class="rec-detail" id="propr-rec-detail">—</div>
+        <button class="btn btn-ghost" style="margin-top:8px;padding:6px;font-size:12px" id="propr-apply-rec">采用推荐策略 + 自动区间</button>
+      </div>
+    </div>
+
+    <div class="panel lr">
+      <div class="panel-title" style="color:var(--pr-color)">Propr · 策略配置</div>
+      <label>网格类型</label>
+      <div class="modes" id="propr-modes">
+        <div class="mode-btn sel" data-mode="neutral">中性<small>双向震荡</small></div>
+        <div class="mode-btn" data-mode="long">做多<small>低买高止</small></div>
+        <div class="mode-btn" data-mode="short">做空<small>高空低止</small></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+        <span class="muted">风格</span>
+        <div class="risk-toggle" id="propr-risk-toggle">
+          <span class="risk-btn sel" data-risk="steady">稳健</span>
+          <span class="risk-btn" data-risk="aggressive">激进</span>
+        </div>
+        <span class="muted" id="propr-risk-hint">成交少·更安全</span>
+      </div>
+      <button class="btn btn-smart" id="propr-smart-fill">🎯 智能填充参数</button>
+      <div class="muted" id="propr-smart-note" style="margin:5px 0 2px"></div>
+      <div class="row">
+        <div><label>下边界</label><input id="propr-lower" type="number" step="any"></div>
+        <div><label>上边界</label><input id="propr-upper" type="number" step="any"></div>
+      </div>
+      <div class="row">
+        <div><label>网格数量</label><input id="propr-grid-count" type="number" value="20" min="2"></div>
+        <div><label>每格数量(币)</label><input id="propr-size-base" type="number" step="any" value="0.01"></div>
+      </div>
+      <div class="row">
+        <div><label>杠杆 (x)</label><input id="propr-leverage" type="number" value="3" min="1"></div>
+        <div>
+          <label>区间外止损策略</label>
+          <select id="propr-auto-stop">
+            <option value="close" selected>冲破区间平仓</option>
+            <option value="recover">只减仓回收阶梯</option>
+          </select>
+          <label style="margin-top:8px">硬止损上限 (USDC，0=不启用，仅 recover)</label>
+          <input id="propr-max-loss" type="number" min="0" step="1" placeholder="0 = 不启用">
+        </div>
+      </div>
+      <details class="dyn">
+        <summary>动态网格（冷静门自动重启 / 漂移重定）</summary>
+        <div class="row" style="align-items:center">
+          <label style="margin:0"><input type="checkbox" id="propr-dyn-enable" checked> 启用</label>
+          <label style="margin:0"><input type="checkbox" id="propr-dyn-shadow" checked> 影子模式</label>
+          <label style="margin:0"><input type="checkbox" id="propr-dyn-restart" checked title="冷静门自动重启（价值主体）"> 自动重启</label>
+          <label style="margin:0"><input type="checkbox" id="propr-dyn-recenter" title="漂移重定（分支A，评审放行后再勾选）"> 漂移重定</label>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>漂移阈值(×宽度)</label><input id="propr-dyn-drift" type="number" step="0.05" value="0.33"></div>
+          <div><label>冷静窗口(小时)</label><input id="propr-dyn-calmh" type="number" value="120"></div>
+          <div><label>冷静上限(±%)</label><input id="propr-dyn-calm" type="number" step="0.5" value="3"></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>重定冷却(分)</label><input id="propr-dyn-rec-cd" type="number" value="360"></div>
+          <div><label>重启冷却(分)</label><input id="propr-dyn-rest-cd" type="number" value="120"></div>
+        </div>
+      </details>
+      <div class="risk-preview" id="propr-risk-preview"></div>
+      <button class="btn btn-start" id="propr-start-btn">启动 Propr 网格</button>
+      <button class="btn btn-stop" id="propr-stop-btn" disabled>停止 + 撤单 + 平仓</button>
+      <button class="btn btn-ghost" id="propr-adjust-btn" disabled style="margin-top:8px">调整区间（不停止网格）</button>
+      <button class="btn btn-ghost" id="propr-cancel-orders-btn" style="margin-top:8px;border-color:var(--yel);color:var(--yel)">撤销所有挂单（保留持仓）</button>
+      <button class="btn btn-ghost" id="propr-refill-btn" style="margin-top:8px">补齐网格挂单（一键补格）</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="propr-orphan-prompt" style="display:none;margin-bottom:14px;border:1px solid var(--yel)">
+      <div class="panel-title" style="color:var(--yel)">⚠ 检测到未托管持仓 · 请选择处理方式</div>
+      <div id="propr-orphan-info" class="muted" style="margin-bottom:10px;line-height:1.5"></div>
+      <button class="btn btn-ghost" id="propr-orphan-recover" style="border-color:var(--yel);color:var(--yel)">① 只减仓回收阶梯</button>
+      <label style="display:block;font-size:11px;color:var(--mut2);margin-top:6px"><input type="checkbox" id="propr-orphan-above-entry" style="width:auto;margin-right:6px;vertical-align:middle">回收仅在成本价以上减仓（不亏才减；否则任何反弹都分批减）</label>
+      <button class="btn btn-ghost" id="propr-orphan-regrid" style="margin-top:8px">② 按现价重开网格</button>
+      <button class="btn btn-stop" id="propr-orphan-close" style="margin-top:8px">③ 市价平仓</button>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-title">Propr · 账户状态</div>
+      <div class="grid-2" style="gap:10px;margin-bottom:10px">
+        <div><div class="kv"><span class="lbl">运行状态</span><span class="val" id="propr-st-run">未运行</span></div>
+          <div class="kv"><span class="lbl">最新价</span><span class="val" id="propr-st-price">—</span></div>
+          <div class="kv"><span class="lbl">账户余额</span><span class="val" id="propr-st-bal">—</span></div>
+          <div class="kv"><span class="lbl">权益</span><span class="val" id="propr-st-eq">—</span></div></div>
+        <div><div class="kv"><span class="lbl">持仓</span><span class="val" id="propr-st-pos">—</span></div>
+          <div class="kv"><span class="lbl">持仓均价</span><span class="val" id="propr-st-entry">—</span></div>
+          <div class="kv"><span class="lbl">强平价</span><span class="val" id="propr-st-liq">—</span></div>
+          <div class="kv"><span class="lbl">已实现盈亏</span><span class="val" id="propr-st-rpnl">—</span></div>
+          <div class="kv"><span class="lbl">未实现盈亏</span><span class="val" id="propr-st-upnl">—</span></div></div>
+      </div>
+      <div class="kv"><span class="lbl">总盈亏 / 收益率</span><span class="val" id="propr-st-total">—</span></div>
+      <div class="kv"><span class="lbl">挂单数 / 完成格</span><span class="val" id="propr-st-orders">—</span></div>
+      <div class="kv" id="propr-st-issue" style="display:none"></div>
+      <button class="btn btn-ghost" id="propr-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
+      <button class="btn btn-ghost" id="propr-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-title">价格 / 网格</div>
+      <div id="propr-range-warn"></div>
+      <div class="chartbox"><canvas id="propr-chart"></canvas></div>
+    </div>
+    <div class="grid-2" style="gap:14px">
+      <div class="panel">
+        <div class="panel-title">成交记录</div>
+        <table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th></tr></thead><tbody id="propr-fills"></tbody></table>
+      </div>
+      <div class="panel">
+        <div class="panel-title">运行日志</div>
+        <div class="log" id="propr-alerts"><div class="log-item muted">暂无日志</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB: IP配置 -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB: AI 助手 -->
 <div id="tab-ai" class="tab-panel">
 <div class="wrap" style="max-width:860px">
   <div class="panel" style="margin-top:4px">
@@ -2003,7 +2154,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   $('tab-' + name).classList.add('active');
-  document.querySelectorAll('.tab-btn')[['overview','de','ex','rs','lr','hl','va','ai','calendar','settings'].indexOf(name)].classList.add('active');
+  document.querySelectorAll('.tab-btn')[['overview','de','ex','rs','lr','hl','va','propr','ai','calendar','settings'].indexOf(name)].classList.add('active');
   if (name === 'ai') aiRefreshStatus();
   if (name === 'calendar') calLoad();
 }
@@ -2210,7 +2361,7 @@ function makeExchangeCtrl(prefix, chartId) {
 
   P('start-btn').onclick = async () => {
     const body = {
-      marketId: +P('market').value, mode: selectedMode,
+      marketId: P('market').value, mode: selectedMode,
       lower: +P('lower').value, upper: +P('upper').value,
       gridCount: +P('grid-count').value, sizeBase: +P('size-base').value,
       leverage: +P('leverage').value, outOfRangeAction: P('auto-stop').value,
@@ -2292,7 +2443,7 @@ function makeExchangeCtrl(prefix, chartId) {
     const lower = +P('lower').value, upper = +P('upper').value, n = +P('grid-count').value, sz = +P('size-base').value, lev = +P('leverage').value;
     if (!(upper > lower) || !n || !sz) { alert('无法自动计算区间，请在左侧手动填写参数后点"启动"。'); return; }
     if (!confirm(`按现价重开网格：区间 [${lower}, ${upper}]，${n} 格，每格 ${sz}，${lev}x。\n现有持仓将作为网格库存保留。继续？`)) return;
-    const body = { marketId: +P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0, dynamic: { enabled: !!P('dyn-enable')?.checked, shadow: P('dyn-shadow')?.checked !== false, driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120, calmMaxMovePct: +P('dyn-calm')?.value || 3, recenterCooldownMin: +P('dyn-rec-cd')?.value || 360, restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120, recenterEnabled: P('dyn-recenter')?.checked === true } };
+    const body = { marketId: P('market').value, mode: 'neutral', lower, upper, gridCount: n, sizeBase: sz, leverage: lev, outOfRangeAction: P('auto-stop').value, recoverMaxLossUsd: (P('max-loss') && +P('max-loss').value) || 0, dynamic: { enabled: !!P('dyn-enable')?.checked, shadow: P('dyn-shadow')?.checked !== false, driftFrac: +P('dyn-drift')?.value || 0.33, calmWindowH: +P('dyn-calmh')?.value || 120, calmMaxMovePct: +P('dyn-calm')?.value || 3, recenterCooldownMin: +P('dyn-rec-cd')?.value || 360, restartEnabled: P('dyn-restart')?.checked !== false, restartCooldownMin: +P('dyn-rest-cd')?.value || 120, recenterEnabled: P('dyn-recenter')?.checked === true } };
     const r = await apiFetch(`/api/${prefix}/start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const j = await r.json();
     if (j.error) alert('启动失败：' + j.error);
@@ -2398,7 +2549,7 @@ function makeExchangeCtrl(prefix, chartId) {
     };
     const config = {
       type: 'line',
-      data: { labels, datasets: [{ data, borderColor: prefix === 'de' ? '#f59e0b' : prefix === 'ex' ? '#3b82f6' : prefix === 'lr' ? '#22d3ee' : prefix === 'hl' ? '#a855f7' : prefix === 'va' ? '#f43f5e' : '#22c55e', borderWidth: 1.5, pointRadius: 0, tension: .15 }] },
+      data: { labels, datasets: [{ data, borderColor: prefix === 'de' ? '#f59e0b' : prefix === 'ex' ? '#3b82f6' : prefix === 'lr' ? '#22d3ee' : prefix === 'hl' ? '#a855f7' : prefix === 'va' ? '#f43f5e' : prefix === 'propr' ? '#2dd4bf' : '#22c55e', borderWidth: 1.5, pointRadius: 0, tension: .15 }] },
       options: { responsive:true, maintainAspectRatio:false, animation:false,
         plugins:{legend:{display:false}},
         scales: { x:{ticks:{color:'#6b82a0',maxTicksLimit:8},grid:{color:'#1e2d45'}},
@@ -2422,6 +2573,7 @@ const rsCtrl = makeExchangeCtrl('rs', 'rs-chart');
 const lrCtrl = makeExchangeCtrl('lr', 'lr-chart');
 const hlCtrl = makeExchangeCtrl('hl', 'hl-chart');
 const vaCtrl = makeExchangeCtrl('va', 'va-chart');
+const proprCtrl = makeExchangeCtrl('propr', 'propr-chart');
 
 // ── 总览 SSE + 程序运行状态（后端连接心跳）─────────────────────────────────────
 // 服务器每秒推送一次总览数据。只要心跳正常即视为"正常运行"；心跳停止

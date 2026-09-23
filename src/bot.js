@@ -408,7 +408,7 @@ export class GridBot {
   }
 
   async _start(cfg) {
-    const market = (await this.ex.getMarkets()).find((m) => m.marketId === Number(cfg.marketId));
+    const market = (await this.ex.getMarkets()).find((m) => String(m.marketId) === String(cfg.marketId));
     if (!market) throw new Error('找不到该市场 marketId=' + cfg.marketId);
 
     // VA 硬约束：单合约单一订单类型（limit）最多 50 个挂单（探针验证，第 51 个 => HTTP 422）。
@@ -1363,7 +1363,7 @@ export class GridBot {
     if (this.running || this._starting) throw new Error('已在运行，请先停止再操作。');
     this._starting = true;
     try {
-      const market = (await this.ex.getMarkets()).find((m) => m.marketId === Number(cfg.marketId));
+      const market = (await this.ex.getMarkets()).find((m) => String(m.marketId) === String(cfg.marketId));
       if (!market) throw new Error('找不到该市场 marketId=' + cfg.marketId);
       const pos = this.ex.getPosition?.(market.marketId);
       if (!pos || !pos.sizeBase) throw new Error('该市场当前没有持仓，无需回收。');
@@ -1447,7 +1447,7 @@ export class GridBot {
    * retry re-prices from the latest mark. The old code fired once and hoped.
    */
   async _closeWithConfirm(marketId) {
-    const mId = Number(marketId);
+    const mId = marketId; // 保持原类型：Propr 的 marketId 为字符串
     if (typeof this.ex.closePosition !== 'function') return false;
     if (!this.ex.getPosition?.(mId)) { await this.ex.closePosition(mId).catch(() => {}); return true; }
     for (let attempt = 1; attempt <= 3; attempt++) {

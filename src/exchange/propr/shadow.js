@@ -10,13 +10,17 @@ import { ProprClient } from './propr-sdk.js';
 import { ProprReadOnlyError, ProprStartupError } from './errors.js';
 import { createDispatcher } from '../../proxy.js';
 import { mapProprPosition, mapProprError, netPositionFromViews } from './mapper.js';
-import { buildMarket } from './market.js';
+import { buildMarket, toEpochMs } from './market.js';
 import { maskAccountId } from '../../redact.js';
 import { logger } from '../../log.js';
 
 const HL_INFO_URL = 'https://api.hyperliquid.xyz/info';
 const PRICE_POLL_MS = 2000;
 const ACCOUNT_POLL_MS = 15000;
+const CANDLE_INTERVALS = new Map([
+  [60, '1m'], [300, '5m'], [900, '15m'], [1800, '30m'], [3600, '1h'],
+  [14400, '4h'], [43200, '12h'], [86400, '1d'], [604800, '1w'],
+]);
 
 /**
  * 只读客户端包装：显式列白读方法，写方法一律抛错（不用 Proxy，行为可读可测）。
@@ -156,6 +160,25 @@ export class ShadowExchange extends PaperExchange {
     const px = Number(mids?.[this.base]);
     if (!Number.isFinite(px) || px <= 0) throw new Error(`无法获取 ${this.base} 中间价（HL allMids）`);
     return px;
+  }
+
+  /** shadow 必须用真实 K 线（否则趋势监测/智能填充基于 paper 合成价，完全失真）。 */
+  async getCandles(marketId, intervalSec = 3600, n = 200) {
+    const interval = CANDLE_INTERVALS.get(Number(intervalSec)) || '1h';
+    const end = Date.now();
+    const start = end - Number(n) * Number(intervalSec) * 1000;
+    const res = await fetch(HL_INFO_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'candleSnapshot', req: { coin: this.base, interval, startTime: start, endTime: end } }),
+      ...(this._dispatcher ? { dispatcher: this._dispatcher } : {}),
+    });
+    if (!res.ok) throw new Error(`HL candleSnapshot HTTP ${res.status}`);
+    const rows = await res.json();
+    return (Array.isArray(rows) ? rows : [])
+      .map((r) => ({ time: toEpochMs(r.t), open: Number(r.o), high: Number(r.h), low: Number(r.l), close: Number(r.c), volume: Number(r.v || 0) }))
+      .filter((r) => r.time > 0 && Number.isFinite(r.close))
+      .sort((a, b) => a.time - b.time);
   }
 
   async _pollRealPrice() {

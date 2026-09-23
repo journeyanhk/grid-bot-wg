@@ -104,9 +104,11 @@
 - [√] 6.1 在 `src/server.js` 完成第 7 所注册全部插入点（import/预检查/实例化/restore/错误监听/AI 注释/日历/Liveness/SSE/路由分区/overview/初始化/续跑/看门狗/孤儿检测/启动横幅/代理配置）
 - [√] 6.2 在 `src/server.js` + 前端标注 Propr 模式与账户（卡片含 SHADOW/SIM-WRITE/CHALLENGE 文案、掩码账户、锁定/快照状态、权益来源；余额/权益栏注明为本地模拟账户）
 - [√] 6.3 打通 `PR_MODE=shadow` 与 `sim-write` 启动冒烟，确认 Propr 卡片与市场列表可见（shadow 写请求 0、sim-write 权益取真实账户）
+- [√] 6.4 【部署补齐】Propr 控制台 tab：复用通用 `makeExchangeCtrl`（市场/趋势、策略配置、启动/停止/调整/撤单/补格、账户状态、孤儿持仓处理、价格/网格图），概览卡片加「进入 Propr 控制台 →」
+- [√] 6.5 【部署补齐·阻断修复】GridBot 市场解析改为字符串比较（`String(m.marketId) === String(cfg.marketId)`，`_start`/`startRecovery` 两处）+ `_closeWithConfirm` 保持 marketId 原类型 + 前端 start/startRecovery 的 marketId 原值透传——Propr 的字符串 marketId（`'BTC'`）此前会导致「找不到该市场」
+- [√] 6.6 【部署补齐】Shadow 的 `getCandles` 改用真实 HL K 线（此前继承 paper 合成价，趋势监测/智能填充完全失真）
 
-## 6R. Review4 复审修复（接入安全，2026-09-23）
-- [√] 6R.1 【P1】新鲜度分离：`lastPriceOkAt`（HL 公开行情）与 `lastApiOkAt`（Propr API）分开计时；`_pollPrice` 只推进行情时间戳，看门狗改用 `lastOkKey='lastApiOkAt'`，杜绝"行情正常=Propr 健康"误判
+## 6R. Review4 复审修复（接入安全，2026-09-23）- [√] 6R.1 【P1】新鲜度分离：`lastPriceOkAt`（HL 公开行情）与 `lastApiOkAt`（Propr API）分开计时；`_pollPrice` 只推进行情时间戳，看门狗改用 `lastOkKey='lastApiOkAt'`，杜绝"行情正常=Propr 健康"误判
 - [√] 6R.2 【P1】前端隔离：抽取 `renderExchangeCard()`；汇总循环恢复为 6 所（Propr 不计入余额/盈亏/运行数，避免 `4/3 运行中`），Propr 卡片独立渲染
 - [√] 6R.3 【P1】代理竞态：`ProprClient` 支持 per-client `dispatcher`，适配器不再调用 `setGlobalDispatcher`；HL 行情也走同一 dispatcher；启动日志标注 Propr 独立代理；`proxy.js` 注明忽略 PR_PROXY
 - [√] 6R.4 【P2】`getPublicInfo()` 移除 `attemptId`（仅保留掩码账户等非关联标识）

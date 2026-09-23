@@ -24,6 +24,15 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 新增/修复（Propr 控制台 tab 与 Shadow 部署补齐，2026-09-23）
+- 新增 **Propr 控制台 tab**（复用通用 `makeExchangeCtrl`）：市场与趋势、策略配置（模式/风格/智能填充/边界/格数/每格数量/杠杆/越界策略/动态网格）、启动/停止/调整区间/撤销挂单/补格、账户状态、孤儿持仓处理、价格与网格图；概览卡片加「进入 Propr 控制台 →」
+- **阻断修复**：GridBot 市场解析由 `m.marketId === Number(cfg.marketId)` 改为字符串比较
+  （`_start` / `startRecovery`），`_closeWithConfirm` 保持 marketId 原类型，前端 start/startRecovery 原值透传——
+  Propr 的字符串 marketId（`'BTC'`）此前必然报「找不到该市场」，网格无法启动
+- Shadow `getCandles` 改用真实 HL K 线（此前继承 paper 合成价，趋势监测/智能填充显示的是 100.x 假价）
+- 验证：`npm test` 全绿 + lint 0 error + HTML 核对通过；**Shadow 端到端**（启动 6 档本地网格 →
+  写请求 0 / Propr 真实账户零接触 → 停止清空）通过
+
 ### 修复（Review6-1 复审：fail-closed 与基准持久化，2026-09-23）
 - P0 **fail closed**：风控对象构造即 `LOCKED`（原因「等待首次权益风控评估」）并设置
   `exchange.riskGateEnabled=true` + 写入 `riskState`；适配器开仓门改严格判断——风控已启用时
