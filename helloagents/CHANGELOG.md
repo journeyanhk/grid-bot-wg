@@ -24,6 +24,22 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 新增（Propr 风控层 + 对账恢复，2026-09-23）
+- `src/risk/propr-challenge.js` 挑战风控层：UTC 日切（00:00 UTC 重置日初权益）、权益可用性/新鲜度、
+  日损与总回撤分级（纯函数 `evaluateRisk`，优先级 BREACHED > LOCKED > HALT > REDUCE_ONLY > WARNING > OK）；
+  分级动作：REDUCE_ONLY → `pauseOpening` 至 UTC 日切（仅减仓）、HALT → 撤单+平仓+停机、
+  LOCKED → 暂停开仓待恢复、BREACHED → 停机不平仓；状态写入 `exchange.riskState` 并经 `exchangeInfo` 透传
+- `server.js`：`PR_MODE=sim-write|challenge` 时启用风控层（paper/shadow 不启用），新增 `/api/prpro/risk` 路由；
+  `PR_RISK_POLL_MS` 可配
+- 对账恢复：`reconnect()` → `init({resume:true})` 用全量成交对账并**补偿断线期间缺失的 fill**
+  （tradeId 去重，绝不重复补单）；进程重启走 seed 路径不补发历史成交，由 `bot.resume` 对账接管；
+  部分成交按实际成交量发 fill（bot 侧据此补同量对腿）
+- 适配器新增 `attemptStatus` / `startingBalance`（取自 `ChallengeAttempt.account/phases`）
+- 前端 Propr 卡片新增「挑战风控」行：状态 + 日损/回撤使用率 + 原因（按级别着色）
+- 测试新增 `test/propr-risk.test.js`（日切边界/分级/优先级/动作编排/日切重置）与
+  `propr-reconcile.test.js` 的重连补偿、部分成交用例；`npm test` 全绿 + lint 0 error
+- 真实 sim-write 冒烟：`/api/prpro/risk` 返回 OK（起始 5000、回撤用量 0.26%、权益来源 propr_account）
+
 ### 修复（Review4 复审：接入安全，2026-09-23）
 - P1 新鲜度分离：新增 `lastPriceOkAt`（HL 公开行情）与 `lastApiOkAt`（Propr 订单/持仓/成交/权益）；
   `_pollPrice` 只推进行情时间戳，server 看门狗对 Propr 改用 `lastOkKey='lastApiOkAt'`——

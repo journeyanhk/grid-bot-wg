@@ -260,6 +260,36 @@ async function main() {
     assert.equal(fills.length, 2, '相隔 5 分钟的未处理成交不得被时间窗口丢弃');
     ex.stop();
   }
+
+  {
+    // 8.1 断线重连补偿：断线期间的成交在重连后补发一次；历史成交与重复重连均不得重复补单
+    state.orders = []; state.positions = []; state.trades = [tradeRow('t-old', 'o-old')];
+    state.cancelMode = 'ok'; state.cancelCalls = 0; state.seq = 0;
+    const ex = new ProprExchange(cfg);
+    const fills = [];
+    ex.on('fill', (f) => fills.push(f));
+    await ex.init();
+    assert.equal(fills.length, 0, '启动时历史成交不得补发');
+    state.trades = [tradeRow('t-old', 'o-old'), tradeRow('t-new', 'o-new')];
+    await ex.reconnect();
+    assert.equal(fills.length, 1, '断线期间的成交必须在重连后补发一次');
+    assert.equal(fills[0].orderId, 'o-new');
+    await ex.reconnect();
+    assert.equal(fills.length, 1, '重复重连不得重复补单');
+    ex.stop();
+  }
+
+  {
+    // 8.2 部分成交：按实际成交量发 fill（bot 侧据此补同量对腿）
+    const ex = await freshExchange();
+    const fills = [];
+    ex.on('fill', (f) => fills.push(f));
+    state.trades = [{ ...tradeRow('t-p1', 'o-p'), quantity: '0.0004' }];
+    await ex._refreshTrades();
+    assert.equal(fills.length, 1);
+    assert.equal(fills[0].sizeBase, 0.0004, '部分成交必须按实际成交量发 fill');
+    ex.stop();
+  }
 }
 
 main()

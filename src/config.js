@@ -210,6 +210,7 @@ export function getConfig() {
     enableAutoRecenter: String(process.env.PR_ENABLE_AUTO_RECENTER || 'false') === 'true',
     internalDailyStopPct: Number(process.env.PR_INTERNAL_DAILY_STOP_PCT || 0.01),
     internalMaxDrawdownPct: Number(process.env.PR_INTERNAL_MAX_DRAWDOWN_PCT || 0.03),
+    riskPollMs: Number(process.env.PR_RISK_POLL_MS || 30000),
     orderPollMs: Number(process.env.PR_ORDER_POLL_MS || 3000),
     tradePollMs: Number(process.env.PR_TRADE_POLL_MS || 3000),
     reconcileMs: Number(process.env.PR_RECONCILE_MS || 15000),

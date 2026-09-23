@@ -16,6 +16,7 @@ import { createExchange as createLrExchange } from './exchange/lr/index.js';
 import { createExchange as createHlExchange } from './exchange/hl/index.js';
 import { createExchange as createVaExchange } from './exchange/va/index.js';
 import { createExchange as createProprExchange } from './exchange/propr/index.js';
+import { ProprChallengeRisk } from './risk/propr-challenge.js';
 import { GridBot } from './bot.js';
 import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
@@ -148,6 +149,13 @@ const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
 const proprExchange = createProprExchange(cfg.propr);
 const proprBot = new GridBot(proprExchange, { onChange: (s) => saveSnapshot('propr', s),
   onAlert: (a) => notifier.send({ source: 'propr', message: `[Propr] ${a.message}`, level: a.level, key: a.key ? 'propr:' + a.key : undefined }) });
+
+// Propr 挑战风控层：仅对真实账户模式启用（shadow 的余额是本地模拟、paper 无账户）。
+// 内部日损/总回撤达线分别触发「仅减仓（至 UTC 日切）」与「撤单+平仓+停机」。
+const proprRisk = (cfg.propr.mode === 'sim-write' || cfg.propr.mode === 'challenge')
+  ? new ProprChallengeRisk({ exchange: proprExchange, bot: proprBot, notifier, logger, cfg: cfg.propr })
+  : null;
+proprRisk?.start();
 
 // Restore cumulative stats / config from the previous run (display continuity).
 // Trading does NOT auto-resume; stray-order cleanup happens after each exchange
@@ -737,6 +745,11 @@ const server = http.createServer(async (request, res) => {
       return await vaHandler(request, res, p.slice('/api/va'.length), url);
     }
     // Propr 挑战账户（独立第 7 所）
+    if (p === '/api/propr/risk') {
+      return send(res, 200, proprRisk
+        ? proprRisk.getState()
+        : { status: null, note: '当前模式未启用挑战风控（仅 sim-write/challenge）' });
+    }
     if (p.startsWith('/api/propr/')) {
       return await proprHandler(request, res, p.slice('/api/propr'.length), url);
     }

@@ -115,16 +115,16 @@
 - [√] 6R.7 适配器级测试补新鲜度分离用例（API 全挂但行情正常 → `lastApiOkAt` 不前进）
 
 ## 7. Challenge 风控层
-- [ ] 7.1 在 `src/risk/propr-challenge.js` 实现 UTC 日切、权益派生（`equitySource`）、日损/回撤计算，验证 how.md#实现要点
-- [ ] 7.2 在 `src/risk/propr-challenge.js` 实现分级 OK/WARNING/REDUCE_ONLY/HALT/LOCKED/BREACHED 与向 bot 下发指令，依赖任务 7.1
-- [ ] 7.3 在 `src/server.js` + 前端接入 Propr 面板（账户/模式/状态/日损/回撤/净仓/延迟/锁定原因），依赖任务 6.1、7.2
-  > 备注: 总览卡片（模式/账户/锁定态/权益来源/真实账户权益）已在 Review 4 完成；待风控层落地后补齐日损/回撤使用率与一键解锁
+- [√] 7.1 在 `src/risk/propr-challenge.js` 实现 UTC 日切、权益可用性（权威字段 + 新鲜度）、日损/回撤计算（纯函数 `evaluateRisk`），验证 how.md#实现要点
+- [√] 7.2 在 `src/risk/propr-challenge.js` 实现分级 OK/WARNING/REDUCE_ONLY/HALT/LOCKED/BREACHED 与向 bot 下发指令（暂停开仓至 UTC 日切 / 撤单平仓停机 / 失效停机），依赖任务 7.1
+- [√] 7.3 在 `src/server.js` + 前端接入 Propr 面板（状态/日损·回撤使用率/原因/权益来源；`/api/propr/risk` 路由 + `exchangeInfo.risk` 透传），依赖任务 6.1、7.2
+  > 备注: 已含状态/日损·回撤使用率/原因/权益来源；一键解锁留待人工解锁接口（`unlockTrading` 已在适配器提供）
 - [ ] 7.4 【可选】AI 集成：Propr 目前独立于 AI 快照流（`EXNAMES` 与 per-key JSON 按 5 所硬编码，且 marketId 为字符串），如需纳入需扩展 AI 提示词与面板
 
 ## 8. 对账、恢复与异常
-- [ ] 8.1 在 `src/exchange/propr/propr.js` 实现断线重连与成交补偿（基于 getTrades 恢复，且只补一次反向单），依赖任务 4.4
-- [ ] 8.2 在 `src/exchange/propr/propr.js` 处理部分成交（按已成交量补反向单，余量本地跟踪），依赖任务 4.4
-- [ ] 8.3 在 `src/exchange/propr/propr.js` 处理重启恢复（从 orders/trades 重建状态），依赖任务 8.1、8.2
+- [√] 8.1 在 `src/exchange/propr/propr.js` 实现断线重连与成交补偿（`reconnect()` → `init({resume:true})` 全量成交对账，emit 断线期间缺失 fill，tradeId 去重保证只补一次），依赖任务 4.4
+- [√] 8.2 处理部分成交（每笔成交按实际成交量发 fill，bot 侧按实际量补同量对腿；尘埃仓守卫沿用 bot），依赖任务 4.4
+- [√] 8.3 处理重启恢复（进程重启走 seed 不补发历史成交，避免重复补单；`reconcileOrders()` + `fetchTradesWindow()` 供 bot.resume 对账重建状态），依赖任务 8.1、8.2
 
 ## 9. 四层验收（Review 5）
 - [ ] 9.1 Shadow 24h 验收：0 写请求、行情/持仓持续刷新、本地模拟网格正常、断线恢复、异常锁定，产出报告，依赖任务 6.3、7.3
@@ -144,6 +144,6 @@
 - [√] 12.2 在 `test/propr-modes.test.js` 覆盖四模式写白名单（shadow 写请求数=0）、账户白名单、challenge 硬确认
 - [√] 12.3 在 `test/propr-order-state.test.js` 覆盖超时幂等、未知态锁定、部分成交、已成交不重复补单
 - [√] 12.4 在 `test/propr-reconcile.test.js` 覆盖断线恢复、重启恢复、重复补单保护
-- [ ] 12.5 在 `test/propr-risk.test.js` 覆盖 UTC 日切、内部日损/回撤分级、derived 降权
+- [√] 12.5 在 `test/propr-risk.test.js` 覆盖 UTC 日切、内部日损/回撤分级、derived 降权
 - [√] 12.6 在 `test/propr-log-redact.test.js` 覆盖日志脱敏（密钥不出现）
 - [ ] 12.7 在 `package.json` 的 `test` 脚本串联新增测试，`npm test` 全绿 + `npm run lint` 干净

@@ -67,6 +67,9 @@ export class ProprExchange extends EventEmitter {
     this.equitySource = null;
     this.equityFreshAt = 0;
     this.equityStale = true;
+    this.attemptStatus = null;     // 挑战状态（active/passed/failed）→ 风控 BREACHED 判定
+    this.startingBalance = null;   // 挑战起始余额（平台口径）
+    this.riskState = null;         // 挑战风控层写入，经 getPublicInfo 透出
 
     // 能力位
     this.positionMode = 'net';
@@ -99,7 +102,7 @@ export class ProprExchange extends EventEmitter {
 
   // ── 生命周期 ──────────────────────────────────────────────────────────────
 
-  async init() {
+  async init({ resume = false } = {}) {
     // PR_PROXY 走 per-client dispatcher，绝不改全局 dispatcher（避免与其它交易所代理竞态）
     if (this._cfg.proxy) {
       this._dispatcher = await createDispatcher(this._cfg.proxy);
@@ -131,7 +134,13 @@ export class ProprExchange extends EventEmitter {
     await this._refreshEquity();
     await this._refreshPositions();
     await this._refreshOpenOrders();
-    await this._seedTrades();
+    if (resume) {
+      // 重连补偿：全量成交对账，把断线期间漏掉的成交补发为 fill（tradeId 去重，绝不重复补单）
+      await this._refreshTrades({ full: true });
+      logger.warn('propr', '重连完成：已对账并补偿断线期间的成交');
+    } else {
+      await this._seedTrades();
+    }
     this._price = await this._fetchMidPrice().catch(() => this._price);
 
     this.dataSource = 'real';
@@ -142,9 +151,12 @@ export class ProprExchange extends EventEmitter {
   }
 
   async reconnect() {
+    // 同进程重连：需要补偿断线期间的成交（emit 缺失 fill，_seenTrades 去重保证只补一次）；
+    // 进程重启走 init() 的 seed 路径，不补发历史成交（避免重复补单），由 bot.resume 对账接管。
+    const resume = this.dataSource != null;
     this.stop();
     this._stopped = false;
-    return this.init();
+    return this.init({ resume });
   }
 
   start() {
@@ -398,6 +410,8 @@ export class ProprExchange extends EventEmitter {
       this.equityStale = true;
       throw new ProprStartupError('Propr account.balance 不可用（权益字段缺失）');
     }
+    this.attemptStatus = attempt?.status ?? null;
+    this.startingBalance = Number(attempt?.phases?.[0]?.startingBalance) || this.startingBalance || null;
     this.balance = balance;
     this.equity = Number(acc.marginBalance ?? balance);
     this.highWaterMark = Number(acc.highWaterMark ?? 0);
@@ -821,6 +835,9 @@ export class ProprExchange extends EventEmitter {
       price: this._price || null,
       lastPriceOkAt: this.lastPriceOkAt || null,
       lastApiOkAt: this.lastApiOkAt || null,
+      attemptStatus: this.attemptStatus,
+      startingBalance: this.startingBalance,
+      risk: this.riskState,
     };
   }
 }

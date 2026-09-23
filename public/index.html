@@ -692,6 +692,7 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div class="ov-sub" id="ov-propr-lock">—</div>
       <div class="ov-sub" id="ov-propr-eqsrc">—</div>
       <div class="ov-sub" id="ov-propr-extra" style="margin-bottom:6px">—</div>
+      <div class="ov-sub" id="ov-propr-risk" style="margin-bottom:6px">挑战风控 —</div>
       <div class="ov-pnl" id="ov-propr-pnl">—</div>
       <div class="ov-sub" id="ov-propr-ret">收益率 —</div>
       <div style="margin-top:10px">
@@ -2667,8 +2668,7 @@ function renderProprCard(d) {
   const priceEl = $('ov-propr-price');
   if (priceEl && d.lastPrice == null && info.price != null) priceEl.textContent = fmtPrice(info.price);
 
-  const extraEl = $('ov-propr-extra');
-  if (extraEl) {
+  const extraEl = $('ov-propr-extra');  if (extraEl) {
     const parts = [];
     if (info.highWaterMark != null) parts.push(`高水位 ${fmt(info.highWaterMark)}`);
     if (info.availableBalance != null) parts.push(`可用 ${fmt(info.availableBalance)}`);
@@ -2676,6 +2676,23 @@ function renderProprCard(d) {
     if (info.openOrdersTracked != null) parts.push(`跟踪挂单 ${info.openOrdersTracked}`);
     if (info.proprNetPosition) parts.push(`Propr 净仓 ${fmt(Number(info.proprNetPosition.sizeBase), 8)}`);
     extraEl.textContent = parts.length ? parts.join(' · ') : '—';
+  }
+
+  // 挑战风控：状态 + 日损/回撤使用率（仅 sim-write/challenge 启用）
+  const riskEl = $('ov-propr-risk');
+  if (riskEl) {
+    const r = info.risk;
+    if (!r || !r.status) {
+      riskEl.textContent = '挑战风控：未启用（仅 SIM-WRITE / CHALLENGE 模式启用）';
+      riskEl.style.color = '';
+    } else {
+      const usage = (u) => (u == null ? '—' : `${Math.round(u * 100)}%`);
+      const color = r.status === 'OK' ? 'var(--grn)' : r.status === 'WARNING' ? 'var(--yel)' : 'var(--red)';
+      riskEl.textContent = `挑战风控：${r.statusLabel || r.status} · 日损 ${r.dailyLossPct ?? '—'}%（用量 ${usage(r.dailyUsage)}）`
+        + ` · 回撤 ${r.drawdownPct ?? '—'}%（用量 ${usage(r.drawdownUsage)}）`
+        + (r.status !== 'OK' && r.reason ? ` · ${r.reason}` : '');
+      riskEl.style.color = color;
+    }
   }
 }
 
