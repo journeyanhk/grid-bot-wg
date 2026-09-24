@@ -168,7 +168,7 @@ export function composeDailyReport({ recorderData, gate, runner = {} } = {}) {
     const cov = runner.coverage || gate?.coverage || {};
     lines.push('影子系统运行中（未达最小统计周期）');
     lines.push(`覆盖率 ${cov.coveragePct ?? '—'}% · 已处理K线 ${cov.processedBars ?? '—'} · 缺失 ${cov.missedBars ?? '—'} · 最大缺口 ${Math.round((cov.maxGapMs || 0) / 60_000)} 分钟`);
-    for (const id of ['r2fast', 'balanced', 'strict']) {
+    for (const id of ['r2fast', 'balanced', 'strict', 'r2faster']) {
       const cfg = per[id];
       if (!cfg) continue;
       const pos = cfg.position;
@@ -177,7 +177,7 @@ export function composeDailyReport({ recorderData, gate, runner = {} } = {}) {
     return lines.join('\n');
   }
 
-  for (const id of ['r2fast', 'balanced', 'strict']) {
+  for (const id of ['r2fast', 'balanced', 'strict', 'r2faster']) {
     const cfg = per[id];
     if (!cfg) continue;
     const mtm = runner.mtm?.[id] || null;

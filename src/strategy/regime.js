@@ -79,13 +79,13 @@ export function evaluateRegime(f, cfg = {}) {
 }
 
 /**
- * 双确认防抖跟踪器（有状态，每个参数组一个实例）。
- * 入场：score 达阈值连续两次 5M 检查（两根已收盘 5M）或 1H 收盘确认一次；
+ * 确认防抖跟踪器（有状态，每个参数组一个实例）。
+ * 入场：score 达阈值连续 confirmChecks 次 5M 检查（默认 2；r2faster 变体=1）或 1H 收盘确认一次；
  * 且必须与 regime 方向一致（趋势不明确 → 空仓）。
  * 退出：多头 score < exitThreshold / 空头 score > -exitThreshold。
  */
 export function createRegimeTracker(config = {}) {
-  const c = { ...REGIME_DEFAULTS, ...config };
+  const c = { ...REGIME_DEFAULTS, confirmChecks: 2, ...config }; // confirmChecks：连续确认次数（r2faster 变体=1，单次 5M 确认）
   let upStreak = 0, downStreak = 0, lastBarKey = null;
 
   function onEvaluation(signal, ctx = {}) {
@@ -101,8 +101,8 @@ export function createRegimeTracker(config = {}) {
 
     // 入场必须与 regime 方向一致（RANGE/VOLATILE 一律空仓）
     let entryDirection = null;
-    if (signal.direction === 'long' && (upStreak >= 2 || (isNewHourlyBar && signal.score >= c.entryThreshold))) entryDirection = 'long';
-    else if (signal.direction === 'short' && (downStreak >= 2 || (isNewHourlyBar && signal.score <= -c.entryThreshold))) entryDirection = 'short';
+    if (signal.direction === 'long' && (upStreak >= c.confirmChecks || (isNewHourlyBar && signal.score >= c.entryThreshold))) entryDirection = 'long';
+    else if (signal.direction === 'short' && (downStreak >= c.confirmChecks || (isNewHourlyBar && signal.score <= -c.entryThreshold))) entryDirection = 'short';
 
     return { entryDirection, skipped: false, upStreak, downStreak };
   }

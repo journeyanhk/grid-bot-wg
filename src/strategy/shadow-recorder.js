@@ -4,7 +4,7 @@
 //   - 每个已收盘 5M K线驱动一次：先用该 K 线 high/low 管理持仓（止损优先于止盈），再用信号评估入场；
 //   - 入场价 = 当根收盘价；加仓/止盈/止损按触发价成交；市价腿（止损/信号退出）滑点进成本模型；
 //   - 止损只允许向有利方向移动（移动止损 = 最高价 - trailAtr×ATR，多头镜像）。
-import { createRegimeTracker } from './regime.js';
+import { createRegimeTracker, evaluateRegime, REGIME_DEFAULTS } from './regime.js';
 import { allScenarioCosts, COST_SCENARIOS, FEE_DEFAULTS, legCost } from './shadow-cost-model.js';
 import { ExitReason } from './types.js';
 
@@ -14,14 +14,21 @@ export const PARAM_VERSION = 'shadow-v1.7.1';
 export const ATR_SOURCE = '1h';
 
 /**
- * 三组参数：R2 Fast 为决断对象；Balanced/Strict 为对照。
+ * 四组参数：R2 Fast 为决断对象；Balanced/Strict/r2faster 为对照。
  * - Balanced：文档1 原参数（60/20/20/0.8/1.5）
  * - Strict：ADX/间距/止损 对齐回测（22/0.8/1.5）；entry/exit 阈值为 shadow-v1 假设，待回测文档核对
+ * - r2faster（Review13 第四变体，A/B 用）：阈值 40 / 单次 5M 确认 / ADX 15，保留 4H 否决（底线）。
+ *   独立版本与记账，不污染前三组样本；决策对象仍是 r2fast。
+ *
+ * 变体级 regime：默认沿用基准信号（保护既有样本口径）；若声明 regimeAdxMin，
+ * 该变体用独立阈值重新评估 regime/评分（v1.7.3 起 r2faster 使用，使"ADX 15"真实生效——
+ * 基准信号固定 adxMin=18，若不做变体级评估则 ADX 15 无从体现）。
  */
 export const PARAM_SETS = Object.freeze([
   { id: 'r2fast', version: PARAM_VERSION, label: 'R2 Fast（决断）', entryThreshold: 50, exitThreshold: 15, adxMin: 18, volMaxAtrPct: 2.0, spacingAtr: 0.5, stopAtr: 1.0, trailAtr: 1.2, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
   { id: 'balanced', version: PARAM_VERSION, label: 'Balanced（对照）', entryThreshold: 60, exitThreshold: 20, adxMin: 20, volMaxAtrPct: 2.0, spacingAtr: 0.8, stopAtr: 1.5, trailAtr: 1.5, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
   { id: 'strict', version: PARAM_VERSION, label: 'Strict（低频对照）', entryThreshold: 70, exitThreshold: 25, adxMin: 22, volMaxAtrPct: 2.0, spacingAtr: 0.8, stopAtr: 1.5, trailAtr: 1.5, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
+  { id: 'r2faster', version: 'shadow-v1.7.3', label: 'R2 Faster（高频对照）', entryThreshold: 40, exitThreshold: 15, adxMin: 15, regimeAdxMin: 15, confirmChecks: 1, volMaxAtrPct: 2.0, spacingAtr: 0.5, stopAtr: 1.0, trailAtr: 1.2, maxLevels: 3, tpR: [0.8, 1.5, 2.2], tpFrac: [0.25, 0.35, 0.25] },
 ]);
 
 /**
@@ -91,7 +98,7 @@ export function createShadowRecorder(opts = {}) {
   for (const def of paramSets) {
     configs.set(def.id, {
       def,
-      tracker: createRegimeTracker({ entryThreshold: def.entryThreshold, exitThreshold: def.exitThreshold, adxMin: def.adxMin, volMaxAtrPct: def.volMaxAtrPct }),
+      tracker: createRegimeTracker({ entryThreshold: def.entryThreshold, exitThreshold: def.exitThreshold, adxMin: def.adxMin, volMaxAtrPct: def.volMaxAtrPct, confirmChecks: def.confirmChecks ?? 2 }),
       position: null,
       trades: [],
       stats: { entries: 0, closed: 0, wins: 0, grossPnl: 0, netPnlBaseline: 0 },
@@ -100,6 +107,12 @@ export function createShadowRecorder(opts = {}) {
   const signals = []; // 诊断用信号环（全局）
   const bookSamples = []; // 盘口滑点观测环（仅诊断，不进入净 PnL）
   let evaluations = 0, lastSignal = null, lastProcessedBarKey = null;
+
+  /** 变体级信号：声明 regimeAdxMin 的变体用自己的阈值重新评估 regime/评分；否则沿用基准信号。 */
+  function signalForConfig(def, features, baseSignal) {
+    if (def.regimeAdxMin == null || !features) return baseSignal;
+    return evaluateRegime(features, { adxMin: def.regimeAdxMin, volMaxAtrPct: def.volMaxAtrPct ?? REGIME_DEFAULTS.volMaxAtrPct });
+  }
 
   function pushSignal(signal, barKey) {
     lastSignal = signal;
@@ -309,18 +322,19 @@ export function createShadowRecorder(opts = {}) {
     const results = [];
     let bookPushed = false; // 同一根 K 线只记一次盘口采样（多组参数同时入场不重复）
     for (const cfg of configs.values()) {
+      const cfgSignal = signalForConfig(cfg.def, features, signal);
       if (cfg.position) {
         cfg.position._fundingPoints = fundingPoints;
         accrueFunding(cfg.position, barCloseTime, fundingPoints); // 逐时段累计（含补处理的历史 K 线）
-        const closed = managePosition(cfg, candle5m, signal);
+        const closed = managePosition(cfg, candle5m, cfgSignal);
         if (closed) results.push({ configId: cfg.def.id, event: 'closed', trade: closed });
       }
       if (!cfg.position) {
         const cooled = !cfg.cooldownUntil || !Number.isFinite(barKey) || barKey >= cfg.cooldownUntil;
-        const { entryDirection } = cooled ? cfg.tracker.onEvaluation(signal, { barKey, isNewHourlyBar }) : { entryDirection: null };
+        const { entryDirection } = cooled ? cfg.tracker.onEvaluation(cfgSignal, { barKey, isNewHourlyBar }) : { entryDirection: null };
         if (entryDirection) {
           // 策略 ATR 基准 = 1H（与回测一致）；缺失则不入场
-          const pos = openPosition(cfg, { ...signal, direction: entryDirection }, candle5m, features?.atr1h, features);
+          const pos = openPosition(cfg, { ...cfgSignal, direction: entryDirection }, candle5m, features?.atr1h, features);
           if (pos && bookSample?.entryBps != null) {
             pos.bookObserved = { entryBps: bookSample.entryBps };
             if (!bookPushed) {

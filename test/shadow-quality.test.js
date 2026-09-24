@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { accrueFunding, createShadowRecorder, SHADOW_DEFAULTS } from '../src/strategy/shadow-recorder.js';
 import { computePendingBars } from '../src/strategy/shadow-runner.js';
+import { evaluateRegime } from '../src/strategy/regime.js';
 import { composeDailyReport, computeStats, evaluateGate, fundingCompleteness, summarizeBasis } from '../src/strategy/shadow-persistence.js';
 
 let passed = 0, failed = 0;
@@ -286,7 +287,38 @@ test('composeDailyReport：首日模式不刷决断门；时间戳含 UTC 标注
     runner: { equity: 500, coverage: { coveragePct: 99.5, processedBars: 2300, missedBars: 1, maxGapMs: 300_000 } },
   });
   assert.ok(full.includes('信号退出 1'), '退出原因分布');
+  assert.ok(full.includes('r2faster'), '日报含第四对照组');
   assert.ok(full.includes('资金完整度'), '资金完整度行');
+});
+
+// ── Review13：r2faster 第四变体（A/B） ──
+const regimeFeatures = (adx = 30) => ({
+  price: 100, atr5m: 10, atr1h: 10, structureLow: 95, structureHigh: 105,
+  htfUp: true, mtfUp: true, entryUp: true, priceVsEma20_5m: 1,
+  adx1h: adx, plusDI: 30, minusDI: 10, slope4h: 0.002, slope1h: 0.002, slope5m: 0.001,
+  atrPct: 1.0,
+});
+
+test('r2faster：单次 5M 确认 + 阈值 40（r2fast 双确认对照）', () => {
+  const rec = createShadowRecorder({ now: () => 0 });
+  const feat = regimeFeatures(30);
+  const sig = evaluateRegime(feat);
+  rec.onBar({ candle5m: cdl(0), signal: sig, barKey: 0, features: feat });
+  assert.ok(rec.configs.get('r2faster').position, 'r2faster 单次确认即入场');
+  assert.equal(rec.configs.get('r2fast').position, null, 'r2fast 需两次确认（对照）');
+  rec.onBar({ candle5m: cdl(300_000), signal: sig, barKey: 300_000, features: feat });
+  assert.ok(rec.configs.get('r2fast').position, 'r2fast 第二次确认后入场');
+  assert.equal(rec.configs.get('r2faster').def.version, 'shadow-v1.7.3');
+});
+
+test('r2faster 变体级 ADX 15：基准判 RANGE 的 ADX16 行情下可入场', () => {
+  const rec = createShadowRecorder({ now: () => 0 });
+  const feat = regimeFeatures(16);
+  const base = evaluateRegime(feat);
+  assert.equal(base.regime, 'range', '基准 adxMin=18 判 RANGE（ADX16）');
+  rec.onBar({ candle5m: cdl(0), signal: base, barKey: 0, features: feat });
+  assert.ok(rec.configs.get('r2faster').position, 'r2faster（regimeAdxMin 15）看到 trend_up 并入场');
+  assert.equal(rec.configs.get('r2fast').position, null, 'r2fast 沿用基准信号 -> 空仓');
 });
 
 (async () => {

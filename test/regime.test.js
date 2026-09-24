@@ -117,6 +117,12 @@ test('tracker：中间跌破阈值重置连击', () => {
   assert.equal(r3.entryDirection, null, '重置后需重新累计两次');
 });
 
+test('tracker：confirmChecks=1 -> 单次达标即入场（r2faster 变体）', () => {
+  const tr = createRegimeTracker({ entryThreshold: 40, confirmChecks: 1 });
+  const r1 = tr.onEvaluation({ score: 45, direction: 'long' }, { barKey: 1 });
+  assert.equal(r1.entryDirection, 'long', '单次确认即入场');
+});
+
 test('tracker：1H 收盘确认一次即可入场', () => {
   const tr = createRegimeTracker({ entryThreshold: 50 });
   const r = tr.onEvaluation({ score: -55, direction: 'short' }, { barKey: 1, isNewHourlyBar: true });
