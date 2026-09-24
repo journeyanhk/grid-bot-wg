@@ -75,7 +75,7 @@ export class ProprExchange extends EventEmitter {
     // 能力位
     this.positionMode = 'net';
     this.supportsSafeOpeningRetry = true; // intentId 幂等（Day-0 实测）
-    this.orderBatchSize = 10;
+    this.orderBatchSize = 1;              // Propr 一次请求只允许 1 笔开仓单（13066）→ 逐笔铺单
 
     this._cfg = cfg;
     this._positions = [];
@@ -648,6 +648,13 @@ export class ProprExchange extends EventEmitter {
     }
   }
 
+  /**
+   * 铺网下单：**串行单笔**（Propr 限制，Day-0 后补充实测）——
+   * 一次请求只允许 1 笔开仓单：多笔必须带**顶层** `orderGroupId`（ULID，否则 code 13059），
+   * 且带组后仍命中 `13066 only_one_entry_order_allowed_per_request`（连「1 开仓 + 1 平仓」也失败）。
+   * 因此不使用批量接口：逐笔 createOrders([单笔])，返回与输入等长（GridBot 强校验）；
+   * 单笔异常走 `_recoverIntent`（超时先对账，绝不重复创建）。
+   */
   async placeLimitOrders(orders = []) {
     if (!orders.length) return [];
     // 全为 reduce-only → 降风险批量，放行；含任一开仓单 → 走完整开仓检查
@@ -671,37 +678,17 @@ export class ProprExchange extends EventEmitter {
       return { intent, record: this._buildRecord({ side: intent.side, positionSide, price, sizeBase, reduceOnly: intent.reduceOnly, intentId: intent.intentId }) };
     });
 
-    let rows = [];
-    let batchErr = null;
-    try {
-      rows = await this.client.createOrders(prepared.map((p) => p.record));
-    } catch (err) {
-      batchErr = err;
-    }
-
-    const byIntent = new Map((rows || []).map((r) => [r.intentId, r]));
-    const results = prepared.map((p) => {
-      const raw = byIntent.get(p.intent.intentId);
-      return raw?.orderId ? this._adoptCreated(raw, p.intent) : null;
-    });
-    if (results.every(Boolean)) return results;
-
-    if (batchErr?.statusCode === 400 && !isIdempotencyConflict(batchErr)) {
-      for (const p of prepared) this._intents.delete(p.intent.intentId);
-      throw batchErr;
-    }
-    // 缺失项逐个对账；对不上则锁定（结果必须与输入等长，GridBot 强校验）
-    for (let i = 0; i < prepared.length; i++) {
-      if (results[i]) continue;
-      const p = prepared[i];
-      const existing = await this._findOrdersByIntent(p.intent.intentId).catch(() => []);
-      if (existing.length) results[i] = { ...this._adoptCreated(existing[0], p.intent), reconciled: true };
-      else p.intent.state = 'unknown';
-    }
-    const stillMissing = prepared.filter((p) => p.intent.state === 'unknown');
-    if (stillMissing.length) {
-      this._lockTrading(`批量下单 ${stillMissing.length} 笔状态未知（intentId=${stillMissing.map((p) => p.intent.intentId).join(',')}），已锁定`);
-      throw new UnknownOrderStateError(`批量下单部分状态未知（${stillMissing.length} 笔）`, { intents: stillMissing.map((p) => p.intent.intentId) });
+    const results = [];
+    for (const p of prepared) {
+      try {
+        const rows = await this.client.createOrders([p.record]);
+        const raw = rows?.[0];
+        if (!raw?.orderId) throw new UnknownOrderStateError(`下单未返回 orderId（intentId=${p.intent.intentId}）`, { intentId: p.intent.intentId });
+        results.push(this._adoptCreated(raw, p.intent));
+      } catch (err) {
+        // 抛错即中止后续铺单（未知态已锁定/明确 400）；已成功的前几笔保留在 _orders 与 intent 日志中
+        results.push(await this._recoverIntent(err, p.intent));
+      }
     }
     return results;
   }

@@ -157,6 +157,8 @@
 - [√] 9.2a 分步冒烟脚本 `scripts/propr-smoke.mjs`（readonly / far-order / fill / reconnect / grid + `--allow-write` 门 + 基线干净护栏 + finally 清理）
   > 已在真实 Free Trial 账户逐步实测：readonly ✅、far-order ✅（买卖双向）、fill ✅（可成交单→成交→reduce-only 平仓→归零）、reconnect ✅（补偿次数=新成交数、无重复）；grid 步留待验收时显式执行
   > 实测发现契约事实：**价格带限制 13107**（2× 远价被拒、0.5× 可接受）→ 冒烟改用 ±10%
+- [√] 9.2b 【实测阻断修复】批量铺单不可用：Propr 一次请求只允许 1 笔开仓单（多笔需顶层 `orderGroupId`→13059，带组后仍 13066，连「1 开仓+1 平仓」也被拒）→ 适配器 `placeLimitOrders` 改为**逐笔串行**（`orderBatchSize=1`），对外仍等长返回；单笔异常沿用 intentId 对账
+  > VPS 上 `grid` 步报 `[400] null: Bad Request Exception` 的根因；已回填 `docs/propr-api-contract.md#3`
 - [ ] 9.3 编写"付费前人工确认清单"并评审（8 项，见 how.md#测试与部署），依赖任务 9.2
 - [ ] 9.4 付费 Challenge 实测（1x/close/无 recover）：购买账户 + 清单全通过后，`PR_MODE=challenge` + `PR_ALLOW_CHALLENGE=YES` + 白名单启动，人工每日检查，产出实测报告，依赖任务 9.3
 

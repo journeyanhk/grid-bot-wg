@@ -152,34 +152,39 @@ async function main() {
   }
 
   {
-    // 批量：必须与输入等长，且每笔 intentId 独立
+    // 批量铺单：Propr 限制「一次请求只允许 1 笔开仓单」（13066）→ 适配器必须串行逐笔发请求
     const ex = await freshExchange();
     const batch = [ORDER, { ...ORDER, side: 'sell', price: 100000, levelIndex: 4 }, { ...ORDER, price: 80000, levelIndex: 5 }];
     const results = await ex.placeLimitOrders(batch);
-    assert.equal(results.length, batch.length);
-    assert.equal(new Set(results.map((r) => r.clientOrderId)).size, 3);
+    assert.equal(results.length, batch.length, '结果必须与输入等长');
+    assert.equal(new Set(results.map((r) => r.clientOrderId)).size, 3, '每笔 intentId 独立');
+    assert.equal(state.createCalls, 3, '必须逐笔一次请求（不得使用批量接口）');
     ex.stop();
   }
 
   {
-    // 批量部分成功：响应缺一笔但该笔实际已创建 → 对账补齐，仍等长返回
+    // 批量中的单笔超时但实际已创建 → 该笔按 intentId 对账补齐，整体仍等长返回且不锁定
     const ex = await freshExchange();
     state.createBehavior = 'ok';
     const origFetch = globalThis.fetch;
+    let n = 0;
     globalThis.fetch = async (url, opts = {}) => {
       const u = String(url);
       if ((opts.method || 'GET') === 'POST' && u.includes('/orders') && !u.includes('/cancel')) {
+        n += 1;
         const body = JSON.parse(opts.body);
         const rows = body.orders.map(makeOrder);
         state.orders.push(...rows);
-        return jsonResponse({ data: rows.slice(0, rows.length - 1) }); // 故意少返回一笔
+        if (n === 2) throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }); // 第 2 笔响应丢失
+        return jsonResponse({ data: rows });
       }
       return origFetch(url, opts);
     };
     const results = await ex.placeLimitOrders([ORDER, { ...ORDER, levelIndex: 4 }]);
-    assert.equal(results.length, 2);
-    assert.ok(results[0].orderId && results[1].orderId);
     globalThis.fetch = origFetch;
+    assert.equal(results.length, 2);
+    assert.ok(results[0].orderId && results[1].orderId, '响应丢失的那笔须按 intentId 对账补齐');
+    assert.equal(ex.isTradingLocked(), false, '对账成功不应锁定');
     ex.stop();
   }
 

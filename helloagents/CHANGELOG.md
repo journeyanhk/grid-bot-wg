@@ -24,6 +24,15 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（批量铺单不可用：Propr 一次请求仅 1 笔开仓单，2026-09-24）
+- 根因：VPS `grid` 冒烟步报 `[400] null: Bad Request Exception`。原始错误体实测为
+  `13059 order_group_id_required_for_multiple_orders`（多笔必须带**顶层** `orderGroupId`，且须 ULID），
+  带上后仍命中 `13066 only_one_entry_order_allowed_per_request`——连「1 开仓 + 1 平仓」都被拒
+- 修复：适配器 `placeLimitOrders` 改为**逐笔串行**（`orderBatchSize=1`），对外仍返回与输入等长的结果；
+  单笔异常沿用 intentId 对账（超时先对账、绝不重复创建）；不使用 `createOrders` 多笔接口
+- 测试：批量用例改为断言「逐笔一次请求」（3 笔 → 3 次请求）与「响应丢失那笔按 intentId 对账补齐」
+- 文档：契约文档 §3 记录 13059/13066 与串行铺单结论；how.md 实现要点同步；`npm test` 全绿 + lint 0 error
+
 ### 新增（sim-write 分步冒烟脚本，2026-09-23）
 - `scripts/propr-smoke.mjs`：按任务 9.2 的分阶段路径逐步验收真实写路径——
   `readonly`（账户/契约/权益新鲜度）→ `far-order`（远价限价单→reconcile→撤单权威复核→终态确认，

@@ -98,6 +98,11 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 ## 3. 下单
 
 - **`createOrders([...])` 保留调用方 `intentId`**（实测回显一致）→ 幂等键可用；`createOrder()` 会覆盖 intentId（项目禁用，见 task 4.5）。
+- ⚠️ **一次请求只允许 1 笔开仓单（2026-09-24 实测）**：多笔请求必须带**顶层** `orderGroupId`
+  （ULID 格式，否则框架 400；不带则 `400/13059 order_group_id_required_for_multiple_orders`），
+  带组后仍命中 `400/13066 only_one_entry_order_allowed_per_request`——实测「1 开仓 + 1 平仓」
+  也被拒。⇒ **批量铺网不可用**：项目改为**串行逐笔下单**（适配器 `orderBatchSize=1`，
+  `placeLimitOrders` 内部逐笔循环，对外仍返回与输入等长的结果数组）。
 - ⚠️ **价格带限制（2026-09-23 实测）**：离市价过远的限价单会被拒——
   `[400] 13107: order_price_is_too_far_from_the_market_price`。
   实测 `0.5×`（-50%）可接受、`2×`（+100%）被拒；**边界未细测**，冒烟与网格一律用 ±10% 内。

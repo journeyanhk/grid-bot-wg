@@ -75,6 +75,8 @@
    - 单笔也用 `createOrders([record])`（`createOrder` 会覆盖 intentId），`record.intentId = ulid()`；本地先持久化 `intent`，再发请求。
    - 超时/网络错误：**不重试创建**，先 `reconcileOrders()`，按 `intentId` 匹配；匹配不到抛 `UnknownOrderStateError` → `TRADING_LOCKED`。
    - 批量 `placeLimitOrders` 必须与输入**等长**返回（`GridBot` 在 `bot.js:984` 强制校验）。
+     ⚠️ Propr **不支持批量开仓**（一次请求仅 1 笔开仓单，code 13066；多笔需顶层 `orderGroupId`，13059）→
+     适配器内部**逐笔串行**下单（`orderBatchSize=1`），对外仍等长返回；不使用 `createOrders` 多笔接口。
 
 6. **撤单与平仓**：
    - `cancelOrder` 不信任 SDK 的 400 吞并，先查 `getOrders({orderId})` 判定真实状态；
