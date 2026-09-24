@@ -273,6 +273,23 @@ async function main() {
     assert.equal(batch.length, 1, '全 reduce-only 批量必须放行');
     ex.stop();
   }
+
+  {
+    // intentId 必须是 ULID：GridBot 传的是纯数字 clientOrderId（bot.js:895），不能直接当 intentId
+    // （Propr 服务端校验 ULID，否则框架 400）→ 适配器须自生成 ULID 并保留原值留档
+    const ex = await freshExchange();
+    const numericId = 1790239336924; // 与 bot.js:895 同量级（13 位，安全整数）
+    const res = await ex.placeLimitOrder({ ...ORDER, clientOrderId: numericId });
+    assert.match(res.clientOrderId, /^[0-9A-HJKMNP-TV-Z]{26}$/, 'intentId 必须是 ULID 字符串');
+    const intent = ex.getIntents().find((i) => i.intentId === res.clientOrderId);
+    assert.equal(intent.clientRef, numericId, '原 clientOrderId 必须留档（clientRef）');
+
+    // 调用方给合法 ULID 时沿用（幂等键可控，供探针/冒烟使用）
+    const fixed = '01M399KX3A8KJNACAQZBSY983K';
+    const res2 = await ex.placeLimitOrder({ ...ORDER, clientOrderId: fixed, price: 81000 });
+    assert.equal(res2.clientOrderId, fixed, '合法 ULID 应沿用');
+    ex.stop();
+  }
 }
 
 main()

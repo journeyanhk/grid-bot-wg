@@ -32,8 +32,19 @@ const EQUITY_STALE_MS = 60_000;
 const TRADE_OVERLAP_MS = 30_000;
 const TRADE_MAX_PAGES = 5;
 const MAX_INTENTS = 500;
+const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/**
+ * intentId 必须是 ULID 字符串（Propr 服务端校验，非 ULID 直接框架 400）。
+ * GridBot 传的是纯数字 clientOrderId（bot.js:895），不能直接当 intentId——
+ * 合法 ULID 才沿用（幂等键可控），否则自生成并把原值留档到 `clientRef`。
+ */
+function toIntentId(clientOrderId) {
+  const s = clientOrderId == null ? '' : String(clientOrderId);
+  return ULID_RE.test(s) ? s : ulid();
+}
 
 export class ProprExchange extends EventEmitter {
   constructor(cfg = {}) {
@@ -632,7 +643,8 @@ export class ProprExchange extends EventEmitter {
     assertOrderPrecision({ price, sizeBase }, this.market);
     const positionSide = order.positionSide ?? (order.side === 'buy' ? 'long' : 'short');
     const intent = {
-      intentId: order.clientOrderId || ulid(), marketId, side: order.side, positionSide,
+      intentId: toIntentId(order.clientOrderId), clientRef: order.clientOrderId ?? null,
+      marketId, side: order.side, positionSide,
       price, sizeBase, reduceOnly: !!order.reduceOnly, levelIndex: order.levelIndex ?? null,
       state: 'created', createdAt: Date.now(),
     };
@@ -670,7 +682,8 @@ export class ProprExchange extends EventEmitter {
       assertOrderPrecision({ price, sizeBase }, this.market);
       const positionSide = order.positionSide ?? (order.side === 'buy' ? 'long' : 'short');
       const intent = {
-        intentId: order.clientOrderId || ulid(), marketId: this.base, side: order.side, positionSide,
+        intentId: toIntentId(order.clientOrderId), clientRef: order.clientOrderId ?? null,
+        marketId: this.base, side: order.side, positionSide,
         price, sizeBase, reduceOnly: !!order.reduceOnly, levelIndex: order.levelIndex ?? null,
         state: 'created', createdAt: Date.now(),
       };

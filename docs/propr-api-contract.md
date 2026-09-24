@@ -98,6 +98,9 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 ## 3. 下单
 
 - **`createOrders([...])` 保留调用方 `intentId`**（实测回显一致）→ 幂等键可用；`createOrder()` 会覆盖 intentId（项目禁用，见 task 4.5）。
+- ⚠️ **`intentId` 必须是 ULID 字符串（2026-09-24 实测）**：传纯数字/非 ULID 会被框架层拒绝
+  （`400 {"message":"Bad Request Exception"}`，无业务 code）。GridBot 传的是纯数字 `clientOrderId`
+  （`bot.js:895`）→ 适配器必须自生成 ULID 并把原值留档为 `clientRef`（合法 ULID 才沿用）。
 - ⚠️ **一次请求只允许 1 笔开仓单（2026-09-24 实测）**：多笔请求必须带**顶层** `orderGroupId`
   （ULID 格式，否则框架 400；不带则 `400/13059 order_group_id_required_for_multiple_orders`），
   带组后仍命中 `400/13066 only_one_entry_order_allowed_per_request`——实测「1 开仓 + 1 平仓」

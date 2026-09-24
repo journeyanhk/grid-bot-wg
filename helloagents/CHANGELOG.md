@@ -24,6 +24,15 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（intentId 必须 ULID：网格下单被框架 400 的真实根因，2026-09-24）
+- 根因：`grid` 冒烟步在批量修复后仍报 `[400] null: Bad Request Exception`（1 笔也失败）。
+  实测 Propr 要求 `intentId` 为 **ULID 字符串**，而 GridBot 传的是**纯数字** `clientOrderId`
+  （`bot.js:895`）→ 框架层校验失败（无业务 code，故难定位）
+- 修复：适配器新增 `toIntentId()`——合法 ULID 才沿用（幂等键可控），否则自生成 ULID，
+  原值留档为 `intent.clientRef`（与 HL 适配器 cloid 的处理约定一致）
+- 测试：新增「数字 clientOrderId → 自生成 ULID + clientRef 留档」「合法 ULID 沿用」用例
+- 文档：契约文档 §3 记录 intentId ULID 约束；`npm test` 全绿 + lint 0 error
+
 ### 修复（批量铺单不可用：Propr 一次请求仅 1 笔开仓单，2026-09-24）
 - 根因：VPS `grid` 冒烟步报 `[400] null: Bad Request Exception`。原始错误体实测为
   `13059 order_group_id_required_for_multiple_orders`（多笔必须带**顶层** `orderGroupId`，且须 ULID），
