@@ -149,11 +149,16 @@
 - [√] 8.3 处理重启恢复（进程重启走 seed 不补发历史成交，避免重复补单；`reconcileOrders()` + `fetchTradesWindow()` 供 bot.resume 对账重建状态），依赖任务 8.1、8.2
 
 ## 9. 四层验收（Review 5）
-- [ ] 9.1 Shadow 24h 验收：0 写请求、行情/持仓持续刷新、本地模拟网格正常、断线恢复、异常锁定，产出报告，依赖任务 6.3、7.3
-  > 验收清单已细化（11 项）见 how.md#Shadow-验收清单任务-91；越界 close 链路已用窄区间实测通过
+- [√] 9.1 Shadow 24h 验收：0 写请求、行情/持仓持续刷新、本地模拟网格正常、断线恢复、异常锁定，产出报告，依赖任务 6.3、7.3
+  > **验收通过**（11/11 项）：报告见 `docs/propr-shadow-acceptance.md`。要点：写请求恒 0、真实账户零接触、
+  > 快照无 stale、18 笔成交 / 6 完整格 / 网格利润 3.66、干净停机；断网与重启演练已人工执行通过；
+  > 越界 close 以窄区间强制触发实测通过
 - [ ] 9.2 Free Trial `sim-write` 24–72h 验收：批量挂单/撤单/成交/补单/部分成交/对账/重启恢复/手动停止/自动越界/多空持仓/reduceOnly/实际限频，按 how.md 验收指标表逐项达标，依赖任务 9.1
   > 必须按分阶段路径推进（只读→单笔远价单→撤单→单笔成交→reduce-only 平仓→断线恢复→4–6 格→15 格），
   > 不要从 Shadow 直接切整套 15 格
+  > **进展（2026-09-24）**：前 5 步全部通过（`scripts/propr-smoke.mjs` 的 readonly / far-order / fill /
+  > reconnect / grid 在 VPS 真实账户上全绿）；已切 `PR_MODE=sim-write` 并启动观察期网格（6 格，±2%），
+  > 待 24–72h 数据回收后记验收指标
 - [√] 9.2a 分步冒烟脚本 `scripts/propr-smoke.mjs`（readonly / far-order / fill / reconnect / grid + `--allow-write` 门 + 基线干净护栏 + finally 清理）
   > 已在真实 Free Trial 账户逐步实测：readonly ✅、far-order ✅（买卖双向）、fill ✅（可成交单→成交→reduce-only 平仓→归零）、reconnect ✅（补偿次数=新成交数、无重复）；grid 步留待验收时显式执行
   > 实测发现契约事实：**价格带限制 13107**（2× 远价被拒、0.5× 可接受）→ 冒烟改用 ±10%

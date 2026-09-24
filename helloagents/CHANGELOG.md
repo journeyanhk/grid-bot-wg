@@ -24,6 +24,15 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 验收（Propr Shadow 24h，任务 9.1 通过，2026-09-24）
+- **Shadow 验收通过（11/11 项）**，报告见 `docs/propr-shadow-acceptance.md`：
+  写请求恒 0、账户绑定正确、真实账户零接触、权益/持仓快照无 stale、API 新鲜度持续、
+  本地零重复下单/漏补/未知态、断网与进程重启演练通过、越界 close 链路实测通过、总览不混入、未连接拒绝启动
+- 运行表现：15 格中性网格（0.47% 间距 / 0.0015 BTC / 1x / close）→ **18 笔成交、6 个完整格、
+  网格利润 3.66 USDC**、零告警、干净停机
+- 同步：sim-write 分阶段验收前 5 步（readonly/far-order/fill/reconnect/grid）已在 VPS 真实账户全绿；
+  已切 `PR_MODE=sim-write` 启动 6 格观察期网格
+
 ### 修复（intentId 必须 ULID：网格下单被框架 400 的真实根因，2026-09-24）
 - 根因：`grid` 冒烟步在批量修复后仍报 `[400] null: Bad Request Exception`（1 笔也失败）。
   实测 Propr 要求 `intentId` 为 **ULID 字符串**，而 GridBot 传的是**纯数字** `clientOrderId`
