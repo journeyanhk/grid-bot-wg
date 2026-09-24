@@ -24,6 +24,17 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 新增（sim-write 分步冒烟脚本，2026-09-23）
+- `scripts/propr-smoke.mjs`：按任务 9.2 的分阶段路径逐步验收真实写路径——
+  `readonly`（账户/契约/权益新鲜度）→ `far-order`（远价限价单→reconcile→撤单权威复核→终态确认，
+  买卖双向）→ `fill`（可成交限价单→成交事件→净仓方向→fill 数量=实际成交量→reduce-only 平仓归零）
+  → `reconnect`（补偿次数=新成交数、无重复、无锁定）→ `grid`（4 格小网格完整周期，需显式指定）
+- 安全护栏：除 readonly 外必须 `--allow-write`；账户已有挂单/持仓时写步骤直接拒绝；
+  只操作脚本自建订单/仓位，`finally` 清理并复核残留
+- **实测发现契约事实**：Propr 存在**价格带限制**——`[400] 13107 order_price_is_too_far_from_the_market_price`
+  （2× 远价被拒、0.5× 可接受，边界未细测）→ 冒烟改用 ±10%；已回填 `docs/propr-api-contract.md`
+- 真实 Free Trial 账户逐步实测：readonly ✅ / far-order ✅ / fill ✅ / reconnect ✅（grid 留待验收显式执行）
+
 ### 修复/文档（Review7：参数与验收口径，2026-09-23）
 - 安全：`/api/propr/start` 增加**未连接拒绝启动**（`dataSource == null` 时不得用 paper 兜底价跑假网格）
 - 文档：how.md 新增「Shadow 第一版参数建议」（中性 / ±3.5% / 15 格 / 0.0015 BTC / 1x / close / 动态网格关闭）、

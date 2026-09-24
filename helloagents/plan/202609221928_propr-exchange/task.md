@@ -154,6 +154,9 @@
 - [ ] 9.2 Free Trial `sim-write` 24–72h 验收：批量挂单/撤单/成交/补单/部分成交/对账/重启恢复/手动停止/自动越界/多空持仓/reduceOnly/实际限频，按 how.md 验收指标表逐项达标，依赖任务 9.1
   > 必须按分阶段路径推进（只读→单笔远价单→撤单→单笔成交→reduce-only 平仓→断线恢复→4–6 格→15 格），
   > 不要从 Shadow 直接切整套 15 格
+- [√] 9.2a 分步冒烟脚本 `scripts/propr-smoke.mjs`（readonly / far-order / fill / reconnect / grid + `--allow-write` 门 + 基线干净护栏 + finally 清理）
+  > 已在真实 Free Trial 账户逐步实测：readonly ✅、far-order ✅（买卖双向）、fill ✅（可成交单→成交→reduce-only 平仓→归零）、reconnect ✅（补偿次数=新成交数、无重复）；grid 步留待验收时显式执行
+  > 实测发现契约事实：**价格带限制 13107**（2× 远价被拒、0.5× 可接受）→ 冒烟改用 ±10%
 - [ ] 9.3 编写"付费前人工确认清单"并评审（8 项，见 how.md#测试与部署），依赖任务 9.2
 - [ ] 9.4 付费 Challenge 实测（1x/close/无 recover）：购买账户 + 清单全通过后，`PR_MODE=challenge` + `PR_ALLOW_CHALLENGE=YES` + 白名单启动，人工每日检查，产出实测报告，依赖任务 9.3
 

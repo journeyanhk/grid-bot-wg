@@ -98,6 +98,9 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 ## 3. 下单
 
 - **`createOrders([...])` 保留调用方 `intentId`**（实测回显一致）→ 幂等键可用；`createOrder()` 会覆盖 intentId（项目禁用，见 task 4.5）。
+- ⚠️ **价格带限制（2026-09-23 实测）**：离市价过远的限价单会被拒——
+  `[400] 13107: order_price_is_too_far_from_the_market_price`。
+  实测 `0.5×`（-50%）可接受、`2×`（+100%）被拒；**边界未细测**，冒烟与网格一律用 ±10% 内。
 - 限价单默认 `timeInForce=GTC`；市价单 `IOC`。
 - 返回 `Order[]` 与输入等长。
 - 订单字段（实测）：`orderId, intentId, orderGroupId, exchangeOrderId, positionId, exchange, productType, asset, base, quote, type, side, positionSide, timeInForce, quantity, price, reduceOnly, closePosition, cumulativeQuantity, cumulativeQuote, averageFillPrice, cumulativeTradingFees, tradingFeeRate, status, createdAt, updatedAt`。
