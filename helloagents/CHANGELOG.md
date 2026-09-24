@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+## [1.6.10] - 2026-09-24
+
+### 新增
+- 市场三绿看门（重开窗口指示，设计稿 wg004-desgin12）：
+  - `src/market-gate.js`：纯函数 `computeGates`（门1 24h 振幅 ≤2.5% / 门2 EMA20 斜率 |%/h| ≤0.05 / 门3 96h 极值不在最近 24h）+ 轮询器（5 分钟节拍）
+  - 数据源：Binance 公共 K 线（免密钥）为主，连续失败 2 次自动切适配器 getCandles 兜底并标注 source
+  - 转绿/转红事件推送（连续 2 次确认防抖，Telegram/Webhook，冷却 6h）
+  - 总览页头部三绿小卡（三红绿点 + 数值 + 阈值 + 还差多少 + 数据源/更新/上次转绿），SSE 随 overview 载荷；`GET /api/market-gate` 只读
+  - AI 日报注入三绿状态一行
+  - 配置：MARKET_GATE=1/0、MARKET_GATE_SYMBOL=BTC（模块按实例设计，ANTH 等同构复用）
+
+### 说明
+- P1（resume-guard tick 重入保护）与 P2（resume 监听器 off-before-on）已在 v1.6.9 修复，本次核对确认（含专项测试），无需重复处理
+
+### 测试
+- test/market-gate.test.js 9 例（门边界/防抖/兜底切换/未收盘过滤）；npm test 全绿
+
 ## [1.6.9] - 2026-09-22
 
 ### 修复（Review23：v1.6.8 续跑看门狗复审）

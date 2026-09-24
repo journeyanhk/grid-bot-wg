@@ -23,6 +23,7 @@ import { createAiService } from './ai/service.js';
 import { createAuditService } from './audit.js';
 import { notifier } from './notify.js';
 import { createResumeGuard, tryResumeBot } from './resume-guard.js';
+import { createMarketGate } from './market-gate.js';
 import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
 
@@ -146,6 +147,7 @@ for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange, va
 const aiService = createAiService({
   bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
   exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  marketGate: () => marketGate, // 晚绑定：三绿看门创建于下方，AI 日报生成时读取
 });
 aiService.start();
 
@@ -515,8 +517,13 @@ const server = http.createServer(async (request, res) => {
     }
 
     // ── 总览 API ──────────────────────────────────────────────────────────
+    if (p === '/api/market-gate') {
+      return send(res, 200, marketGate ? marketGate.snapshot() : { enabled: false });
+    }
+
     if (p === '/api/overview') {
       return send(res, 200, {
+        marketGate: marketGate ? marketGate.snapshot() : null,
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
@@ -536,6 +543,7 @@ const server = http.createServer(async (request, res) => {
       // send the current snapshot immediately (don't leave the client blank
       // until the next 1s broadcast tick)
       const initial = {
+        marketGate: marketGate ? marketGate.snapshot() : null,
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
@@ -755,6 +763,7 @@ setInterval(() => {
     const hlState = hlBot.getState();
     const vaState = vaBot.getState();
     const overview = {
+      marketGate: marketGate ? marketGate.snapshot() : null,
       de: pick(deState, cfg.de.mode),
       ex: pick(exState, cfg.ex.mode),
       rs: pick(rsState, cfg.rs.mode),
@@ -872,6 +881,33 @@ const resumeGuard = createResumeGuard({
   loadSnapshot, notifier, logger,
 });
 resumeGuard.start();
+
+// ── 市场三绿看门（重开窗口指示：BTC 1h 三指标）──────────────────────────────
+// 主源 Binance 公共 K 线（免密钥）；连续失败 2 次自动切换适配器 getCandles 兜底。
+// MARKET_GATE=0 可关闭；MARKET_GATE_SYMBOL 改标的（默认 BTC）。
+let marketGate = null;
+if (String(process.env.MARKET_GATE || '1') !== '0') {
+  const normSym = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const fallbackFetcher = async () => {
+    for (const [name, ex] of [['Extended', exExchange], ['RHC', lrExchange], ['Decibel', deExchange], ['RISEx', rsExchange], ['Entropy', hlExchange], ['Variational', vaExchange]]) {
+      try {
+        if (ex?.dataSource == null) continue;
+        const markets = await ex.getMarkets();
+        const m = markets.find((x) => normSym(x.symbol) === 'BTC' || normSym(x.displayName).startsWith('BTC') || normSym(x.name).startsWith('BTC'));
+        if (!m) continue;
+        const candles = await ex.getCandles(m.marketId, 3600, 96);
+        if (Array.isArray(candles) && candles.length >= 25) return { candles, source: name };
+      } catch { /* 换下一家 */ }
+    }
+    return null;
+  };
+  marketGate = createMarketGate({
+    fetchFallback: fallbackFetcher,
+    notifier, logger,
+    config: { symbol: process.env.MARKET_GATE_SYMBOL || 'BTC' },
+  });
+  marketGate.start();
+}
 
 // After init, surface any LEFTOVER position so the dashboard can prompt the user
 // (recovery ladder / re-grid / market close). Decibel & Extended RE-NUMBER their

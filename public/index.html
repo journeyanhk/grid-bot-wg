@@ -361,6 +361,16 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
 .total-card .lbl { font-size: 10px; color: var(--mut2); text-transform: uppercase; letter-spacing: .4px; }
 .total-card .val { font-size: 20px; font-weight: 700; margin: 3px 0 1px; }
 .total-card .sub { font-size: 11px; color: var(--mut2); }
+/* ── 市场三绿看门条（重开窗口指示） ── */
+.mg-strip { display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:var(--panel2); border:1px solid var(--border2); border-radius:8px; padding:8px 14px; margin-bottom:14px; font-size:12px; }
+.mg-strip .mg-title { font-weight:600; color:var(--mut2); }
+.mg-strip .mg-item b { font-weight:600; }
+.mg-strip .mg-item small { color:var(--mut2); margin-left:5px; }
+.mg-strip .mg-dot { margin-right:4px; }
+.mg-strip .mg-dot.ok { color:#22c55e; } .mg-strip .mg-dot.bad { color:#ef4444; }
+.mg-strip .mg-verdict { font-weight:700; }
+.mg-strip .mg-verdict.ok { color:#22c55e; } .mg-strip .mg-verdict.bad { color:#ef4444; }
+.mg-strip .mg-meta { color:var(--mut2); margin-left:auto; }
 
 /* ── Responsive ── */
 @media (max-width: 1100px) {
@@ -505,6 +515,16 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div class="val" id="tot-running" style="font-size:14px;margin-top:6px">—</div>
       <div class="sub" id="tot-modes">—</div>
     </div>
+  </div>
+
+  <!-- 市场三绿看门（重开窗口指示） -->
+  <div id="market-gate" class="mg-strip" style="display:none">
+    <span class="mg-title">🚦 重开窗口 · <span id="mg-symbol">BTC</span> 三绿</span>
+    <span class="mg-item"><span class="mg-dot" id="mg-amp-dot">●</span>24h振幅 <b id="mg-amp">—</b><small id="mg-amp-need"></small></span>
+    <span class="mg-item"><span class="mg-dot" id="mg-slope-dot">●</span>斜率 <b id="mg-slope">—</b><small id="mg-slope-need"></small></span>
+    <span class="mg-item"><span class="mg-dot" id="mg-extreme-dot">●</span>极值 <b id="mg-extreme">—</b><small id="mg-extreme-need"></small></span>
+    <span class="mg-verdict" id="mg-verdict">—</span>
+    <span class="mg-meta" id="mg-meta">—</span>
   </div>
 
   <!-- 三交易所独立概览 -->
@@ -2588,8 +2608,43 @@ function renderOverviewPosition(prefix, d) {
     + `<div class="ov-stat"><span class="lbl">未实现盈亏</span><span class="val">${pnlHtml(p.unrealizedPnl)}</span></div>`;
 }
 
+/** 市场三绿看门条渲染（重开窗口指示）。 */
+function renderMarketGate(mg) {
+  const el = $('market-gate');
+  if (!el) return;
+  if (!mg) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  $('mg-symbol').textContent = mg.symbol || 'BTC';
+  const set = (id, ok, text, need) => {
+    $(id + '-dot').className = 'mg-dot ' + (ok ? 'ok' : 'bad');
+    $(id).textContent = text;
+    $(id + '-need').textContent = need || '';
+  };
+  const v = mg.values || {}, t = mg.thresholds || {}, g = mg.greens || {};
+  if (!mg.ok) {
+    set('mg-amp', false, '—', '数据暂不可用');
+    set('mg-slope', false, '—', '');
+    set('mg-extreme', false, '—', '');
+    $('mg-verdict').className = 'mg-verdict bad';
+    $('mg-verdict').textContent = '⚠ 数据异常';
+  } else {
+    set('mg-amp', g.amplitude, `${v.amplitudePct}%`, `需 ≤${t.ampMaxPct}%`);
+    set('mg-slope', g.slope, `${v.slopePctPerH}%/h`, `需 |·|≤${t.slopeMaxPctPerH}`);
+    set('mg-extreme', g.noNewExtreme, `${v.extremeAgeH}h`, `需 ≥${t.extremeRecent}h`);
+    $('mg-verdict').className = 'mg-verdict ' + (mg.allGreen ? 'ok' : 'bad');
+    $('mg-verdict').textContent = mg.allGreen ? '🟢 可重开' : '🔴 等待';
+  }
+  const src = mg.source ? `源 ${mg.source}` : '源 —';
+  const ts = mg.ts ? new Date(mg.ts).toLocaleTimeString('zh-CN') : '—';
+  const last = mg.lastGreenAt
+    ? `上次转绿 ${new Date(mg.lastGreenAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+    : '未出现过转绿';
+  $('mg-meta').textContent = `${src} · 更新 ${ts} · ${last}`;
+}
+
 function renderOverview(data) {
   lastOverview = data;
+  renderMarketGate(data.marketGate);
   // 三所汇总
   let totEquity = 0, totBalance = 0, totPnl = 0, totRealized = 0, totUnrealized = 0, totVolume = 0, totRungs = 0;
   let running = 0;

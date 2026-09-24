@@ -27,6 +27,7 @@
 | exchange | 四交易所适配器（live + paper + 签名） | ✅稳定 | [exchange](modules/exchange.md) |
 | ai | AI 助手（provider 适配 + 哨兵/日报/对话） | ✅稳定 | [ai](modules/ai.md) |
 | platform | 基础层（配置/持久化/代理/K线分析/日志） | ✅稳定 | [platform](modules/platform.md) |
+| market-gate | 市场三绿看门（重开窗口指示） | ✅稳定 | [market-gate](modules/market-gate.md) |
 
 ---
 
