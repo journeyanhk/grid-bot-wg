@@ -262,6 +262,7 @@ export class ShadowExchange extends PaperExchange {
 
   /** 仪表盘公开信息（shadow 写请求恒为 0；Propr 快照失败时标 stale，不伪装空仓）。 */
   getPublicInfo() {
+    const apiOkAt = Math.max(this.proprAccountLastOkAt, this.proprPositionLastOkAt);
     return {
       exchange: 'Propr',
       mode: 'shadow',
@@ -280,6 +281,12 @@ export class ShadowExchange extends PaperExchange {
       marketLastOkAt: this.marketLastOkAt || null,
       proprAccountLastOkAt: this.proprAccountLastOkAt || null,
       proprPositionLastOkAt: this.proprPositionLastOkAt || null,
+      // 与 sim-write 对齐的别名：验收/面板可用同一套字段名（Review7 部署体验）
+      lastApiOkAt: apiOkAt || null,
+      lastPriceOkAt: this.marketLastOkAt || null,
+      equitySource: this.proprEquity ? 'propr_account' : null,
+      equityStale: this.proprAccountStale,
+      ordersSnapshotStale: false, // shadow 无交易所挂单快照（挂单在本地）
     };
   }
 }
