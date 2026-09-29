@@ -89,6 +89,13 @@ async function main() {
     assert.equal(risk.getState().currentEquity, 5000);
     assert.equal(risk.getState().startOfDayEquity, 5000);
 
+    // 账户级盈亏口径（Review9：+14 USDC 需能拆出"相对起始权益"）
+    ex.equity = 5050;
+    await risk.tick();
+    assert.equal(risk.getState().totalPnl, 50);
+    assert.equal(risk.getState().totalPnlPct, 1);
+    ex.equity = 5000;
+
     // 未实现亏损：balance 不变、equity 下降 → 日损 2% → REDUCE_ONLY
     ex.equity = 4900;
     await risk.tick();

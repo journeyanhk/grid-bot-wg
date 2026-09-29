@@ -32,6 +32,14 @@ const EQUITY_STALE_MS = 60_000;
 const TRADE_OVERLAP_MS = 30_000;
 const TRADE_MAX_PAGES = 5;
 const MAX_INTENTS = 500;
+// 轮询失败退避（按连续失败次数索引；0/1 不额外退避，避免单次抖动就降频）。
+// 账户轮询（订单/持仓/成交/权益）最长 60s；行情轮询最长 30s。
+const API_BACKOFF_MS = [0, 0, 3000, 6000, 12000, 30000, 60000];
+const PRICE_BACKOFF_MS = [0, 0, 2000, 4000, 8000, 15000, 30000];
+// 同类错误日志/事件聚合窗口：首次立即记录，之后每 60s 一条（带抑制计数）。
+// 背景（Review9）：3s 轮询遇 Propr 500/502 时，适配器 warn + bot error + server exchange error
+// 三层重复落盘，2 分钟故障刷 100+ 行日志，真实异常被淹没。
+const ERR_AGG_MS = 60_000;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -98,6 +106,14 @@ export class ProprExchange extends EventEmitter {
     this._pollTimer = null;
     this._pollLight = false;
     this._stopped = false;
+    // 故障退避与日志聚合（Review9）
+    this._apiFailStreak = 0;
+    this._priceFailStreak = 0;
+    this._nextApiPollAt = 0;
+    this._nextPricePollAt = 0;
+    this._lastErrLogAt = 0;
+    this._lastErrEmitAt = 0;
+    this._errSuppressed = 0;
     // 写路径（Review 3）：意图日志（幂等键 → 意图）+ 交易锁定
     this._intents = new Map();
     this.tradingLocked = false;
@@ -399,6 +415,7 @@ export class ProprExchange extends EventEmitter {
       });
       this._orders.delete(t.orderId);
     }
+    return fresh.length; // 供恢复日志统计"本轮补偿成交数"
   }
 
   /** 原始成交（保持 Propr 字段口径）。 */
@@ -442,32 +459,72 @@ export class ProprExchange extends EventEmitter {
   // ── 轮询 ──────────────────────────────────────────────────────────────────
 
   async _pollPrice() {
+    if (Date.now() < (this._nextPricePollAt || 0)) return; // 退避中：跳过本轮
     try {
       const px = await this._fetchMidPrice();
       if (px > 0) {
         this._price = px;
         this.lastPriceOkAt = Date.now(); // 只代表行情健康，不代表 Propr API 健康（Review4 P1）
+        this._priceFailStreak = 0;
+        this._nextPricePollAt = 0;
         this.emit('price', { marketId: this.base, price: px });
       }
-    } catch (err) { this._emitError(err); }
+    } catch (err) {
+      this._priceFailStreak += 1;
+      this._nextPricePollAt = Date.now() + PRICE_BACKOFF_MS[Math.min(this._priceFailStreak, PRICE_BACKOFF_MS.length - 1)];
+      this._emitError(err, 'price');
+    }
   }
 
   async _poll() {
+    if (Date.now() < (this._nextApiPollAt || 0)) return; // 退避中：跳过本轮
     try {
       await this._refreshPositions();
       await this._refreshOpenOrders();
-      await this._refreshTrades();
+      const freshFills = await this._refreshTrades();
       await this._refreshEquity().catch(() => { this.equityStale = true; });
+      const recovered = this._apiFailStreak > 0;
+      this._apiFailStreak = 0;
+      this._nextApiPollAt = 0;
       this.lastApiOkAt = Date.now();
       this.lastOkAt = this.lastApiOkAt; // 看门狗（sim-write/challenge）以此为准
-    } catch (err) { this._emitError(err); }
+      if (recovered) {
+        // 恢复必须显式对账（Review9）：挂单/净仓/补偿成交/权益一并落日志，便于审计
+        const net = this.getPosition();
+        const suppressed = this._errSuppressed;
+        this._errSuppressed = 0;
+        this._lastErrLogAt = 0;
+        this._lastErrEmitAt = 0;
+        logger.info('propr', `Propr API 恢复：对账完成（挂单 ${this._orders.size} / 净仓 ${net ? net.sizeBase : 0} / 本轮补偿成交 ${freshFills} / 权益 ${this.balance}）${suppressed ? `（故障期间抑制 ${suppressed} 条同类日志）` : ''}`);
+      }
+    } catch (err) {
+      this._apiFailStreak += 1;
+      this._nextApiPollAt = Date.now() + API_BACKOFF_MS[Math.min(this._apiFailStreak, API_BACKOFF_MS.length - 1)];
+      this._emitError(err, 'api');
+    }
   }
 
-  _emitError(err) {
-    // 统一走 mapProprError（分类 + 脱敏）：事件会被 server/SSE/通知/AI 直接消费（Review2 P1）
+  /**
+   * 统一安全错误事件（分类 + 脱敏 + **聚合**）。
+   * Review9：3s 轮询遇 Propr 500/502 时，适配器 warn + bot error + server exchange error
+   * 三层重复落盘 → 真实异常被淹没。此处按 60s 窗口聚合：首次立即记录/发事件，
+   * 窗口内仅累加抑制计数，恢复时统一输出一条 info（见 `_poll`）。
+   */
+  _emitError(err, scope = 'api') {
     const mapped = mapProprError(err);
-    logger.warn('propr', `Propr 轮询异常(${mapped.kind}): ${mapped.message}`, mapped);
-    if (this.listenerCount('error') > 0) {
+    const now = Date.now();
+    const streak = scope === 'price' ? this._priceFailStreak : this._apiFailStreak;
+    if (!this._lastErrLogAt || now - this._lastErrLogAt >= ERR_AGG_MS) {
+      const suppressed = this._errSuppressed;
+      logger.warn('propr', `Propr 轮询异常(${mapped.kind})${suppressed ? `（已聚合抑制 ${suppressed} 条同类）` : ''}: ${mapped.message}`, { ...mapped, scope, streak });
+      this._lastErrLogAt = now;
+      this._errSuppressed = 0;
+    } else {
+      this._errSuppressed += 1;
+    }
+    // 事件同样聚合：bot / server 监听器会各自落盘，聚合后三层日志同步降为 1 条/分钟
+    if (this.listenerCount('error') > 0 && (!this._lastErrEmitAt || now - this._lastErrEmitAt >= ERR_AGG_MS)) {
+      this._lastErrEmitAt = now;
       this.emit('error', Object.assign(new Error(mapped.message), mapped));
     }
   }
@@ -869,6 +926,10 @@ export class ProprExchange extends EventEmitter {
       attemptStatus: this.attemptStatus,
       startingBalance: this.startingBalance,
       risk: this.riskState,
+      // 连接健康（Review9）：healthy=正常 / degraded=近期有失败但已恢复 / stale=快照或权益不可用（禁止开仓）
+      apiStatus: (this.ordersSnapshotStale || this.equityStale) ? 'stale' : (this._apiFailStreak > 0 ? 'degraded' : 'healthy'),
+      apiFailStreak: this._apiFailStreak,
+      priceFailStreak: this._priceFailStreak,
     };
   }
 }

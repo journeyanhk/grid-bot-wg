@@ -162,7 +162,6 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 ---
 
 ## 7. 冻结状态
-
 ### 已冻结（有实测依据）
 
 1. Propr 账户为模拟账户（`type=paper`、`exchange=hyperliquid`、`currency=USDC`）
@@ -191,3 +190,7 @@ Node fetch 不读系统代理，需 `PR_PROXY=http://127.0.0.1:10808`（探针�
 7. 市价单在快速行情下的成交与滑点
 8. 挑战日损/回撤日切是否与 UTC 一致（Free Trial 无风控约束，需付费账户验证）
 9. 限价单 `exchangeOrderId` 何时落值（4s 后仍为 null；疑为路由/成交后才写）
+10. Propr API 稳定性：5 天 sim-write 观察期内出现 1 次 `500 10001` 连续故障（≈2 分钟）+
+    11 次孤立 `502 unknown_error` / `fetch failed`，另有 1 次 Hyperliquid 行情 `502/504`（≈3 分钟）。
+    客户端处置：开仓 fail-closed、reduce-only 不受影响、退避重试、恢复后自动对账
+    （详见 `docs/propr-simwrite-observation.md`）；**进入付费 Challenge 前要求连续 ≥48h 无 5xx**

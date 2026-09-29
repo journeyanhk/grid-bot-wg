@@ -184,20 +184,57 @@ async function main() {
   {
     // P1：行情（HL 公开 API）正常但 Propr API 全挂 → 新鲜度必须分离，
     // 否则 server 看门狗会被行情成功误判为"Propr 健康"。
-    const ex2 = new ProprExchange(cfg);
-    await ex2.init();
-    await ex2._poll(); // 先成功一轮，置位 lastApiOkAt
-    const apiBefore = ex2.lastApiOkAt;
+    const ex3 = new ProprExchange(cfg);
+    await ex3.init();
+    await ex3._poll(); // 先成功一轮，置位 lastApiOkAt
+    const apiBefore = ex3.lastApiOkAt;
     assert.ok(apiBefore > 0, '成功轮询后 lastApiOkAt 必须置位');
 
     state.failApi = true;
     await new Promise((r) => setTimeout(r, 5));
-    await ex2._pollPrice(); // 行情仍成功
-    await ex2._poll();      // Propr API 全失败
-    assert.ok(ex2.lastPriceOkAt > 0, '行情成功必须推进 lastPriceOkAt');
-    assert.equal(ex2.lastApiOkAt, apiBefore, 'Propr API 失败不得推进 lastApiOkAt（看门狗不得误判健康）');
-    assert.ok(ex2.getPublicInfo().lastApiOkAt === apiBefore, 'getPublicInfo 必须暴露 lastApiOkAt');
+    await ex3._pollPrice(); // 行情仍成功
+    await ex3._poll();      // Propr API 全失败
+    assert.ok(ex3.lastPriceOkAt > 0, '行情成功必须推进 lastPriceOkAt');
+    assert.equal(ex3.lastApiOkAt, apiBefore, 'Propr API 失败不得推进 lastApiOkAt（看门狗不得误判健康）');
+    assert.equal(ex3.getPublicInfo().lastApiOkAt, apiBefore, 'getPublicInfo 必须暴露 lastApiOkAt');
     state.failApi = false;
+    ex3.stop();
+  }
+
+  {
+    // Review9：故障退避 + 错误聚合 + 恢复对账（不刷日志、不丢对账）
+    const ex2 = new ProprExchange(cfg);
+    await ex2.init();
+    await ex2._poll(); // 健康一轮
+    assert.equal(ex2._apiFailStreak, 0);
+    assert.equal(ex2.getPublicInfo().apiStatus, 'healthy');
+
+    const errs = [];
+    ex2.on('error', (e) => errs.push(e));
+    state.failApi = true;
+    await ex2._poll(); // 第 1 次失败：不额外退避（仍按 3s 节奏重试）
+    assert.equal(ex2._apiFailStreak, 1, '失败计数累计');
+    assert.equal(errs.length, 1, '首次失败立即发一条事件');
+    await ex2._poll(); // 第 2 次失败：触发退避
+    assert.equal(ex2._apiFailStreak, 2);
+    assert.ok(ex2._nextApiPollAt > Date.now(), '连续失败必须退避（避免 3s 轮询刷屏）');
+
+    const nextAt = ex2._nextApiPollAt;
+    await ex2._poll(); // 退避期内
+    assert.equal(ex2._apiFailStreak, 2, '退避期内不得再次请求/累计失败');
+    assert.equal(ex2._nextApiPollAt, nextAt, '退避时刻不变');
+    assert.equal(errs.length, 1, '聚合窗口内不重复发事件');
+
+    state.failApi = false;
+    ex2._nextApiPollAt = 0; // 手动放行退避（测试不等 60s）
+    await ex2._poll();
+    assert.equal(ex2._apiFailStreak, 0, '恢复后失败计数清零');
+    assert.equal(ex2.getPublicInfo().apiStatus, 'healthy');
+    assert.ok(ex2.lastApiOkAt > 0, '恢复后 API 新鲜度置位');
+
+    ex2.ordersSnapshotStale = true;
+    assert.equal(ex2.getPublicInfo().apiStatus, 'stale', '快照不完整必须标记 stale（禁止开仓）');
+    ex2.ordersSnapshotStale = false;
     ex2.stop();
   }
 }

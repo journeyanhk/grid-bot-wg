@@ -24,6 +24,18 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review9：API 故障退避与日志聚合，2026-09-29）
+- **故障退避**：账户轮询（订单/持仓/成交/权益）连续失败按 3/6/12/30/60s 退避（封顶 60s），
+  行情轮询 2/4/8/15/30s；成功即复位——此前固定 3s 重试，故障期间持续压 API 并刷日志
+- **错误聚合**：同类错误日志与 `error` 事件按 60s 窗口聚合（首次立即、窗口内仅计数、恢复时汇总），
+  解决"适配器 warn + bot error + server exchange error"三层重复落盘（2 分钟故障 100+ 行）
+- **恢复对账日志**：恢复时输出一条 info（挂单 / 净仓 / 本轮补偿成交 / 权益 / 抑制条数），便于审计
+- **连接健康位**：`exchangeInfo.apiStatus = healthy | degraded | stale`（+ `apiFailStreak/priceFailStreak`）
+- **账户级盈亏**：风控状态新增 `totalPnl / totalPnlPct`（相对起始权益），便于与手续费/未实现盈亏对账
+- 新增 `docs/propr-simwrite-observation.md`：5 天观察记录（35 笔成交 / +13.21 USDC / 1 次 500 连续故障 +
+  11 次孤立 502，全部 fail-closed 并自动恢复，无重复下单/漏补/未知态）与 **Challenge 门槛**
+- 测试：故障退避/错误聚合/恢复清零/`apiStatus`/`totalPnl` 用例；`npm test` 全绿 + lint 0 error
+
 ### 验收（Propr Shadow 24h，任务 9.1 通过，2026-09-24）
 - **Shadow 验收通过（11/11 项）**，报告见 `docs/propr-shadow-acceptance.md`：
   写请求恒 0、账户绑定正确、真实账户零接触、权益/持仓快照无 stale、API 新鲜度持续、

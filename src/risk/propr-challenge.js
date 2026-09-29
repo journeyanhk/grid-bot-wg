@@ -174,6 +174,11 @@ export class ProprChallengeRisk {
       drawdownPct: pct(this.drawdownPct),
       dailyUsage,
       drawdownUsage: ddUsage,
+      // 账户级盈亏（Review9：+14 USDC 需能拆出"相对起始权益"的口径）
+      totalPnl: (this.currentEquity != null && this.initialEquity != null)
+        ? Number((this.currentEquity - this.initialEquity).toFixed(4)) : null,
+      totalPnlPct: (this.currentEquity != null && this.initialEquity > 0)
+        ? Number((((this.currentEquity - this.initialEquity) / this.initialEquity) * 100).toFixed(4)) : null,
       internalDailyStopPct: this.internalDailyStopPct,
       internalMaxDrawdownPct: this.internalMaxDrawdownPct,
       platformDailyLimitPct: this.platformDailyLimitPct,
