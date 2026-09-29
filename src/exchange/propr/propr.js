@@ -40,6 +40,8 @@ const PRICE_BACKOFF_MS = [0, 0, 2000, 4000, 8000, 15000, 30000];
 // 背景（Review9）：3s 轮询遇 Propr 500/502 时，适配器 warn + bot error + server exchange error
 // 三层重复落盘，2 分钟故障刷 100+ 行日志，真实异常被淹没。
 const ERR_AGG_MS = 60_000;
+// 失败恢复后的"降级观察窗"：窗口内 apiStatus=degraded（快照已完整但近期有失败）
+const DEGRADED_WINDOW_MS = 5 * 60_000;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -111,9 +113,9 @@ export class ProprExchange extends EventEmitter {
     this._priceFailStreak = 0;
     this._nextApiPollAt = 0;
     this._nextPricePollAt = 0;
-    this._lastErrLogAt = 0;
     this._lastErrEmitAt = 0;
-    this._errSuppressed = 0;
+    this._errAgg = new Map();  // 错误日志聚合：key=`scope:kind:status` → { lastLogAt, suppressed }
+    this._lastFailAt = 0;      // 最近一次失败时刻（apiStatus=degraded 的观察窗）
     // 写路径（Review 3）：意图日志（幂等键 → 意图）+ 交易锁定
     this._intents = new Map();
     this.tradingLocked = false;
@@ -433,23 +435,30 @@ export class ProprExchange extends EventEmitter {
   // ── 权益（权威字段 + 新鲜度，ADR-004）─────────────────────────────────────
 
   async _refreshEquity() {
-    const attempt = await this.client.getChallengeAttempt(this.attemptId);
-    const acc = attempt?.account || {};
-    const balance = Number(acc.balance);
-    if (!Number.isFinite(balance)) {
+    try {
+      const attempt = await this.client.getChallengeAttempt(this.attemptId);
+      const acc = attempt?.account || {};
+      const balance = Number(acc.balance);
+      if (!Number.isFinite(balance)) {
+        this.equityStale = true;
+        throw new ProprStartupError('Propr account.balance 不可用（权益字段缺失）');
+      }
+      this.attemptStatus = attempt?.status ?? null;
+      this.startingBalance = Number(attempt?.phases?.[0]?.startingBalance) || this.startingBalance || null;
+      this.balance = balance;
+      this.equity = Number(acc.marginBalance ?? balance);
+      this.highWaterMark = Number(acc.highWaterMark ?? 0);
+      this.availableBalance = Number(acc.availableBalance ?? 0);
+      this.totalUnrealizedPnl = Number(acc.totalUnrealizedPnl ?? 0);
+      this.equitySource = 'propr_account';
+      this.equityFreshAt = Date.now();
+      this.equityStale = false;
+    } catch (err) {
+      // 任何失败（网络/500/字段缺失）都必须标 stale 并向上抛：
+      // 否则风控会拿旧权益当"新鲜"继续算日损（Review9-1 P1 的更深一层问题）
       this.equityStale = true;
-      throw new ProprStartupError('Propr account.balance 不可用（权益字段缺失）');
+      throw err;
     }
-    this.attemptStatus = attempt?.status ?? null;
-    this.startingBalance = Number(attempt?.phases?.[0]?.startingBalance) || this.startingBalance || null;
-    this.balance = balance;
-    this.equity = Number(acc.marginBalance ?? balance);
-    this.highWaterMark = Number(acc.highWaterMark ?? 0);
-    this.availableBalance = Number(acc.availableBalance ?? 0);
-    this.totalUnrealizedPnl = Number(acc.totalUnrealizedPnl ?? 0);
-    this.equitySource = 'propr_account';
-    this.equityFreshAt = Date.now();
-    this.equityStale = false;
   }
 
   get equityAgeMs() { return this.equityFreshAt ? Date.now() - this.equityFreshAt : Infinity; }
@@ -482,7 +491,8 @@ export class ProprExchange extends EventEmitter {
       await this._refreshPositions();
       await this._refreshOpenOrders();
       const freshFills = await this._refreshTrades();
-      await this._refreshEquity().catch(() => { this.equityStale = true; });
+      // 不吞异常（Review9-1 P1）：权益失败必须计入失败/退避，且不得推进 lastApiOkAt
+      await this._refreshEquity();
       const recovered = this._apiFailStreak > 0;
       this._apiFailStreak = 0;
       this._nextApiPollAt = 0;
@@ -491,11 +501,10 @@ export class ProprExchange extends EventEmitter {
       if (recovered) {
         // 恢复必须显式对账（Review9）：挂单/净仓/补偿成交/权益一并落日志，便于审计
         const net = this.getPosition();
-        const suppressed = this._errSuppressed;
-        this._errSuppressed = 0;
-        this._lastErrLogAt = 0;
+        const suppressed = [...this._errAgg.values()].reduce((s, v) => s + (v.suppressed || 0), 0);
+        this._errAgg.clear();
         this._lastErrEmitAt = 0;
-        logger.info('propr', `Propr API 恢复：对账完成（挂单 ${this._orders.size} / 净仓 ${net ? net.sizeBase : 0} / 本轮补偿成交 ${freshFills} / 权益 ${this.balance}）${suppressed ? `（故障期间抑制 ${suppressed} 条同类日志）` : ''}`);
+        logger.info('propr', `Propr API 恢复：对账完成（挂单 ${this._orders.size} / 净仓 ${net ? net.sizeBase : 0} / 本轮补偿成交 ${freshFills} / 权益 ${this.balance}）${suppressed ? `（故障期间聚合抑制 ${suppressed} 条同类日志）` : ''}`);
       }
     } catch (err) {
       this._apiFailStreak += 1;
@@ -505,24 +514,26 @@ export class ProprExchange extends EventEmitter {
   }
 
   /**
-   * 统一安全错误事件（分类 + 脱敏 + **聚合**）。
-   * Review9：3s 轮询遇 Propr 500/502 时，适配器 warn + bot error + server exchange error
-   * 三层重复落盘 → 真实异常被淹没。此处按 60s 窗口聚合：首次立即记录/发事件，
-   * 窗口内仅累加抑制计数，恢复时统一输出一条 info（见 `_poll`）。
+   * 统一安全错误事件（分类 + 脱敏 + **按 scope/kind/status 分组聚合**）。
+   * Review9/9-1：3s 轮询遇 Propr 500/502 时，适配器 warn + bot error + server exchange error
+   * 三层重复落盘 → 真实异常被淹没。日志按 `scope:kind:status` 分别聚合（各 60s 窗口，
+   * 首次立即、窗口内计数、恢复时汇总）；`error` 事件仍全局节流（下游 bot/server 各自落盘）。
    */
   _emitError(err, scope = 'api') {
     const mapped = mapProprError(err);
     const now = Date.now();
     const streak = scope === 'price' ? this._priceFailStreak : this._apiFailStreak;
-    if (!this._lastErrLogAt || now - this._lastErrLogAt >= ERR_AGG_MS) {
-      const suppressed = this._errSuppressed;
-      logger.warn('propr', `Propr 轮询异常(${mapped.kind})${suppressed ? `（已聚合抑制 ${suppressed} 条同类）` : ''}: ${mapped.message}`, { ...mapped, scope, streak });
-      this._lastErrLogAt = now;
-      this._errSuppressed = 0;
+    const key = `${scope}:${mapped.kind}:${mapped.statusCode ?? ''}`;
+    const slot = this._errAgg.get(key) || { lastLogAt: 0, suppressed: 0 };
+    if (!slot.lastLogAt || now - slot.lastLogAt >= ERR_AGG_MS) {
+      logger.warn('propr', `Propr 轮询异常(${mapped.kind})${slot.suppressed ? `（已聚合抑制 ${slot.suppressed} 条同类）` : ''}: ${mapped.message}`, { ...mapped, scope, streak });
+      slot.lastLogAt = now;
+      slot.suppressed = 0;
     } else {
-      this._errSuppressed += 1;
+      slot.suppressed += 1;
     }
-    // 事件同样聚合：bot / server 监听器会各自落盘，聚合后三层日志同步降为 1 条/分钟
+    this._errAgg.set(key, slot);
+    this._lastFailAt = now;
     if (this.listenerCount('error') > 0 && (!this._lastErrEmitAt || now - this._lastErrEmitAt >= ERR_AGG_MS)) {
       this._lastErrEmitAt = now;
       this.emit('error', Object.assign(new Error(mapped.message), mapped));
@@ -926,8 +937,9 @@ export class ProprExchange extends EventEmitter {
       attemptStatus: this.attemptStatus,
       startingBalance: this.startingBalance,
       risk: this.riskState,
-      // 连接健康（Review9）：healthy=正常 / degraded=近期有失败但已恢复 / stale=快照或权益不可用（禁止开仓）
-      apiStatus: (this.ordersSnapshotStale || this.equityStale) ? 'stale' : (this._apiFailStreak > 0 ? 'degraded' : 'healthy'),
+      // 连接健康（Review9/9-1）：healthy=正常 / degraded=近期有失败但当前快照完整 / stale=快照或权益不可用（禁止开仓）
+      apiStatus: (this.ordersSnapshotStale || this.equityStale) ? 'stale'
+        : ((this._apiFailStreak > 0 || (this._lastFailAt && Date.now() - this._lastFailAt < DEGRADED_WINDOW_MS)) ? 'degraded' : 'healthy'),
       apiFailStreak: this._apiFailStreak,
       priceFailStreak: this._priceFailStreak,
     };

@@ -168,6 +168,9 @@
   > 观察记录见 `docs/propr-simwrite-observation.md`（5 天 / 35 笔 / +13.21 USDC；1 次 500 连续故障 +
   > 11 次孤立 502/fetch failed，全部按设计 fail-closed 并自动恢复，无重复下单/漏补/未知态）
   > 待达成 Challenge 门槛：连续 ≥48h 无 Propr 5xx、≥50 笔成交、≥7 天
+- [√] 9.2d 【Review9-1 修复】权益失败可见性：`_refreshEquity` 任何失败先标 stale 再抛（此前网络错误
+  在标 stale 前抛出 → 权益失联不可见）；`_poll` 不再吞异常 → 计失败/退避/不推进 `lastApiOkAt`；
+  错误聚合按 scope:kind:status 分组；`degraded` = 恢复后 5 分钟观察窗；风控持久化接线加静态断言
 - [ ] 9.3 编写"付费前人工确认清单"并评审（8 项，见 how.md#测试与部署），依赖任务 9.2
 - [ ] 9.4 付费 Challenge 实测（1x/close/无 recover）：购买账户 + 清单全通过后，`PR_MODE=challenge` + `PR_ALLOW_CHALLENGE=YES` + 白名单启动，人工每日检查，产出实测报告，依赖任务 9.3
 

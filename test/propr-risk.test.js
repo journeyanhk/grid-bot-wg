@@ -70,6 +70,17 @@ function mkBot() {
   assert.ok(r.dailyLossPct < 0 && r.drawdownPct < 0, '百分比约定：负数=亏损');
 }
 
+{
+  // Review9-1（复核）：风控实例必须接入 snapshot 持久化——防止 server.js 接线被误删
+  // （日初权益若不持久化，UTC 日中途重启会把当日已亏的权益当成新基准，削弱日损保护）
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  assert.ok(
+    /new ProprChallengeRisk\(\{[^}]*loadSnapshot,\s*saveSnapshot/.test(src),
+    'server.js 必须把 loadSnapshot/saveSnapshot 传给 ProprChallengeRisk',
+  );
+}
+
 async function main() {
   {
     const ex = mkExchange();

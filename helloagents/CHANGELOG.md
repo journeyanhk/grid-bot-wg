@@ -24,6 +24,20 @@
 - Day-0 契约探针 `scripts/propr-probe.mjs`：只读链 + 写权限门（`--allow-write`）的订单/幂等/持仓链；
   绝不盲撤单/盲平仓，仅处理本探针创建的订单与开出的仓位增量
 
+### 修复（Review9-1：权益失败可见性与聚合细化，2026-09-29）
+- **P1 权益刷新失败不再被吞**：`_refreshEquity()` 任何失败（网络/500/字段缺失）都先标
+  `equityStale=true` 再向上抛——此前**网络错误在标 stale 之前就抛出**，导致"权益失联但既不标 stale
+  也不计失败"（比复审报告描述更严重）；`_poll` 不再 `.catch()` 吞异常 → 失败计入 `apiFailStreak`、
+  进入退避、**不推进 `lastApiOkAt`**（看门狗与风控都能看见）
+- **P1 风控持久化复核**：确认 `server.js:156` 已传入 `loadSnapshot/saveSnapshot`（7S.4 / `ce79efe` 起，
+  复审报告此条不成立）→ 新增**静态接线断言**防误删
+- 错误聚合细化：按 `scope:kind:status` 分组（此前 price/api 共用一个 60s 窗口会互相掩盖）
+- `apiStatus=degraded` 语义明确：恢复后 5 分钟观察窗内为 degraded（快照已完整但近期有失败）
+- 复核确认：API 退避期间 `closePosition / cancelOrder / cancelAll` **不受** `_nextApiPollAt` 阻塞
+  （降风险路径独立于账户轮询退避）
+- 测试：新增"仅权益接口失败"用例（stale + 不推进新鲜度 + 计失败）、degraded 观察窗、接线断言；
+  `npm test` 全绿 + lint 0 error
+
 ### 修复（Review9：API 故障退避与日志聚合，2026-09-29）
 - **故障退避**：账户轮询（订单/持仓/成交/权益）连续失败按 3/6/12/30/60s 退避（封顶 60s），
   行情轮询 2/4/8/15/30s；成功即复位——此前固定 3s 重试，故障期间持续压 API 并刷日志

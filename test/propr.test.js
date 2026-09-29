@@ -4,7 +4,7 @@ import { strict as assert } from 'node:assert';
 import { ProprExchange } from '../src/exchange/propr/propr.js';
 
 const ACCOUNT = 'acc-1234567890';
-const state = { orders: [], trades: [], positions: [], failApi: false };
+const state = { orders: [], trades: [], positions: [], failApi: false, failAttempt: false };
 const realFetch = globalThis.fetch;
 
 function jsonResponse(body, status = 200) {
@@ -51,6 +51,9 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.startsWith('https://api.hyperliquid.xyz/info')) {
     if (body?.type === 'allMids') return jsonResponse({ BTC: '90000' });
     if (body?.type === 'candleSnapshot') return jsonResponse([{ t: 1725000000000, o: '1', h: '2', l: '0.5', c: '1.5', v: '10' }]);
+  }
+  if (state.failAttempt && u.includes('/challenge-attempts/a1')) {
+    return jsonResponse({ message: 'equity down' }, 500);
   }
   if (state.failApi && (u.includes('/positions') || u.includes('/orders') || u.includes('/trades') || u.includes('/challenge-attempts/a1'))) {
     return jsonResponse({ message: 'propr api down' }, 500);
@@ -229,13 +232,41 @@ async function main() {
     ex2._nextApiPollAt = 0; // 手动放行退避（测试不等 60s）
     await ex2._poll();
     assert.equal(ex2._apiFailStreak, 0, '恢复后失败计数清零');
-    assert.equal(ex2.getPublicInfo().apiStatus, 'healthy');
+    assert.equal(ex2.getPublicInfo().apiStatus, 'degraded', '恢复后 5 分钟观察窗内为 degraded');
     assert.ok(ex2.lastApiOkAt > 0, '恢复后 API 新鲜度置位');
+    ex2._lastFailAt = 0; // 观察窗结束
+    assert.equal(ex2.getPublicInfo().apiStatus, 'healthy');
 
     ex2.ordersSnapshotStale = true;
     assert.equal(ex2.getPublicInfo().apiStatus, 'stale', '快照不完整必须标记 stale（禁止开仓）');
     ex2.ordersSnapshotStale = false;
     ex2.stop();
+  }
+
+  {
+    // Review9-1 P1：权益刷新失败不得被吞掉——必须标 stale、计失败、且不推进 lastApiOkAt
+    // （否则风控会拿旧权益当"新鲜"继续算日损，看门狗也看不出权益 API 已失联）
+    const ex4 = new ProprExchange(cfg);
+    await ex4.init();
+    await ex4._poll();
+    const apiBefore = ex4.lastApiOkAt;
+    assert.equal(ex4.getPublicInfo().apiStatus, 'healthy');
+
+    state.failAttempt = true; // 仅 getChallengeAttempt 失败，其余读取正常
+    await new Promise((r) => setTimeout(r, 5));
+    await ex4._poll();
+    assert.equal(ex4.equityStale, true, '权益失败必须标 stale（风控将 LOCKED）');
+    assert.equal(ex4.lastApiOkAt, apiBefore, '权益失败不得推进 lastApiOkAt');
+    assert.equal(ex4._apiFailStreak, 1, '权益失败必须计入失败计数（进入退避）');
+    assert.equal(ex4.getPublicInfo().apiStatus, 'stale');
+
+    state.failAttempt = false;
+    ex4._nextApiPollAt = 0;
+    await ex4._poll();
+    assert.equal(ex4.equityStale, false, '恢复后权益新鲜');
+    assert.equal(ex4._apiFailStreak, 0);
+    assert.ok(ex4.lastApiOkAt > apiBefore, '恢复后 API 新鲜度推进');
+    ex4.stop();
   }
 }
 
