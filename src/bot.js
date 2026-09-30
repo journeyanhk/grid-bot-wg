@@ -1980,6 +1980,8 @@ export class GridBot {
       placeFails: this._placeFails,
       exchangeOpenOrders: this._exchangeOpenOrders,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
+      // 空快照率（Review14）：>30% 即抖动降级——降级状态必须可见
+      snapshotEmptyRatePct: (typeof ex.snapshotEmptyRatePct === 'function') ? ex.snapshotEmptyRatePct() : null,
     };
   }
 

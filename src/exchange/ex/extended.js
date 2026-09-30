@@ -14,6 +14,7 @@
 // that reports its filledQty); only a positively-confirmed fill is reported.
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
+import { createSnapshotJitterWatcher } from '../snapshot-jitter.js';
 import {
   selfTest, orderMsgHash, starkSign, settlementAmounts, alignToStep, parseDec, toHex,
   publicKeyFromPrivate,
@@ -44,6 +45,24 @@ export class ExtendedExchange extends EventEmitter {
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
     this._emptyStreakStart = 0; // 空快照连击起点（>3min 升级健康事件）
+    // 抖动检测器（Review14）：连击时长逻辑对"高频翻转"失明（0 秒连击 ×1306 次 = 静默降级）；
+    // 滑动窗口空快照率 >30%（近10分钟/≥10轮）升级健康事件，恢复自动清除。
+    this._snapWatch = createSnapshotJitterWatcher({
+      tag: 'ex', label: 'Extended', logger,
+      onIssue: (j) => {
+        this.operationalIssue = {
+          title: 'Extended 挂单快照高频抖动',
+          message: `成交确认降级中（近10分钟空快照率 ${j.emptyRatePct}%，${j.empties}/${j.rounds} 轮）；建议重连交易所，持续抖动请记录会话差异并升级 WS 改造`,
+        };
+        if (Date.now() - (this._jitterAlertAt || 0) > 30_000) {
+          this._jitterAlertAt = Date.now();
+          this.emit('error', new Error(`Extended 挂单快照高频抖动：空快照率 ${j.emptyRatePct}%（${j.empties}/${j.rounds} 轮）——成交确认降级中，建议重连交易所。`));
+        }
+      },
+      onRecover: () => {
+        if (this.operationalIssue?.title === 'Extended 挂单快照高频抖动') this.operationalIssue = null;
+      },
+    });
     this.lastError = null;
     this.domain = DOMAINS[this.network] || DOMAINS.mainnet;
     this.markets = new Map();   // marketId -> market
@@ -321,6 +340,9 @@ export class ExtendedExchange extends EventEmitter {
     for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id);
   }
 
+  /** 空快照率（健康详情展示：降级状态必须可见）。 */
+  snapshotEmptyRatePct() { return this._snapWatch ? this._snapWatch.emptyRatePct() : null; }
+
   getPosition(marketId) {
     const p = this._pos.get(Number(marketId));
     return p && p.sizeBase !== 0 ? p : null;
@@ -382,8 +404,10 @@ export class ExtendedExchange extends EventEmitter {
         // open orders -> fill detection
         let open = null;
         try { open = await this._get(`/api/v1/user/orders?market=${encodeURIComponent(m.name)}`); } catch { open = null; }
+        // 抖动检测（Review14）：滑动窗口统计（有效快照轮次；取数失败不计数）
+        this._snapWatch.record(open, this._tracked.size);
         // 适配器层空快照守卫（Review10 P2）：接口预热/抖动返回空数组但本地 tracking 很多时，
-        // 视为异常快照 —— 本轮不做任何 gone 判定（不启动/累积 goneFirstAt），等下轮复核，
+        // 视为异常快照 —— 本轮不做任何 gone 判定（不启动/累积 goneAttempts），等下轮复核，
         // 避免一次预热毛刺预支整梯 10 分钟耐心后批量判死。
         if (Array.isArray(open) && open.length === 0 && this._tracked.size >= 10) {
           if (!this._emptyStreakStart) this._emptyStreakStart = Date.now();

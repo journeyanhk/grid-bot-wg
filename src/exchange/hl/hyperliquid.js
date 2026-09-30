@@ -17,6 +17,7 @@
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
+import { createSnapshotJitterWatcher } from '../snapshot-jitter.js';
 import { HLSignerBridge } from './signer.js';
 import {
   CANDLE_RESOLUTIONS, HL_API_URL, HL_DEX, HL_INFO_URL, HL_MIN_NOTIONAL_USD,
@@ -54,6 +55,18 @@ export class HyperliquidExchange extends EventEmitter {
     this._fillsStartMs = Date.now() - FILLS_BACKFILL_MS; this._filledSeen = new Set(); // 环形上限，防内存泄漏
     this._timer = null; this._polling = false; this._tradingReady = false;
     this._lastAlertAt = 0; this._emptyStreakStart = 0; this._lastEmptyWarnAt = 0; this._clientSeq = 0;
+    // 抖动检测器（Review14）：滑动窗口空快照率
+    this._snapWatch = createSnapshotJitterWatcher({
+      tag: 'hl', label: 'HL', logger,
+      onIssue: (j) => {
+        this.operationalIssue = {
+          title: 'HL 活跃挂单快照高频抖动',
+          message: `成交确认降级中（近10分钟空快照率 ${j.emptyRatePct}%，${j.empties}/${j.rounds} 轮）；建议重连交易所。`,
+        };
+        if (Date.now() - this._lastAlertAt > 30_000) { this._lastAlertAt = Date.now(); this.emit('error', new Error(`HL 挂单快照高频抖动：空快照率 ${j.emptyRatePct}%（${j.empties}/${j.rounds} 轮）——成交确认降级中。`)); }
+      },
+      onRecover: () => { if (this.operationalIssue?.title === 'HL 活跃挂单快照高频抖动') this.operationalIssue = null; },
+    });
     this.supportsSafeOpeningRetry = true;
     this.orderBatchSize = SAFE_GRID_BATCH;
     this._adaptivePaceMs = SAFE_GRID_BATCH_PACE_MS;
@@ -254,6 +267,8 @@ export class HyperliquidExchange extends EventEmitter {
 
   async _refreshOrders() {
     const rows = await this._fetchActiveOrders();
+    // 抖动检测（Review14）：滑动窗口统计（取数失败不计数）
+    this._snapWatch.record(rows, this._tracked.size);
     // 空快照守卫（对齐 EX v1.5.4）：一次空数组不给全梯启动 gone 计时
     if (Array.isArray(rows) && rows.length === 0 && this._tracked.size >= 10) {
       if (!this._emptyStreakStart) this._emptyStreakStart = Date.now();
@@ -308,6 +323,8 @@ export class HyperliquidExchange extends EventEmitter {
 
   async fetchOpenOrders(marketId) { return this._fetchActiveOrders(marketId); }
   getOpenOrders(marketId) { return [...this._tracked.values()].filter((o) => o.marketId === Number(marketId)); }
+  /** 空快照率（健康详情展示）。 */
+  snapshotEmptyRatePct() { return this._snapWatch ? this._snapWatch.emptyRatePct() : null; }
   forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
   forgetOrders(marketId) { for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id); }
   adoptOrder(order) { this._tracked.set(String(order.orderId), { ...order, orderId: String(order.orderId), marketId: Number(order.marketId), seen: true, placedAt: Date.now() }); }
@@ -439,7 +456,9 @@ export class HyperliquidExchange extends EventEmitter {
         this._lastMarketsAt = now;
         await this._loadMarkets();
       }
-      this.lastOkAt = Date.now(); this.lastError = null; this.operationalIssue = null;
+      this.lastOkAt = Date.now(); this.lastError = null;
+      // 抖动降级态由检测器管理（Review14）：poll 成功不得清除
+      if (this.operationalIssue?.title !== 'HL 活跃挂单快照高频抖动') this.operationalIssue = null;
     } catch (e) { this.lastError = e?.message || String(e); this._setIssue(e); }
     finally { this._polling = false; }
   }

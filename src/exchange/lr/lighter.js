@@ -8,6 +8,7 @@
 // because a connection went stale.
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
+import { createSnapshotJitterWatcher } from '../snapshot-jitter.js';
 import { LighterSignerBridge } from './signer.js';
 import {
   CANDLE_RESOLUTIONS, RHC_API_URL, RHC_CHAIN_ID, RHC_WS_URL,
@@ -52,6 +53,18 @@ export class LighterExchange extends EventEmitter {
     this._accountUnrealizedPnl = 0; this._lastPnlAttemptAt = 0; this.lastPnlError = null;
     this._timer = null; this._polling = false; this._auth = null; this._authExpiresAt = 0; this._txTail = Promise.resolve();
     this._clientSeq = 0; this._lastAlertAt = 0; this._tradingReady = false;
+    // 抖动检测器（Review14）：滑动窗口空快照率，补"连击时长"守卫的盲区
+    this._snapWatch = createSnapshotJitterWatcher({
+      tag: 'lr', label: 'RHC', logger,
+      onIssue: (j) => {
+        this.operationalIssue = {
+          title: 'RHC 活跃挂单快照高频抖动',
+          message: `成交确认降级中（近10分钟空快照率 ${j.emptyRatePct}%，${j.empties}/${j.rounds} 轮）；建议重连交易所。`,
+        };
+        if (Date.now() - this._lastAlertAt > 30_000) { this._lastAlertAt = Date.now(); this.emit('error', new Error(`RHC 挂单快照高频抖动：空快照率 ${j.emptyRatePct}%（${j.empties}/${j.rounds} 轮）——成交确认降级中。`)); }
+      },
+      onRecover: () => { if (this.operationalIssue?.title === 'RHC 活跃挂单快照高频抖动') this.operationalIssue = null; },
+    });
     // GridBot capability/policy hints. Opening-order retries are allowed only
     // because GridBot performs two authoritative order snapshots and de-dupes
     // by grid level before every retry.
@@ -457,12 +470,16 @@ export class LighterExchange extends EventEmitter {
     }));
   }
   getOpenOrders(marketId) { return [...this._tracked.values()].filter((o) => o.marketId === Number(marketId)); }
+  /** 空快照率（健康详情展示）。 */
+  snapshotEmptyRatePct() { return this._snapWatch ? this._snapWatch.emptyRatePct() : null; }
   forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
   forgetOrders(marketId) { for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id); }
   adoptOrder(order) { this._tracked.set(String(order.orderId), { ...order, orderId: String(order.orderId), marketId: Number(order.marketId), seen: true, placedAt: Date.now() }); }
 
   async _refreshOrders() {
     const activeRows = await this._fetchActiveOrders();
+    // 抖动检测（Review14）：滑动窗口统计（取数失败不计数）
+    this._snapWatch.record(activeRows, this._tracked.size);
     // P2 空快照守卫（Review16，对齐 EX v1.5.4）：RHC 曾出现 502/空数组——
     // 一次 200+空数组会给全梯启动计时，后续毛刺触发幻影推定成交。空快照但本地
     // 跟踪多视为异常，本轮不做任何 gone 判定；持续 >3 分钟升级运营健康事件。
@@ -563,7 +580,9 @@ export class LighterExchange extends EventEmitter {
       if (!this._pollLight) { // 铺单期间跳过，让出请求预算给下单
         await this._refreshAccount(); await this._refreshPnl(); await this._refreshOrders();
       }
-      this.lastOkAt = Date.now(); this.lastError = null; this.operationalIssue = null;
+      this.lastOkAt = Date.now(); this.lastError = null;
+      // 抖动降级态由检测器管理（Review14）：poll 成功不得清除，否则状态在红/清间抖动
+      if (this.operationalIssue?.title !== 'RHC 活跃挂单快照高频抖动') this.operationalIssue = null;
     } catch (e) { this.lastError = e?.message || String(e); this._setIssue(e); }
     finally { this._polling = false; }
   }
