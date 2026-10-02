@@ -5,6 +5,10 @@
 普通 curl 会吃 403 挑战页，curl_cffi impersonate="chrome" 是 200。所以把你现在的
 vr-token 贴进环境变量就能在服务器上跑，把三份剩余硬样本一次抓齐。
 
+另外：Omni 现已改为"5 分钟 access token + 长期 ll-token"双 token 模型（2026-09），
+`refresh` 子命令专门探测 /api/auth/refresh 的可用性（Cloudflare 放行 / cookie 最小集 /
+限速 / Set-Cookie 轮换 / 新 token 可打账户接口），是自动续期改造的 go/no-go。
+
 用法（默认 --dry-run，不真发写请求，只打印将要做什么）：
     export VARIATIONAL_TOKEN='eyJ...'            # 必填：vr-token cookie 值（JWT）
     export VA_ADDRESS='0x8Ac2417...'             # 建议：vr-connected-address
@@ -19,6 +23,8 @@ vr-token 贴进环境变量就能在服务器上跑，把三份剩余硬样本�
     python3 scripts/va_probe.py reject-trigger --run  # 硬触发风控拒单（临时改杠杆=1）
     python3 scripts/va_probe.py cancel-filled <rfq_id> --run
     python3 scripts/va_probe.py ws               # WS 持仓行结构（只读，可选）
+    export VA_LL_TOKEN='WMSw...'                 # 5 分钟 token 续期探针（wg004-desgin15 go/no-go）
+    python3 scripts/va_probe.py refresh --run    # cookie 矩阵 + 限速 + 新 token 可用性验证
 
 每个子命令把 (status, headers, body) 原样落到 probe_<cmd>_<ts>.json。
 ladder / reject 结束时会自动把本合约 pending 撤到 0 并打印仓位确认无意外成交。
@@ -427,8 +433,130 @@ def cmd_reject_trigger(_args):
     dump("reject-trigger", out)
 
 
+# ── refresh 探针（wg004-desgin15：Omni 5 分钟 access + 长期 ll-token 续期）────
+LL_TOKEN = os.environ.get("VA_LL_TOKEN", "").strip()
+
+
+def _mask(s, keep=8):
+    s = str(s or "")
+    return (s[:keep] + f"\u2026({len(s)}B)") if s else ""
+
+
+def _jwt_claims(token):
+    # 解 JWT payload（不验签），取 iat/exp/session_id 供对照
+    try:
+        import base64
+        parts = str(token).split(".")
+        if len(parts) < 2:
+            return {}
+        b = parts[1].replace("-", "+").replace("_", "/")
+        b += "=" * (-len(b) % 4)
+        return json.loads(base64.urlsafe_b64decode(b).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _refresh_call(cookie, with_address=True):
+    # POST /api/auth/refresh（空 body）。返回 (status, headers, body, set_cookies)
+    h = dict(BROWSER_HEADERS)
+    h["content-type"] = "application/json"
+    h["Referer"] = f"{BASE}/portfolio?tab=positions"
+    if with_address and ADDR:
+        h["vr-connected-address"] = ADDR
+    h["Cookie"] = cookie
+    r = _session.request("POST", BASE + "/api/auth/refresh", headers=h, data=b"", timeout=15)
+    setck = {}
+    try:
+        for c in r.cookies.jar:
+            setck[c.name] = {"masked": _mask(c.value), "expires": c.expires, "domain": c.domain}
+    except Exception:
+        pass
+    parsed = None
+    try:
+        parsed = r.json() if r.text and r.text.strip() else None
+    except Exception:
+        parsed = {"_raw": r.text[:300]}
+    return r.status_code, {k.lower(): v for k, v in dict(r.headers).items()}, parsed, setck
+
+
+def _refresh_variant(name, cookie, with_address=True):
+    st, hdr, body, setck = _refresh_call(cookie, with_address=with_address)
+    tok = body.get("token") if isinstance(body, dict) else None
+    cf = bool(hdr.get("cf-mitigated")) or (st in (403, 503) and "just a moment" in (json.dumps(body) or ""))
+    claims = _jwt_claims(tok) if tok else {}
+    rec = {
+        "status": st, "cloudflare": cf, "cf_mitigated": hdr.get("cf-mitigated"),
+        "token_masked": _mask(tok), "claims": {k: claims.get(k) for k in ("iat", "exp", "auth_at", "session_id")} if claims else None,
+        "set_cookies": setck, "body_head": (json.dumps(body, ensure_ascii=False)[:200] if body is not None else None),
+    }
+    print(f"  [{name}] HTTP {st}" + (" \u26a0Cloudflare" if cf else "") + (f" token={_mask(tok)} exp={claims.get('exp')}" if tok else ""))
+    return rec
+
+
+def cmd_refresh(_args):
+    # VA 续期探针（go/no-go）：验证 /api/auth/refresh 是否被 Cloudflare 放行、
+    # 最小 cookie 集、限速、Set-Cookie 轮换，并用新 token 真打一次账户接口。
+    # 需要 export VA_LL_TOKEN（浏览器 F12 → Application → Cookies → vr-ll-token）。
+    if not LL_TOKEN:
+        print("需要 VA_LL_TOKEN（浏览器 Application→Cookies→vr-ll-token 的值）", file=sys.stderr)
+        raise SystemExit(2)
+    out = {
+        "ll_token_masked": _mask(LL_TOKEN), "address": ADDR,
+        "note": "ll-token 寿命请在 DevTools 查看 Expires 列并记入 docs/omni-api.md；本探针按 go/no-go 三项判定",
+    }
+    if DRY:
+        print("[dry] 将执行：cookie 矩阵 4 变体 + 10 连发限速 + 新 token 打 /api/portfolio 验证")
+        dump("refresh", {"_dry": True})
+        return
+    addr_suffix = f"; vr-connected-address={ADDR}" if ADDR else ""
+    addr_cookie = f"; vr-ll-token-{ADDR.lower()}={LL_TOKEN}" if ADDR else ""
+
+    print("== 1) cookie 矩阵 ==")
+    matrix = {}
+    matrix["ll_only"] = _refresh_variant("ll_only", f"vr-ll-token={LL_TOKEN}{addr_suffix}")
+    matrix["ll_plus_expired_vr"] = _refresh_variant("ll_plus_expired_vr", f"vr-ll-token={LL_TOKEN}; vr-token={TOKEN or 'expired.invalid'}{addr_suffix}")
+    matrix["ll_plus_addr_copy"] = _refresh_variant("ll_plus_addr_copy", f"vr-ll-token={LL_TOKEN}{addr_cookie}{addr_suffix}")
+    matrix["ll_no_addr_header"] = _refresh_variant("ll_no_addr_header", f"vr-ll-token={LL_TOKEN}", with_address=False)
+
+    print("== 2) 限速：10 连发 @2s ==")
+    codes, last_token = {}, None
+    for i in range(10):
+        st, hdr, body, _ = _refresh_call(f"vr-ll-token={LL_TOKEN}{addr_suffix}")
+        codes[st] = codes.get(st, 0) + 1
+        if isinstance(body, dict) and body.get("token"):
+            last_token = body["token"]
+        time.sleep(2.0)
+    print(f"  状态码分布：{codes}")
+
+    print("== 3) 新 token 可用性验证（/api/portfolio）==")
+    validation = None
+    if last_token:
+        h = dict(BROWSER_HEADERS)
+        h["Referer"] = f"{BASE}/portfolio"
+        if ADDR:
+            h["vr-connected-address"] = ADDR
+        h["Cookie"] = f"vr-token={last_token}{addr_suffix}"
+        r = _session.request("GET", BASE + "/api/portfolio?compute_margin=true", headers=h, timeout=15)
+        validation = {"status": r.status_code, "body_head": (r.text or "")[:200]}
+        print(f"  HTTP {r.status_code}：{(r.text or '')[:120]}")
+    else:
+        print("  无可用新 token（上一步全部失败）")
+
+    out.update({"matrix": matrix, "rate_codes": codes, "validation": validation})
+    ok_matrix = matrix["ll_only"]["status"] == 200
+    ok_rate = codes.get(200, 0) >= 8
+    ok_valid = bool(validation and validation.get("status") == 200)
+    out["verdict"] = "PASS" if (ok_matrix and ok_rate and ok_valid) else "FAIL"
+    out["checks"] = {"refresh_accepted": ok_matrix, "rate_ok": ok_rate, "token_usable": ok_valid,
+                     "cloudflare_challenged": any(v.get("cloudflare") for v in matrix.values())}
+    print(f"\n===== 探针结论：{out['verdict']}（受理={ok_matrix} 限速={ok_rate} 可用={ok_valid} CF挑战={out['checks']['cloudflare_challenged']}）=====")
+    print("把上面的矩阵/限速/验证输出和 probe_refresh_*.json 一起贴回即可。")
+    dump("refresh", out)
+
+
 COMMANDS = {
     "caps": cmd_caps, "tick": cmd_tick, "ladder": cmd_ladder, "reject": cmd_reject,
+    "refresh": cmd_refresh,
     "reject-trigger": cmd_reject_trigger, "cancel-all": cmd_cancel_all,
     "cancel-one": cmd_cancel_one, "cancel-id": cmd_cancel_id,
     "cancel-filled": cmd_cancel_filled, "rate": cmd_rate, "ws": cmd_ws,
@@ -445,7 +573,7 @@ def main(argv):
         return 1
     if DRY and args[0] not in ("caps", "rate", "ws"):
         print("== DRY-RUN（加 --run 才真发写请求）==")
-    if not TOKEN:
+    if not TOKEN and args[0] != "refresh":
         print("提示：未设置 VARIATIONAL_TOKEN，脚本需要它读取行情/账户；请在服务器上 export 后再运行。", file=sys.stderr)
         return 2
     try:

@@ -30,3 +30,5 @@ __pycache__/
 
 # 运行期产物：自动登录 token 缓存等
 .runtime/
+# VA 探针产物
+probe_*.json
