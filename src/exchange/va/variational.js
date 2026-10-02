@@ -179,7 +179,10 @@ export class VariationalExchange extends EventEmitter {
   // 通知总线对升级立即放行，档内则按各自 cooldown 去重，既不漏也不刷屏。
   _checkTokenLife({ throttle = false } = {}) {
     const now = Date.now();
-    if (throttle && now - this._lastTokenCheckAt < TOKEN_CHECK_THROTTLE_MS) return;
+    // Review24 P1：refresh 模式的续期健康阈值是 3/5 分钟，检查节流必须同步降到 60s，
+    // 否则续期停滞最坏 30 分钟后才告警（交易在第 5 分钟就已中断）。
+    const gap = this.auth.mode() === 'refresh' ? 60_000 : TOKEN_CHECK_THROTTLE_MS;
+    if (throttle && now - this._lastTokenCheckAt < gap) return;
     this._lastTokenCheckAt = now;
     // refresh 模式：access token 常态短寿，改报"续期健康"（距上次成功续期时长）
     if (this.auth.mode() === 'refresh') {

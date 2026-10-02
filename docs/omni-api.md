@@ -38,3 +38,10 @@
 - `GET /api/positions`（auth）、`GET /api/orders/v2?...`（auth）
 - `POST /api/orders/new/limit`、`/api/orders/cancel`（auth，见 va_probe.py）
 - `POST /api/auth/login`：SIWE 登录，**被 Cloudflare managed challenge 拦**（curl_cffi 过不去）→ 自动登录不可用，只能贴 token / refresh
+
+## 部署注意（v1.6.12+ 自动续期）
+- **升级后必须删除旧缓存** `.runtime/va_token.json`（旧会话 token 会被当作续期上下文 → 400）
+- 首次启用：浏览器登录一次 → 同时复制 `vr-token` + `vr-ll-token`（同一次登录、相邻两行）
+- 重启日志应出现"会话续期模式已启用"→ 5 分钟后 `totalRefresh ≥ 1`；此后只有凭证失效才需人工
+- 未知项实验（待做）：机器人运行中在网页端重新登录，观察下一次 refresh 返回 200 还是 400——
+  决定"上网页看仓位"是否会打断机器人（若会：只看只读仪表盘，或每次网页操作后重贴两枚）

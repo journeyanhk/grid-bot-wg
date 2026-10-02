@@ -223,16 +223,26 @@ const mkCache = () => path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random(
   } finally { Date.now = origNow; }
 }
 
-// ⑮ 连续失败分级：≥2 warn（onAlert）、400 会带 detail
+// ⑮-a 400（会话不匹配/ll 失效）立即 critical，不等第 4 次（Review24 P2-1）
 {
   const alerts = [];
   const http = makeRefreshHttp(async () => ({ ok: false, status: 400, detail: 'Unable to refresh session' }));
   const a = new VaAuth({ http, address: '0xA', llToken: 'll', envToken: jwt(inHours(0.01)), onAlert: (m) => alerts.push(m) });
-  await a.init();                          // 第一次失败
+  await a.init();                          // 第一次即 400
+  assert.equal(a.stats().totalRefreshFail, 1);
+  assert.ok(alerts.some((m) => m.includes('同一会话')), `400 应立即 critical 并指向同会话（${alerts.join('|')}）`);
+}
+
+// ⑮-b 非 400（如 500/传输层）→ 分级：第 2 次才 warn
+{
+  const alerts = [];
+  const http = makeRefreshHttp(async () => ({ ok: false, status: 500, detail: 'server error' }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll', envToken: jwt(inHours(0.01)), onAlert: (m) => alerts.push(m) });
+  await a.init();                              // 第 1 次失败：仅日志
+  assert.equal(alerts.length, 0, '首次 500 不打扰');
   a._lastRefreshAt = 0;
-  await a.ensure({ force: true, boot: true }); // 第二次失败
-  assert.equal(a.stats().totalRefreshFail, 2);
-  assert.ok(alerts.some((m) => m.includes('续期') && m.includes('2 次')), `第 2 次失败应告警（${alerts.join('|')}）`);
+  await a.ensure({ force: true, boot: true }); // 第 2 次失败：warn
+  assert.ok(alerts.some((m) => m.includes('2 次')), `第 2 次失败应告警（${alerts.join('|')}）`);
 }
 
 // ⑯ 轮换：Set-Cookie vr-ll-token -> 采纳并持久化（重启不退回旧值）
@@ -304,6 +314,58 @@ const mkCache = () => path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random(
   const out = await client.refresh({ llToken: 'll', token: 'vr' });
   assert.equal(out.ok, true);
   assert.equal(out.token, 't-new');
+}
+
+// ㉑ pickSeed 同会话规则（Review24 P2-2）：未改 .env -> 缓存 token 优先（不按 exp 选）
+{
+  const cache = mkCache();
+  const cacheTok = jwt(inHours(0.2)); // 更短 exp
+  const envTok = jwt(inHours(9));     // 更长 exp（旧会话残留的诱惑）
+  fs.writeFileSync(cache, JSON.stringify({ token: cacheTok, llToken: 'll.same', envSeed: '' }));
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll.same', envToken: envTok, cachePath: cache });
+  await a.init();
+  assert.equal(http.token, cacheTok, '缓存 token 优先（同会话），不按 exp 选 env');
+  fs.unlinkSync(cache);
+}
+
+// ㉒ .env 换了新 ll-token -> 旧缓存 token 不采用（同会话原则）；无 env token 则冷启动提示
+{
+  const cache = mkCache();
+  fs.writeFileSync(cache, JSON.stringify({ token: jwt(inHours(5)), llToken: 'old.ll', envSeed: 'old.ll' }));
+  const envTok = jwt(inHours(0.01));
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'new.ll', envToken: envTok, cachePath: cache });
+  await a.init();
+  assert.equal(http.refreshCalls[0]?.token, envTok, 'env 换 ll 后应使用 env token（新会话）');
+
+  const cache2 = mkCache();
+  fs.writeFileSync(cache2, JSON.stringify({ token: jwt(inHours(5)), llToken: 'old.ll', envSeed: 'old.ll' }));
+  const alerts = [];
+  const http2 = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) }));
+  const b = new VaAuth({ http: http2, address: '0xA', llToken: 'new.ll', cachePath: cache2, onAlert: (m) => alerts.push(m) });
+  await b.init();
+  assert.equal(http2.refreshCalls.length, 0, '换 ll 且无新 token -> 不拿旧会话 token 硬试');
+  assert.ok(alerts.some((m) => m.includes('缺少 vr-token')), '应提示面板贴两枚');
+  fs.unlinkSync(cache); fs.unlinkSync(cache2);
+}
+
+// ㉓ P1：refresh 模式健康检查节流 60s（而非 30min），4 分钟停滞立即 warn；1 分钟内不重复
+{
+  const { VariationalExchange } = await import('../src/exchange/va/variational.js');
+  const notes = [];
+  const fake = {
+    auth: { mode: () => 'refresh', stats: () => ({ lastRefreshOkAt: Date.now() - 4 * 60_000, totalRefreshFail: 0 }) },
+    _lastTokenCheckAt: 0,
+    _notify: (p) => notes.push(p),
+    http: { hasToken: () => true },
+  };
+  VariationalExchange.prototype._checkTokenLife.call(fake, { throttle: true });
+  assert.equal(notes.length, 1, '4 分钟停滞应告警（阈值 3 分钟）');
+  assert.equal(notes[0].level, 'warn');
+  assert.equal(notes[0].key, 'refresh-health');
+  VariationalExchange.prototype._checkTokenLife.call(fake, { throttle: true });
+  assert.equal(notes.length, 1, '60s 节流内不重复');
 }
 
 console.log('✓ va-auth.test.js 全部通过');

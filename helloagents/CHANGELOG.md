@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+## [1.6.13] - 2026-10-02
+
+### 修复（Review24：VA 续期 P1 + P2×2）
+- P1 续期健康检查节流：refresh 模式下的 30 分钟轮询节流与 3/5 分钟健康阈值矛盾
+  （停滞最坏 30 分钟后才告警，而 token 5 分钟即断）-> refresh 模式检查节流降至 60s
+- P2-1 续期 400（会话不匹配/ll 失效）立即 critical：重试不会自愈，文案指向
+  "两枚凭证不是同一会话，请重新登录后成对粘贴"；500/传输层类维持 ≥2 warn 分级
+- P2-2 pickSeed 同会话原则：refresh 模式缓存 token 优先（上次成功续期写入，
+  必然同会话），不按 exp 选（防 .env 旧会话高 exp token 污染启动即 400）；
+  .env 换新 ll-token 时改用 env token，缺失则冷启动提示贴两枚
+- envChanged 判定补回退（envSeed 缺失时与 cache.llToken 对照）
+
+### 测试
+- va-auth 追加 4 例（400 立即 critical / 500 分级 / pickSeed 缓存优先与换 ll 规则 /
+  P1 60s 节流 + 4 分钟停滞 warn）；npm test 15 项全绿
+
 ## [1.6.12] - 2026-10-02
 
 ### 新增（VA 5 分钟 token 自动续期，wg004-desgin15 探针 PASS 后实施）

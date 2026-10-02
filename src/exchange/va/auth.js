@@ -104,22 +104,28 @@ export class VaAuth {
    * ll-token 解析：默认 cache 优先（未来若服务端轮换 ll-token，重启不会退回 .env 旧值）；
    * 若 .env 的 VA_LL_TOKEN 与缓存记录的 envSeed 不一致（用户改了 .env）→ env 优先。
    */
-  _resolveLLToken(cache) {
+  /** .env 的 VA_LL_TOKEN 是否与上次记录不同（envSeed 缺失时回退与 cache.llToken 对照）。 */
+  _envLLTokenChanged(cache) {
     const env = this.envLLToken || '';
-    const cached = cache?.llToken || '';
-    const envSeed = cache?.envSeed || '';
-    if (env && env !== envSeed) return env;
-    return cached || env;
+    if (!env) return false;
+    const ref = cache?.envSeed || cache?.llToken || '';
+    return env !== ref;
+  }
+
+  _resolveLLToken(cache) {
+    if (this._envLLTokenChanged(cache)) return this.envLLToken;
+    return cache?.llToken || this.envLLToken || '';
   }
 
   _pickSeed() {
     const cache = this._readCache() || {};
     this.llToken = this._resolveLLToken(cache);
     if (this.mode() === 'refresh') {
-      // refresh 模式：token 可过期（同会话即可续），取 exp 最新的一枚作续期上下文
-      const cands = [this.envToken, cache.token].filter(Boolean);
-      cands.sort((a, b) => (decodeJwtExp(b) || 0) - (decodeJwtExp(a) || 0));
-      return cands[0] || '';
+      // 同会话原则（Review24 P2-2）：refresh 需要与 ll-token 同会话的 access token。
+      // - .env 换了新 ll-token（envChanged）→ 缓存 token 属旧会话 → 用 env token（没有则空=冷启动提示）
+      // - 否则 → 缓存 token 由上次成功续期写入，必然同会话 → 缓存优先（不按 exp 选，防旧会话高 exp 污染）
+      const envChanged = this._envLLTokenChanged(cache);
+      return envChanged ? (this.envToken || '') : (cache.token || this.envToken || '');
     }
     // manual/siwe：候选取"仍有 >1h 余量"的，再按 exp 选最新一枚
     const cands = [this.envToken, cache.token].filter((t) => this._valid(t, HOUR));
@@ -274,7 +280,10 @@ export class VaAuth {
       this._totalRefreshFail++;
       const msg = e?.message || String(e);
       const status = e?.status;
-      if (this._failStreak >= 4 || status === 401 || status === 403) {
+      if (status === 400) {
+        // 探针证实：400=无法续期（ll-only/旧会话/ll 失效）——重试不会自愈，立即 critical
+        this.onAlert?.(`❌ Variational 会话续期被拒（400）：vr-ll-token 与 vr-token 可能不是同一会话（或 ll-token 已失效）。请在网页登录后，于面板同时粘贴两枚新凭证（同一会话）。`);
+      } else if (this._failStreak >= 4 || status === 401 || status === 403) {
         this.onAlert?.(`❌ Variational 会话续期失败（连续 ${this._failStreak} 次）：${msg}。请在网页重新登录后，于面板同时粘贴新的 vr-token + vr-ll-token。`);
       } else if (this._failStreak >= 2) {
         this.onAlert?.(`⚠️ Variational 会话续期连续 ${this._failStreak} 次失败：${msg}`);
