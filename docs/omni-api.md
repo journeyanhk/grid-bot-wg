@@ -14,6 +14,14 @@
 | 过期后可否续期 | **可**（实测 access 过期 2 分钟后仍刷新成功，只要 ll-token 有效） |
 | 其他 | `cf_clearance`/`__cf_bm` 由浏览器过 CF；本项目用 curl_cffi impersonate 过 CF |
 
+### 探针记录
+- **2026-10-02 v1**：`ll_only / +过期vr / +地址副本` 全 **400 `{"message":"Unable to refresh session"}`**；
+  `无地址头` **401**；**无 Cloudflare 挑战**（cf_mitigated 空，响应还下发了 __cf_bm/_cfuvid）。
+  → 排除 CF 拦截；400 为应用层拒绝。地址头是必需（无则 401）。
+  假设：refresh 可能要求一枚**格式合法的（可过期）vr-token JWT**（v1 用的是垃圾串 `expired.invalid`；
+  抓包成功案例带的是过期但签名合法的 JWT）。v2 探针对照实验验证（真实 vr-token / 内置过期夹具）。
+- **2026-10-02 v2**：待跑（对照矩阵 + 环境 sanity + ll-token 格式检查）。
+
 ### 待探针确认（`python3 scripts/va_probe.py refresh --run`）
 - [ ] `/api/auth/refresh` 是否被 Cloudflare 挑战（go/no-go）
 - [ ] 最小 cookie 集（ll-only / +旧 vr-token / +地址副本 / 无地址头）
