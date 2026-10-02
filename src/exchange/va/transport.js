@@ -155,6 +155,31 @@ export class VaTransport {
     });
   }
 
+  /**
+   * 会话续期：worker 执行 POST /api/auth/refresh。
+   * 必须携带 ll-token + 同会话 vr-token（探针 v2：ll-only 会被 400 拒绝）。
+   * 返回 { status, text, headers, set_cookies, token?, exp? }。
+   */
+  async refresh({ llToken = '', token = '', address = '' } = {}) {
+    await this.start();
+    if (!this.child?.stdin?.writable) throw new Error('Variational 传输层未运行。');
+    const id = ++this.seq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error('Variational 会话续期超时。'));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      const frame = JSON.stringify({ id, command: 'refresh', ll_token: llToken, token, address }) + '\n';
+      this.child.stdin.write(frame, (err) => {
+        if (!err) return;
+        const item = this.pending.get(id);
+        if (!item) return;
+        this.pending.delete(id); clearTimeout(timer); reject(err);
+      });
+    });
+  }
+
   async stop() {
     const child = this.child;
     this.child = null;

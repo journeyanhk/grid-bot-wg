@@ -11,6 +11,11 @@ Protocol (identical shape to hl/signer_worker.py): JSON-lines on stdin/stdout.
   login    (stdin): {"id":N,"command":"login","address":"0x..."}
                     → 用 env 里的 VA_WALLET_PRIVATE_KEY 完成 SIWE 登录，返回
                       {"status":200,"token":"...","exp":<秒>}。私钥【绝不】经 stdio。
+  refresh  (stdin): {"id":N,"command":"refresh","ll_token":"...","token":"...","address":"0x..."}
+                    → POST /api/auth/refresh 续期 5 分钟 access token。
+                      探针 v2 证实：必须 ll-token + 同会话 vr-token（token）同时携带，
+                      ll-only 会被 400 拒绝；ll-token 不轮换（仍回传 set_cookies 供兼容）。
+                      返回 {"status":200,"token":"...","exp":<秒>,"set_cookies":{...}}
   response (stdout):{"id":N,"ok":true,"result":{"status":200,"text":"...","headers":{...}}}
                     {"id":N,"ok":false,"error":"..."}
 
@@ -60,6 +65,18 @@ def _make_session():
     return cffi_requests.Session(impersonate=IMPERSONATE)
 
 
+def _extract_set_cookies(response) -> dict:
+    """提取响应 Set-Cookie 中的 vr-*（供被动轮换捕获；ll-token 永不入库/日志）。"""
+    out = {}
+    try:
+        for c in response.cookies.jar:
+            if str(c.name).startswith("vr-"):
+                out[str(c.name)] = str(c.value)
+    except Exception:
+        pass
+    return out
+
+
 def _do_request(session, req: dict) -> dict:
     method = str(req.get("method", "GET")).upper()
     path = str(req.get("path", ""))
@@ -94,6 +111,7 @@ def _do_request(session, req: dict) -> dict:
         "status": r.status_code,
         "text": r.text,
         "headers": {k.lower(): v for k, v in dict(r.headers).items()},
+        "set_cookies": _extract_set_cookies(r),
     }
 
 
@@ -121,6 +139,49 @@ def _do_login(session, req: dict) -> dict:
     return {"status": 200, "token": out["token"], "exp": out.get("exp")}
 
 
+def _do_refresh(session, req: dict) -> dict:
+    """会话续期：POST /api/auth/refresh（空 body）。
+
+    探针 v2 结论（tests/docs/omni-api.md）：
+      * ll-token + **同会话 vr-token**（可过期）→ 200；只带 ll-token → 400；
+        旧会话的 vr-token → 400（拒绝原因是会话不匹配，不是过期）。
+      * 地址头必需（缺 → 401）；ll-token 未见轮换。
+    """
+    ll = str(req.get("ll_token") or os.environ.get("VA_LL_TOKEN") or "").strip()
+    token = str(req.get("token") or "").strip()
+    address = str(req.get("address") or os.environ.get("VA_ADDRESS") or "").strip()
+    if not ll:
+        raise RuntimeError("缺少 vr-ll-token")
+    if not token:
+        raise RuntimeError("缺少同会话 vr-token（refresh 必需）")
+    h = dict(BROWSER_HEADERS)
+    h["content-type"] = "application/json"
+    h["Referer"] = f"{BASE_URL}/portfolio?tab=positions"
+    if address:
+        h["vr-connected-address"] = address
+    cookie = f"vr-ll-token={ll}; vr-token={token}"
+    if address:
+        cookie += f"; vr-ll-token-{address.lower()}={ll}; vr-connected-address={address}"
+    h["Cookie"] = cookie
+    r = session.request("POST", BASE_URL + "/api/auth/refresh", headers=h, data=b"", timeout=TIMEOUT_S)
+    out = {
+        "status": r.status_code,
+        "text": r.text,
+        "headers": {k.lower(): v for k, v in dict(r.headers).items()},
+        "set_cookies": _extract_set_cookies(r),
+    }
+    if r.status_code == 200:
+        try:
+            data = json.loads(r.text)
+            tok = data.get("token")
+            if tok:
+                out["token"] = tok
+                out["exp"] = va_siwe.jwt_exp(tok)
+        except Exception:
+            pass
+    return out
+
+
 def _handle(session, req: dict):
     command = req.get("command")
     if command == "health":
@@ -129,6 +190,8 @@ def _handle(session, req: dict):
         return _do_request(session, req)
     if command == "login":
         return _do_login(session, req)
+    if command == "refresh":
+        return _do_refresh(session, req)
     raise RuntimeError(f"不支持的传输命令: {command}")
 
 

@@ -75,6 +75,27 @@ export class VaHttpClient {
     }
     return this.transport.login(address || this.address);
   }
+  /**
+   * 会话续期（refresh 模式）：ll-token + 同会话 vr-token + 地址。
+   * 非 200 不抛（返回 {ok:false,status,detail} 供上层分级告警）；传输层异常仍抛。
+   */
+  async refresh({ llToken = '', token = '', address = '' } = {}) {
+    if (!this.transport?.refresh) {
+      throw new VaHttpError('当前传输层不支持会话续期（需 VA_TRANSPORT=bridge）。', 0);
+    }
+    const res = await this.transport.refresh({ llToken, token, address: address || this.address });
+    const status = Number(res?.status) || 0;
+    const out = {
+      ok: status === 200,
+      status,
+      token: res?.token || '',
+      exp: res?.exp ?? null,
+      setCookies: res?.set_cookies || {},
+      detail: status !== 200 ? String(res?.text || '').slice(0, 160) : '',
+    };
+    if (res?.set_cookies) { try { this.onServerCookies?.(res.set_cookies); } catch { /* ignore */ } }
+    return out;
+  }
   async close() { if (this.transport?.stop) await this.transport.stop(); }
 
   _headers(extra = {}, { auth = false } = {}) {
@@ -122,6 +143,11 @@ export class VaHttpClient {
   }
 
   async _fetch(method, path, { body, auth = false } = {}) {
+    // 鉴权请求前置守卫（Review15/VA 续期）：token 临期先续（由上层注入 auth.ensure；
+    // 失败不阻断——真正的兜底是 401 强制续期路径）。
+    if (auth && typeof this.beforeAuth === 'function') {
+      try { await this.beforeAuth(); } catch { /* 交由 401 路径兜底 */ }
+    }
     if (this.transport) {
       let res;
       try {
@@ -129,6 +155,8 @@ export class VaHttpClient {
       } catch (e) {
         { const err = new VaHttpError(`连接 Variational 失败（传输层）：${e?.message || e}`, 0); err.transient = true; throw err; }
       }
+      // 被动 Set-Cookie 捕获（未来若服务端轮换 vr-ll-token/vr-token，Node 侧即时采纳）
+      if (res?.set_cookies) { try { this.onServerCookies?.(res.set_cookies); } catch { /* ignore */ } }
       // MockHttp (tests) may already return parsed data instead of {status,text}.
       if (res && typeof res === 'object' && 'status' in res && ('text' in res || 'headers' in res)) {
         const headers = res.headers || {};

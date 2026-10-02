@@ -7,6 +7,9 @@ import { PaperExchange } from './paper.js';
 export function createExchange(cfg = {}) {
   if (cfg.mode === 'live') {
     if (!cfg.token && !cfg.privateKey) {
+      if (cfg.llToken) {
+        throw new Error('仅 VA_LL_TOKEN 无法启动：refresh 续期需要一枚同会话的 vr-token。请同时提供 VARIATIONAL_TOKEN（可与 ll-token 一起从浏览器 Cookies 复制），或在面板粘贴两者。');
+      }
       throw new Error('VA LIVE 模式需要 VARIATIONAL_TOKEN（贴 token）或 VA_WALLET_PRIVATE_KEY（自动登录）之一。');
     }
     return new VariationalExchange({
@@ -20,6 +23,7 @@ export function createExchange(cfg = {}) {
       baseUrl: cfg.baseUrl,
       address: cfg.address,
       token: cfg.token,
+      llToken: cfg.llToken,
       privateKey: cfg.privateKey,
       tokenCachePath: cfg.tokenCachePath,
       transport: cfg.transport,

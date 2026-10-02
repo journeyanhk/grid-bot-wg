@@ -157,4 +157,153 @@ function makeHttp(login) {
   fs.unlinkSync(cache);
 }
 
+// ══ refresh 模式（wg004-desgin15：5 分钟 access + ll-token 续期）══════════════
+// 假 http 支持 refresh（记录调用参数/可注入结果）。
+function makeRefreshHttp(refreshImpl) {
+  return {
+    token: '', setToken(t) { this.token = t || ''; },
+    login: async () => ({ token: jwt(inHours(168)) }),
+    refreshCalls: [],
+    async refresh(args) { this.refreshCalls.push(args); return refreshImpl(args); },
+  };
+}
+const mkCache = () => path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+
+// ⑪ mode：ll-token + http.refresh -> refresh；无 ll -> siwe/manual（既有语义不变）
+{
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll-abc.def' });
+  assert.equal(a.mode(), 'refresh');
+  const b = new VaAuth({ http: makeHttp(async () => ({ token: jwt(inHours(168)) })), address: '0xA' });
+  assert.equal(b.mode(), 'manual');
+  assert.equal(new VaAuth({ http, hasPrivateKey: true }).mode(), 'siwe');
+}
+
+// ⑫ 剩余 <90s -> 续期并写缓存（含 llToken/envSeed）
+{
+  const cache = mkCache();
+  const newTok = jwt(inHours(1));
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: newTok, setCookies: {} }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll-abc.def', envToken: jwt(inHours(0.01)) /* ~36s */, cachePath: cache });
+  await a.init();
+  assert.equal(http.refreshCalls.length, 1, '临期应续期一次');
+  assert.equal(http.refreshCalls[0].llToken, 'll-abc.def', '携带 ll-token');
+  assert.ok(http.refreshCalls[0].token, '必须携带同会话 vr-token（ll-only 会被 400）');
+  assert.equal(http.token, newTok, '新 token 已生效');
+  assert.equal(a.stats().totalRefresh, 1);
+  const saved = JSON.parse(fs.readFileSync(cache, 'utf8'));
+  assert.equal(saved.llToken, 'll-abc.def');
+  assert.equal(saved.envSeed, 'll-abc.def', 'envSeed 记录本次 env 值（用于变更检测）');
+  fs.unlinkSync(cache);
+}
+
+// ⑬ 剩余 >90s -> 不续期
+{
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll', envToken: jwt(inHours(0.5)) /* 30min */, cachePath: '' });
+  await a.init();
+  assert.equal(http.refreshCalls.length, 0, '健康态不应续期');
+}
+
+// ⑭ 节流：10s 内二次 ensure 不重复续期；force 也受节流
+{
+  let now = Date.now();
+  const origNow = Date.now;
+  Date.now = () => now;
+  try {
+    const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)), setCookies: {} }));
+    const a = new VaAuth({ http, address: '0xA', llToken: 'll', envToken: jwt(inHours(0.01)) });
+    await a.init();                       // boot 首续期
+    const first = http.refreshCalls.length;
+    await a.ensure({ force: true });      // 10s 内 -> 节流
+    assert.equal(http.refreshCalls.length, first, '节流窗内不重复续期');
+    now += 11_000;
+    await a.ensure({ force: true });
+    assert.equal(http.refreshCalls.length, first + 1, '节流窗过后可续期');
+  } finally { Date.now = origNow; }
+}
+
+// ⑮ 连续失败分级：≥2 warn（onAlert）、400 会带 detail
+{
+  const alerts = [];
+  const http = makeRefreshHttp(async () => ({ ok: false, status: 400, detail: 'Unable to refresh session' }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll', envToken: jwt(inHours(0.01)), onAlert: (m) => alerts.push(m) });
+  await a.init();                          // 第一次失败
+  a._lastRefreshAt = 0;
+  await a.ensure({ force: true, boot: true }); // 第二次失败
+  assert.equal(a.stats().totalRefreshFail, 2);
+  assert.ok(alerts.some((m) => m.includes('续期') && m.includes('2 次')), `第 2 次失败应告警（${alerts.join('|')}）`);
+}
+
+// ⑯ 轮换：Set-Cookie vr-ll-token -> 采纳并持久化（重启不退回旧值）
+{
+  const cache = mkCache();
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)), setCookies: { 'vr-ll-token': 'rotated.ll' } }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'old.ll', envToken: jwt(inHours(0.01)), cachePath: cache });
+  await a.init();
+  assert.equal(a.llToken, 'rotated.ll', '轮换被采纳');
+  assert.equal(JSON.parse(fs.readFileSync(cache, 'utf8')).llToken, 'rotated.ll', '轮换持久化');
+  // 重启（无 env ll-token）→ 从缓存取轮换后的值
+  const http2 = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)) }));
+  const a2 = new VaAuth({ http: http2, address: '0xA', cachePath: cache, envToken: jwt(inHours(0.01)) });
+  await a2.init();
+  assert.equal(a2.llToken, 'rotated.ll', '重启取缓存轮换值');
+  fs.unlinkSync(cache);
+}
+
+// ⑰ env 变更优先：.env 与缓存的 envSeed 不一致 -> 用 env
+{
+  const cache = mkCache();
+  fs.writeFileSync(cache, JSON.stringify({ token: jwt(inHours(0.5)), llToken: 'cached.ll', envSeed: 'old-env.ll' }));
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)) }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'new-env.ll', envToken: jwt(inHours(0.01)), cachePath: cache });
+  await a.init();
+  assert.equal(a.llToken, 'new-env.ll', '用户改了 .env -> env 优先');
+  fs.unlinkSync(cache);
+}
+
+// ⑱ adopt({token(可过期), llToken})：refresh 模式接受过期 token；仅 ll 无 token 拒绝并给指引
+{
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)), setCookies: {} }));
+  const a = new VaAuth({ http, address: '0xA' });
+  const info = a.adopt(jwt(inHours(-1)), 'll.abc');
+  assert.equal(info.mode, 'refresh', '带 ll-token 时接受过期 access token');
+  assert.equal(a.llToken, 'll.abc');
+
+  const b = new VaAuth({ http: makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)) })), address: '0xA' });
+  b.llToken = 'll.abc';
+  assert.throws(() => b.adopt('', ''), /同时粘贴/, '仅 ll-token 无 vr-token 应给出指引');
+}
+
+// ⑲ 冷启动缺同会话 token：ensure 不调用 refresh，且一次性提示
+{
+  const alerts = [];
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(0.5)) }));
+  const a = new VaAuth({ http, address: '0xA', llToken: 'll.abc', onAlert: (m) => alerts.push(m) });
+  await a.init();
+  assert.equal(http.refreshCalls.length, 0, '无 token 不应调用 refresh（ll-only 会被 400）');
+  assert.ok(alerts.some((m) => m.includes('缺少 vr-token')), '应提示面板同时粘贴两者');
+}
+
+// ⑳ httpclient 钩子：beforeAuth 被调用 + Set-Cookie 被动捕获 + refresh 封装
+{
+  const { VaHttpClient } = await import('../src/exchange/va/httpclient.js');
+  let beforeAuthCalls = 0;
+  const captured = [];
+  const client = new VaHttpClient({
+    transport: {
+      async request() { return { status: 200, text: 'null', headers: {}, set_cookies: { 'vr-token': 'rotated-access' } }; },
+      async refresh() { return { status: 200, text: '', headers: {}, set_cookies: {}, token: 't-new', exp: 1 }; },
+    },
+  });
+  client.beforeAuth = async () => { beforeAuthCalls++; };
+  client.onServerCookies = (c) => captured.push(c);
+  await client.get('/api/portfolio', { auth: true });
+  assert.equal(beforeAuthCalls, 1, '鉴权请求触发 beforeAuth');
+  assert.equal(captured[0]?.['vr-token'], 'rotated-access', '被动捕获 Set-Cookie');
+  const out = await client.refresh({ llToken: 'll', token: 'vr' });
+  assert.equal(out.ok, true);
+  assert.equal(out.token, 't-new');
+}
+
 console.log('✓ va-auth.test.js 全部通过');

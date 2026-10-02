@@ -697,8 +697,8 @@ const server = http.createServer(async (request, res) => {
         if (typeof vaExchange.adoptToken !== 'function') {
           return send(res, 400, { error: 'Variational 当前非实盘会话，无需粘贴 token。' });
         }
-        const { token } = await readBody(request);
-        return send(res, 200, await vaExchange.adoptToken(token));
+        const { token, llToken } = await readBody(request);
+        return send(res, 200, await vaExchange.adoptToken({ token, llToken }));
       } catch (e) { return send(res, 400, { error: e.message }); }
     }
     // 手动触发一次 VA 核账并返回报告（面板"立即核账"按钮 / 排查用）。

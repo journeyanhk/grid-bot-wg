@@ -1573,10 +1573,11 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <button class="btn btn-ghost" id="va-reset-btn" style="margin-top:8px;font-size:12px">重置统计（盈亏/成交量清零）</button>
       <button class="btn btn-ghost" id="va-reconnect-btn" style="margin-top:8px;font-size:12px">🔌 重连交易所（不动挂单/持仓）</button>
       <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
-        <div class="muted" style="font-size:12px;margin-bottom:6px">会话令牌（vr-token）· 自动登录被 Cloudflare 拦截时手动热切换（无需重启）</div>
-        <textarea id="va-token-input" rows="2" placeholder="粘贴新的 vr-token（7 天有效）后点应用" style="width:100%;box-sizing:border-box;font-size:12px;font-family:monospace;resize:vertical"></textarea>
+        <div class="muted" style="font-size:12px;margin-bottom:6px">会话凭证 · 自动续期（Omni 已改为 5 分钟 token）：首次请<b>同时粘贴 vr-token 与 vr-ll-token</b>（同一次会话，F12 → Application → Cookies 里相邻两行）；之后由 vr-ll-token 长期自动续期，无需再管。</div>
+        <textarea id="va-token-input" rows="2" placeholder="vr-token（eyJ… 短令牌；与 ll-token 同一会话）" style="width:100%;box-sizing:border-box;font-size:12px;font-family:monospace;resize:vertical"></textarea>
+        <textarea id="va-ll-token-input" rows="2" placeholder="vr-ll-token（长期凭证，形如 xxx.yyy）" style="width:100%;box-sizing:border-box;font-size:12px;font-family:monospace;resize:vertical;margin-top:6px"></textarea>
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
-          <button class="btn btn-ghost" style="margin:0;font-size:12px" onclick="adoptVaToken(this)">应用令牌</button>
+          <button class="btn btn-ghost" style="margin:0;font-size:12px" onclick="adoptVaToken(this)">应用凭证</button>
           <span id="va-token-msg" class="muted" style="font-size:12px"></span>
         </div>
       </div>
@@ -2550,23 +2551,28 @@ async function reconnectEx(p, btn) {
   if (btn) { btn.textContent = orig; btn.disabled = false; }
 }
 
-// VA 会话令牌热切换：粘贴新 vr-token，后端校验+落缓存+portfolio 验证后恢复交易（无需重启）。
+// VA 会话凭证热切换：粘贴 vr-token（+可选 vr-ll-token），后端校验/续期验证/portfolio 验证后恢复交易。
 async function adoptVaToken(btn) {
   const ta = $('va-token-input');
+  const ll = $('va-ll-token-input');
   const msg = $('va-token-msg');
   const token = (ta && ta.value || '').trim();
-  if (!token) { if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '请先粘贴 token'; } return; }
+  const llToken = (ll && ll.value || '').trim();
+  if (!token && !llToken) { if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '请粘贴 vr-token（首次需连同 vr-ll-token 一起）'; } return; }
+  if (token && !llToken) {
+    if (msg) { msg.style.color = '#f59e0b'; msg.textContent = '提示：仅 vr-token 只够 5 分钟；建议同时粘贴 vr-ll-token 以启用自动续期'; }
+  }
   if (btn) btn.disabled = true;
-  if (msg) { msg.style.color = ''; msg.textContent = '应用中…'; }
+  if (!msg || msg.style.color !== 'rgb(245, 158, 11)') { if (msg) { msg.style.color = ''; msg.textContent = '应用中…'; } }
   try {
-    const r = await apiFetch('/api/va/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+    const r = await apiFetch('/api/va/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, llToken }) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
     if (ta) ta.value = '';
-    const hrs = j.exp ? Math.max(1, Math.round((j.exp * 1000 - Date.now()) / 3600000)) : null;
+    if (ll) ll.value = '';
     if (msg) {
       msg.style.color = '#22c55e';
-      msg.textContent = '已应用' + (hrs ? `，有效约 ${hrs} 小时` : '') + (j.tradingReady ? '，交易已恢复' : '');
+      msg.textContent = '已应用' + (j.mode === 'refresh' ? '（自动续期已启用）' : '') + (j.tradingReady ? '，交易已恢复' : '');
     }
   } catch (e) {
     if (msg) { msg.style.color = '#f43f5e'; msg.textContent = '失败：' + e.message; }

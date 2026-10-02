@@ -22,12 +22,16 @@
   抓包成功案例带的是过期但签名合法的 JWT）。v2 探针对照实验验证（真实 vr-token / 内置过期夹具）。
 - **2026-10-02 v2**：待跑（对照矩阵 + 环境 sanity + ll-token 格式检查）。
 
-### 待探针确认（`python3 scripts/va_probe.py refresh --run`）
-- [ ] `/api/auth/refresh` 是否被 Cloudflare 挑战（go/no-go）
-- [ ] 最小 cookie 集（ll-only / +旧 vr-token / +地址副本 / 无地址头）
-- [ ] refresh 是否 `Set-Cookie` 轮换 `vr-ll-token`（决定缓存优先级规则）
-- [ ] refresh 限速（10 连发 @2s 实测）
-- [ ] `vr-ll-token` 寿命（DevTools → Application → Cookies → Expires 列，手抄）：
+### 探针结论（2026-10-02 v2，PASS）— 机制定稿
+- **Cloudflare 放行** `/api/auth/refresh` ✓（无挑战）
+- **凭证要求：`vr-ll-token` + 同会话 `vr-token`（可过期）+ `vr-connected-address` 头**：
+  - ll-only → 400；旧会话的 vr-token → 400（拒绝因会话不匹配，不是过期）；缺地址头 → 401
+  - **冷启动必须同时贴一次 vr-token + vr-ll-token（同一会话）**；此后每次 refresh 携带当前 token，
+    会话不变即可无限续期
+- **ll-token 不轮换**（200 响应无 Set-Cookie；轮换兼容代码仍保留）
+- **限速无压力**：10 连发 @2s 全 200（自然节拍 ~3.5 分钟/次）
+- 新 token 实测可打 `/api/portfolio` ✓
+- `vr-ll-token` 寿命（DevTools Expires，手抄）：________（待补；配 `VA_LL_TOKEN_EXP` 可选日历提醒）
 
 ## 常用端点
 - `GET /api/portfolio?compute_margin=true`（auth）：余额/权益/保证金

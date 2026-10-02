@@ -82,12 +82,16 @@ export class VariationalExchange extends EventEmitter {
       http: this.http,
       address: opts.address,
       envToken: opts.token,
+      llToken: opts.llToken,              // vr-ll-token（长期；refresh 模式核心凭证）
       hasPrivateKey: !!opts.privateKey,   // Node 侧只需知道能否自签，私钥只在 worker 环境
       cachePath: opts.tokenCachePath,
-      // 续签成功=info（仅仪表盘，不推手机）；连续失败=❌（经告警环推手机）。
+      // 续期/续签成功=info（仅仪表盘，不推手机）；连续失败=❌（经告警环推手机）。
       onNotice: (m) => logger.info('va', m),
       onAlert: (m) => this.emit('error', new Error(m)),
     });
+    // 鉴权请求前置守卫（token 临期先续，减少 401 窗口）+ 被动 Set-Cookie 捕获
+    this.http.beforeAuth = () => this.auth.ensure().catch(() => false);
+    this.http.onServerCookies = (cookies) => this.auth.onServerCookies(cookies);
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -134,19 +138,27 @@ export class VariationalExchange extends EventEmitter {
    * 仪表盘热切换：接纳一枚粘贴的 vr-token，立即用 portfolio 验证并恢复交易。
    * 自动登录被 Cloudflare 挑战拦截时的人工兜底（token 7 天有效，每周一次一分钟）。
    */
-  async adoptToken(token) {
-    const info = this.auth.adopt(token);       // 空/过期直接抛错
+  async adoptToken(input) {
+    // 兼容旧签名：字符串 = vr-token；对象 = { token, llToken }
+    const token = typeof input === 'string' ? input : (input?.token || '');
+    const llToken = typeof input === 'object' && input ? (input.llToken || '') : '';
+    const info = this.auth.adopt(token, llToken);   // 校验/落库；不可用直接抛错
     try {
-      await this._refreshAccount();            // portfolio 打通才算 token 真的可用
+      // refresh 模式：立刻续期一次，验证 ll-token 与 vr-token 同会话且链路可用
+      if (this.auth.mode() === 'refresh') {
+        const ok = await this.auth.ensure({ force: true, boot: true });
+        if (!ok) throw new Error('凭证已接纳，但续期失败（vr-ll-token 与 vr-token 可能不是同一会话，或 ll-token 已失效）');
+      }
+      await this._refreshAccount();            // portfolio 打通才算凭证真的可用
       this._tradingReady = true;
       this.operationalIssue = null;
       this.lastError = null;
       this.lastOkAt = Date.now();
-      return { ok: true, exp: info.exp, tradingReady: true };
+      return { ok: true, exp: this.auth.exp ?? info.exp, mode: this.auth.mode(), tradingReady: true };
     } catch (e) {
-      // token 已落库但没验过：可能仍无效（如粘错/已吊销）。
+      // 凭证已落库但没验过：可能仍无效（如粘错/已吊销）。
       this._tradingReady = false;
-      throw new Error(`token 已接纳但校验失败：${e?.message || e}`, { cause: e });
+      throw new Error(`凭证已接纳但校验失败：${e?.message || e}`, { cause: e });
     }
   }
 
@@ -169,6 +181,22 @@ export class VariationalExchange extends EventEmitter {
     const now = Date.now();
     if (throttle && now - this._lastTokenCheckAt < TOKEN_CHECK_THROTTLE_MS) return;
     this._lastTokenCheckAt = now;
+    // refresh 模式：access token 常态短寿，改报"续期健康"（距上次成功续期时长）
+    if (this.auth.mode() === 'refresh') {
+      const st = this.auth.stats();
+      if (!this.http.hasToken() || !st.lastRefreshOkAt) return; // 冷启动/等待首续期：不告警（冷启动另有一次性提示）
+      const age = now - st.lastRefreshOkAt;
+      if (age > 5 * 60_000) {
+        this._notify({ source: 'va', level: 'critical', key: 'refresh-health', cooldownMs: 30 * 60_000,
+          title: 'Variational 会话续期停滞',
+          message: `🔴 距上次成功续期 ${Math.round(age / 60_000)} 分钟（access token 仅 5 分钟）——交易可能已中断，请检查网络/面板状态。` });
+      } else if (age > 3 * 60_000) {
+        this._notify({ source: 'va', level: 'warn', key: 'refresh-health', cooldownMs: 30 * 60_000,
+          title: 'Variational 会话续期迟缓',
+          message: `⚠️ 距上次成功续期 ${Math.round(age / 60_000)} 分钟，续期链路可能不稳（已失败 ${st.totalRefreshFail} 次）。` });
+      }
+      return;
+    }
     // 可自签（配了私钥）且自动登录尚未失败过时，无需打扰用户——auth 会在 <24h 自动续签。
     // 但自动登录一旦失败过（如被 Cloudflare 挑战拦死），立即恢复人工 token 三档预警，
     // 避免 .env 残留私钥导致预警全静默、续签又必然失败、第 7 天直接撞 401。
@@ -540,8 +568,8 @@ export class VariationalExchange extends EventEmitter {
   async _poll() {
     if (this._polling) return; this._polling = true;
     try {
-      // 会话保活：token 缺失或 <24h 且可自签 → 续签（内部有节流，廉价）。
-      if (this.auth.canRefresh()) {
+      // 会话保活：各模式自判（refresh 模式 <90s 续期；siwe <24h 续签；manual 无操作）。
+      {
         const ok = await this.auth.ensure().catch(() => false);
         if (ok && !this._tradingReady && this.http.hasToken()) this._tradingReady = true;
       }

@@ -1,18 +1,30 @@
-// VaAuth — Variational vr-token 生命周期管理（贴 token 优先 + 私钥自动续签）。
+// VaAuth — Variational 会话生命周期管理。
 //
-// 解析优先级（init）：VARIATIONAL_TOKEN(有效) → 缓存文件(有效) → 私钥 SIWE 登录 → 无。
-// 运行期（ensure）：token 缺失或剩余 < 24h 且可自签 → 续签；401 可 force 立即续签。
-// 防护：两次登录最小间隔 5 分钟 + 每小时上限 6 次（避免 401 风暴打爆 Cloudflare）；
-//       连续 2 次失败 → critical 告警。私钥在 Python worker 环境里，Node 侧不接触。
+// 三种模式（mode）：
+//   refresh：持 vr-ll-token（长期）+ 一枚同会话 vr-token（可过期）→ 每 ~3.5 分钟
+//            POST /api/auth/refresh 换 5 分钟新 access token（探针 v2：ll-only 会被
+//            400 拒绝，必须同时携带同会话 vr-token；ll-token 实测不轮换）。
+//   siwe：   私钥 SIWE 自动登录（历史路径；/api/auth/login 常被 Cloudflare 拦住）。
+//   manual： 人工粘贴 access token。
+//
+// 解析优先级（init）：refresh（有 ll-token）→ env/cache access token → siwe → 无。
+// 防护：refresh 节流 10s + 10 分钟上限 12 次 + 并发合并；连续失败 ≥2 warn、≥4 或
+//       401/403 critical 并提示重贴。私钥/ll-token 均不进日志。
 import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../../log.js';
 
 const HOUR = 3600_000;
-const REFRESH_BELOW_MS = 24 * HOUR;      // 剩余低于此值且可自签 → 续签
-const RELOGIN_THROTTLE_MS = 5 * 60_000;  // 两次登录最小间隔（健康续签）
-const RELOGIN_FORCE_THROTTLE_MS = 60_000; // 401 强制续签的最小间隔（防 401 风暴打爆登录）
+const REFRESH_BELOW_MS = 24 * HOUR;       // siwe/manual：剩余低于此值且可自签 → 续签
+const RELOGIN_THROTTLE_MS = 5 * 60_000;   // 两次登录最小间隔（健康续签）
+const RELOGIN_FORCE_THROTTLE_MS = 60_000; // 401 强制续签的最小间隔（防 401 风暴）
 const RELOGIN_MAX_PER_HOUR = 6;
+
+// refresh 模式（access token 仅 5 分钟）
+const ACCESS_REFRESH_BELOW_MS = 90_000;   // 剩余 < 90s 续期
+const REFRESH_THROTTLE_MS = 10_000;       // 两次 refresh 最小间隔
+const REFRESH_MAX_PER_10MIN = 12;         // 10 分钟上限（自然需 ~3 次，留 4x 余量）
+const TEN_MIN = 600_000;
 
 /** 解码 JWT 的 exp（秒），不验签。无法解析返回 null。 */
 export function decodeJwtExp(token) {
@@ -27,27 +39,53 @@ export function decodeJwtExp(token) {
 }
 
 export class VaAuth {
-  constructor({ http, address, envToken, hasPrivateKey, cachePath, onNotice, onAlert } = {}) {
+  constructor({ http, address, envToken, llToken, hasPrivateKey, cachePath, onNotice, onAlert } = {}) {
     this.http = http || null;
     this.address = address || '';
     this.envToken = envToken || '';
-    this.hasPrivateKey = !!hasPrivateKey;   // 私钥本身只在 Python worker 环境里，Node 不持有
+    this.envLLToken = llToken || '';
+    this.hasPrivateKey = !!hasPrivateKey;
     this.cachePath = cachePath || '';
     this.onNotice = typeof onNotice === 'function' ? onNotice : null;
     this.onAlert = typeof onAlert === 'function' ? onAlert : null;
     this.token = '';
     this.exp = null;              // 秒
+    this.llToken = String(llToken || '').trim();  // 构造期即可判 mode()；init 时按 cache/env 规则再校准
     this._loginTimes = [];        // 近 1h 登录尝试时间戳（节流）
     this._lastLoginAt = 0;
+    this._refreshTimes = [];      // 近 10min refresh 时间戳（节流）
+    this._lastRefreshAt = 0;
+    this._totalRefresh = 0;       // 续期成功计数（核账报告用）
+    this._totalRefreshFail = 0;
+    this._lastRefreshOkAt = 0;
     this._failStreak = 0;
     this._inflight = null;
+    this._coldStartAlerted = false;
   }
 
-  /** 是否具备私钥自动续签能力（需私钥 + bridge 传输）。 */
-  canRefresh() { return !!(this.hasPrivateKey && this.http?.login); }
+  /** 模式：refresh（ll-token 自动续期）/ siwe（私钥）/ manual（人工 token）。 */
+  mode() {
+    if (this.llToken && typeof this.http?.refresh === 'function') return 'refresh';
+    if (this.hasPrivateKey && typeof this.http?.login === 'function') return 'siwe';
+    return 'manual';
+  }
+  /** 是否具备自动维持会话能力（refresh 或 siwe）。 */
+  canRefresh() { return this.mode() !== 'manual'; }
   hasToken() { return !!this.token; }
   /** 当前 token 剩余毫秒；无 exp 但有 token 视为 Infinity（贴 token 无法判断的场景）。 */
   msLeft() { return this.exp ? this.exp * 1000 - Date.now() : (this.token ? Infinity : 0); }
+
+  /** 供面板/核账展示的续期统计。 */
+  stats() {
+    return {
+      mode: this.mode(),
+      lastRefreshOkAt: this._lastRefreshOkAt || null,
+      totalRefresh: this._totalRefresh,
+      totalRefreshFail: this._totalRefreshFail,
+      failStreak: this._failStreak,
+      hasLLToken: !!this.llToken,
+    };
+  }
 
   _use(token) {
     this.token = token || '';
@@ -62,51 +100,103 @@ export class VaAuth {
     return e * 1000 - Date.now() > minMs;
   }
 
+  /**
+   * ll-token 解析：默认 cache 优先（未来若服务端轮换 ll-token，重启不会退回 .env 旧值）；
+   * 若 .env 的 VA_LL_TOKEN 与缓存记录的 envSeed 不一致（用户改了 .env）→ env 优先。
+   */
+  _resolveLLToken(cache) {
+    const env = this.envLLToken || '';
+    const cached = cache?.llToken || '';
+    const envSeed = cache?.envSeed || '';
+    if (env && env !== envSeed) return env;
+    return cached || env;
+  }
+
   _pickSeed() {
-    // 候选：env 贴 token 与缓存 token；都取"仍有 >1h 余量"的，再按 exp 选最新一枚。
-    // 这样贴 token 优先仍成立（缓存为空/更旧时用它），但自动登录跑起来后重启不会倒退。
-    const cands = [this.envToken, this._readCache()?.token].filter((t) => this._valid(t, HOUR));
+    const cache = this._readCache() || {};
+    this.llToken = this._resolveLLToken(cache);
+    if (this.mode() === 'refresh') {
+      // refresh 模式：token 可过期（同会话即可续），取 exp 最新的一枚作续期上下文
+      const cands = [this.envToken, cache.token].filter(Boolean);
+      cands.sort((a, b) => (decodeJwtExp(b) || 0) - (decodeJwtExp(a) || 0));
+      return cands[0] || '';
+    }
+    // manual/siwe：候选取"仍有 >1h 余量"的，再按 exp 选最新一枚
+    const cands = [this.envToken, cache.token].filter((t) => this._valid(t, HOUR));
     cands.sort((a, b) => (decodeJwtExp(b) || 0) - (decodeJwtExp(a) || 0));
     return cands[0] || '';
   }
 
-  /** 启动解析 + 必要时首登。返回最终 token（可能为空=只读）。 */
+  /** 启动解析 + 必要时首次续期/登录。返回最终 token（可能为空=只读）。 */
   async init() {
     const seed = this._pickSeed();
     if (seed) this._use(seed);
-    // .env 里贴了 token 但已失效，且我们改用了缓存/自动登录 → 提醒用户清空，避免误解。
-    if (this.envToken && !this._valid(this.envToken, 0) && seed !== this.envToken) {
+    // .env 里贴了 access token 但已失效，且我们改用了缓存/自动登录 → 提醒用户清空。
+    // refresh 模式下 access token 过期属常态（ll-token 才是长期凭证），不告警。
+    if (this.mode() !== 'refresh' && this.envToken && !this._valid(this.envToken, 0) && seed !== this.envToken) {
       logger.warn('va', '.env 中的 VARIATIONAL_TOKEN 已失效，已改用缓存/自动登录；可清空该项。');
+    }
+    if (this.mode() === 'refresh') {
+      logger.info('va', `Variational 会话续期模式已启用（ll-token ${this.llToken ? '已就绪' : '缺失'}）。`);
     }
     await this.ensure({ boot: true });
     return this.token;
   }
 
   /**
-   * 仪表盘热切换：接纳一枚手动粘贴的 vr-token（自动登录被 Cloudflare 挑战拦时的兜底）。
-   * 校验 JWT exp → setToken → 落缓存 → 清失败计数。返回 { exp, hrs }；空/过期抛错。
-   * 注意：这里只保证 token 结构有效；能否真正访问账户由调用方随后用 portfolio 验证。
+   * 仪表盘热切换：接纳人工粘贴的凭证。
+   * - refresh 模式：{ token, llToken } 同会话一枚 access（可过期）+ ll-token；
+   * - manual 模式：{ token } 有效 access token（原行为）。
+   * 返回 { exp, hrs, mode }；不可用直接抛错。
    */
-  adopt(token) {
+  adopt(token, llToken = '') {
     const t = String(token || '').trim();
-    if (!t) throw new Error('token 为空。');
+    const ll = String(llToken || '').trim();
+    if (ll) this.llToken = ll;
+    if (!t) {
+      if (this.mode() === 'refresh' && this.hasToken()) {
+        this._writeCache(this.token);
+        this._failStreak = 0;
+        return { exp: this.exp, hrs: null, mode: 'refresh' };
+      }
+      throw new Error('token 为空；首次启用自动续期请同时粘贴 vr-token + vr-ll-token（同一会话）。');
+    }
     const exp = decodeJwtExp(t);
-    if (exp != null && exp * 1000 <= Date.now()) throw new Error('该 vr-token 已过期，请粘贴一枚新的。');
+    // refresh 模式允许过期 access token（同会话即可续）；manual 模式必须未过期
+    if (exp != null && exp * 1000 <= Date.now() && this.mode() !== 'refresh') {
+      throw new Error('该 vr-token 已过期，请粘贴一枚新的。');
+    }
     this._use(t);
     this._writeCache(t);
     this._failStreak = 0;
     const hrs = exp ? Math.max(1, Math.round((exp * 1000 - Date.now()) / HOUR)) : null;
-    logger.info('va', `已接纳手动粘贴的 vr-token${hrs ? `，有效约 ${hrs} 小时` : ''}。`);
-    return { exp, hrs };
+    logger.info('va', `已接纳手动粘贴的凭证（模式 ${this.mode()}）${hrs && exp * 1000 > Date.now() ? `，access token 有效约 ${hrs} 小时` : ''}。`);
+    return { exp, hrs, mode: this.mode() };
+  }
+
+  /** 被动捕获服务端 Set-Cookie（轮换兼容；实测当前不轮换）。 */
+  onServerCookies(cookies) {
+    if (!cookies) return;
+    if (cookies['vr-token']) this._use(cookies['vr-token']);
+    const ll = cookies['vr-ll-token'];
+    if (ll && ll !== this.llToken) {
+      this.llToken = ll;
+      this._writeCache(this.token);
+      logger.info('va', 'vr-ll-token 已被服务端轮换，已采纳并更新缓存。');
+    }
   }
 
   /**
-   * 确保 token 健康：缺失或剩余 < 24h 且可自签 → 续签。
-   * @param {{force?:boolean, boot?:boolean}} o force=401 立即续签（绕过健康判断，仍受节流）
-   * @returns {Promise<boolean>} 结束时是否持有有效 token
+   * 确保会话健康。
+   * refresh 模式：剩余 < 90s（或 force）→ refresh；需要 ll-token + 同会话 token。
+   * manual/siwe：原语义（缺失或 <24h 且可自签 → 登录）。
    */
   async ensure({ force = false, boot = false } = {}) {
     const left = this.msLeft();
+    if (this.mode() === 'refresh') {
+      if (!force && this.hasToken() && left > ACCESS_REFRESH_BELOW_MS) return true;
+      return this._ensureRefresh({ force, boot });
+    }
     const healthy = this.hasToken() && left > REFRESH_BELOW_MS;
     if (!force && healthy) return true;
     if (!this.canRefresh()) {
@@ -115,8 +205,6 @@ export class VaAuth {
     }
     const now = Date.now();
     this._loginTimes = this._loginTimes.filter((t) => now - t < HOUR);
-    // 节流：健康续签 5min；force（401 恢复）仍保留 60s 下限，避免持续 401 在十几秒内
-    // 烧光每小时配额后整点无法再续签。仅 boot 首登不节流。
     if (!boot) {
       const gap = force ? RELOGIN_FORCE_THROTTLE_MS : RELOGIN_THROTTLE_MS;
       if (now - this._lastLoginAt < gap) return this.hasToken();
@@ -125,9 +213,76 @@ export class VaAuth {
       logger.warn('va', '自动登录已达每小时上限（6 次），暂缓续签。');
       return this.hasToken();
     }
-    if (this._inflight) return this._inflight;   // 合并并发续签
+    if (this._inflight) return this._inflight;
     this._inflight = this._login().finally(() => { this._inflight = null; });
     return this._inflight;
+  }
+
+  async _ensureRefresh({ force = false, boot = false } = {}) {
+    if (!this.llToken) return this.hasToken() && this.msLeft() > 0;
+    if (!this.hasToken()) {
+      // 冷启动缺同会话 vr-token：ll-only 会被 400 拒绝（探针 v2）→ 需人工粘贴一次两者
+      if (!this._coldStartAlerted) {
+        this._coldStartAlerted = true;
+        this.onAlert?.('⚠️ Variational 续期模式缺少 vr-token（同会话）：请打开 Dashboard→VA 面板，同时粘贴 vr-token + vr-ll-token（同一会话、F12 Cookies 相邻两行）以启用自动续期。');
+      }
+      return false;
+    }
+    const now = Date.now();
+    this._refreshTimes = this._refreshTimes.filter((t) => now - t < TEN_MIN);
+    if (!boot) {
+      if (now - this._lastRefreshAt < REFRESH_THROTTLE_MS) return this.hasToken() && this.msLeft() > 0;
+    }
+    if (this._refreshTimes.length >= REFRESH_MAX_PER_10MIN) {
+      logger.warn('va', '会话续期已达 10 分钟上限（12 次），暂缓。');
+      return this.hasToken() && this.msLeft() > 0;
+    }
+    if (this._inflight) return this._inflight;
+    this._inflight = this._refresh().finally(() => { this._inflight = null; });
+    return this._inflight;
+  }
+
+  async _refresh() {
+    this._lastRefreshAt = Date.now();
+    this._refreshTimes.push(this._lastRefreshAt);
+    try {
+      const out = await this.http.refresh({ llToken: this.llToken, token: this.token, address: this.address });
+      if (!out?.ok || !out.token) {
+        const err = new Error(`续期被拒（HTTP ${out?.status}）${out?.detail ? `：${out.detail}` : ''}`);
+        err.status = out?.status;
+        throw err;
+      }
+      this._use(out.token);
+      const rotated = out.setCookies?.['vr-ll-token'];
+      if (rotated && rotated !== this.llToken) {
+        this.llToken = rotated;
+        this.onNotice?.('vr-ll-token 已被服务端轮换，已更新缓存。');
+      }
+      this._writeCache(this.token);
+      this._failStreak = 0;
+      this._totalRefresh++;
+      this._lastRefreshOkAt = Date.now();
+      // 日志限流：refresh 每 ~3.5 分钟一次，info 收敛到每小时一条（其余静默计数）
+      if (Date.now() - (this._lastRefreshLogAt || 0) > 55 * 60_000) {
+        this._lastRefreshLogAt = Date.now();
+        const expTxt = this.exp ? new Date(this.exp * 1000).toISOString().slice(11, 19) : '?';
+        logger.info('va', `会话已续期（refresh），新 token 有效至 ${expTxt}Z（累计 ${this._totalRefresh} 次）。`);
+      }
+      return true;
+    } catch (e) {
+      this._failStreak++;
+      this._totalRefreshFail++;
+      const msg = e?.message || String(e);
+      const status = e?.status;
+      if (this._failStreak >= 4 || status === 401 || status === 403) {
+        this.onAlert?.(`❌ Variational 会话续期失败（连续 ${this._failStreak} 次）：${msg}。请在网页重新登录后，于面板同时粘贴新的 vr-token + vr-ll-token。`);
+      } else if (this._failStreak >= 2) {
+        this.onAlert?.(`⚠️ Variational 会话续期连续 ${this._failStreak} 次失败：${msg}`);
+      } else {
+        logger.warn('va', `会话续期失败（第 ${this._failStreak} 次）：${msg}`);
+      }
+      return false;
+    }
   }
 
   async _login() {
@@ -150,7 +305,7 @@ export class VaAuth {
       // cf_clearance），curl_cffi 过不去、重试无意义 → 直接给出可操作提示（贴 token 兜底）。
       const challenged = /just a moment|challenge-platform|cf-chl|enable javascript|cloudflare/i.test(msg);
       if (challenged) {
-        this.onAlert?.('❌ Variational 自动登录被 Cloudflare 挑战拦截（/api/auth/login 需浏览器验证）。请粘贴一枚新的 vr-token（仪表盘或 .env 的 VARIATIONAL_TOKEN）以继续实盘交易。');
+        this.onAlert?.('❌ Variational 自动登录被 Cloudflare 挑战拦截（/api/auth/login 需浏览器验证）。请粘贴 vr-token + vr-ll-token（仪表盘 VA 面板）以启用自动续期。');
       } else if (this._failStreak >= 2) {
         this.onAlert?.(`❌ Variational 自动登录连续 ${this._failStreak} 次失败：${msg}。实盘交易可能中断，请检查 VA_WALLET_PRIVATE_KEY / 网络。`);
       } else {
@@ -169,7 +324,10 @@ export class VaAuth {
     if (!this.cachePath) return;
     try {
       fs.mkdirSync(path.dirname(this.cachePath), { recursive: true });
-      fs.writeFileSync(this.cachePath, JSON.stringify({ token, exp: this.exp, at: Date.now() }), { mode: 0o600 });
+      const payload = { token, exp: this.exp, at: Date.now() };
+      if (this.llToken) payload.llToken = this.llToken;
+      if (this.envLLToken) payload.envSeed = this.envLLToken; // 用于"用户改了 .env → env 优先"判定
+      fs.writeFileSync(this.cachePath, JSON.stringify(payload), { mode: 0o600 });
       try { fs.chmodSync(this.cachePath, 0o600); } catch { /* best-effort */ }
     } catch (e) { logger.warn('va', `token 缓存写入失败：${e?.message || e}`); }
   }

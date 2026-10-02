@@ -160,6 +160,7 @@ export function getConfig() {
     baseUrl: process.env.VA_BASE_URL || 'https://omni.variational.io',
     underlyings: vaUnderlyings.length ? vaUnderlyings : ['BTC'],
     token: process.env.VARIATIONAL_TOKEN || '',
+    llToken: process.env.VA_LL_TOKEN || '',   // vr-ll-token（长期凭证；5 分钟 token 自动续期）
     address: process.env.VA_ADDRESS || '',
     // 独立热钱包自动登录（SIWE）：配了私钥即可无人值守续签 vr-token；贴 token 仍优先。
     privateKey: process.env.VA_WALLET_PRIVATE_KEY || '',

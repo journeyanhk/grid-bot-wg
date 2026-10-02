@@ -6,6 +6,29 @@
 
 ## [Unreleased]
 
+## [1.6.12] - 2026-10-02
+
+### 新增（VA 5 分钟 token 自动续期，wg004-desgin15 探针 PASS 后实施）
+- **机制实测定稿**（探针 v2）：Omni 改"5 分钟 access + 长期 ll-token"；refresh 必须
+  `vr-ll-token` + **同会话 vr-token（可过期）** + 地址头；ll-only 400、旧会话 400、
+  缺地址头 401；ll-token 不轮换；限速 10 连发全过；新 token 可打账户接口
+- worker：新增 `refresh` 命令（ll+vr+address；回传 set_cookies）；普通请求也回传
+  set_cookies（被动轮换捕获面）
+- transport/httpclient：`refresh()` 通道；`beforeAuth` 前置续期钩子（减少 401 窗口）；
+  `onServerCookies` 被动采纳
+- auth（VaAuth）：mode() 三态（refresh/siwe/manual）；refresh 模式 <90s 续期、10s 节流、
+  12 次/10min 上限、并发合并；失败分级（≥2 warn、≥4 或 401/403 critical）；
+  ll-token 解析规则（cache 优先 + "env 变更优先" + 轮换持久化）；续期计数（核账用）；
+  冷启动缺同会话 token 时一次性提示
+- variational：poll ensure 全模式化；401 force；token 预警按模式分流（refresh 模式改报
+  "续期健康"：>3min warn / >5min critical）；adoptToken({token, llToken}) 即时续期验证
+- 面板：VA 会话凭证双输入框（vr-token + vr-ll-token）+ 指引；config/secret-env
+  （VA_LL_TOKEN 隔离，不漏给兄弟 worker）；工厂对"仅 ll-token"给出明确报错
+
+### 测试
+- va-auth 追加 12 例（模式判定/临期续期/节流/失败分级/轮换持久化/env 变更优先/
+  过期 token 接受/冷启动指引/httpclient 钩子）；npm test 15 项全绿
+
 ## [1.6.11] - 2026-09-24
 
 ### 修复（Review14：EX 快照抖动"0 秒连击 ×1306 次"的守卫盲区）

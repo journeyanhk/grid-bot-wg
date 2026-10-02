@@ -11,6 +11,7 @@
 /** 绝不应泄漏到兄弟 worker 的凭证类环境变量名。 */
 export const SECRET_ENV_KEYS = [
   'VA_WALLET_PRIVATE_KEY',
+  'VA_LL_TOKEN',
   'LIGHTER_API_PRIVATE_KEY',
   'LIGHTER_API_PRIVATE_KEY_FILE',
   'HL_AGENT_PRIVATE_KEY',
