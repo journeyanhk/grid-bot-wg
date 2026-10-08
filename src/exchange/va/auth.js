@@ -78,6 +78,9 @@ export class VaAuth {
   /** 当前 token 剩余毫秒；无 exp 但有 token 视为 Infinity（贴 token 无法判断的场景）。 */
   msLeft() { return this.exp ? this.exp * 1000 - Date.now() : (this.token ? Infinity : 0); }
 
+  /** 停用 refresh 模式（运行时降级；如续期端点不可用——官方回退时避免把有效 token 锁死）。 */
+  disableRefresh() { this._refreshExplicit = false; }
+
   /** 供面板/核账展示的续期统计。 */
   stats() {
     return {

@@ -54,3 +54,6 @@
 - 若官方恢复机制：配置 `VA_LL_TOKEN`（+ 同会话 `VARIATIONAL_TOKEN`）重启即重新启用；
   可先跑 `python3 scripts/va_probe.py refresh --run` 验证端点状态。
 - 运维提示：升级后建议 `rm -f .runtime/va_token.json` 并按 7 天节奏手动换 token（三档预警已恢复）。
+- 补充（v1.6.15）：即使 .env 残留 `VA_LL_TOKEN` 导致 refresh 模式启动，面板粘贴有效 token 时
+  会自动降级为手动模式接纳（不再锁死），并发出"自动续期已临时停用"通知。
+  彻底清干净：清空 `VA_LL_TOKEN` + `rm .runtime/va_token.json` + 重启。

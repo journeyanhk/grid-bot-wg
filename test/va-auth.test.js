@@ -384,4 +384,29 @@ const mkCache = () => path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random(
   fs.unlinkSync(cache);
 }
 
+// ㉕ 续期端点不可用（官方回退）时：adopt 有效 token 应降级手动接纳，不锁死入口
+{
+  const { VariationalExchange } = await import('../src/exchange/va/variational.js');
+  const ex = new VariationalExchange({
+    address: '0x8Ac241700C6cA53977e3a8CA96A088a6D70A76A0',
+    llToken: 'll.dead-session',
+    transport: 'node',   // 无 bridge -> http.refresh 必抛（模拟端点不可用）
+  });
+  ex._refreshAccount = async () => {};   // 免网
+  const notes = [];
+  ex._notify = (p) => notes.push(p);
+  const fresh = jwt(inHours(24));
+  const r = await ex.adoptToken({ token: fresh });
+  assert.equal(r.ok, true, '有效 token 应被接纳（降级手动）');
+  assert.equal(ex.auth.mode(), 'manual', '续期失败后降级为手动模式');
+  assert.equal(ex._tradingReady, true, '交易应恢复');
+  assert.ok(notes.some((p) => p.key === 'refresh-disabled'), '应发出降级通知');
+
+  // 反例：token 不可用（过期）时仍应拒绝
+  const ex2 = new VariationalExchange({ address: '0xA', llToken: 'll.dead', transport: 'node' });
+  ex2._refreshAccount = async () => {};
+  ex2._notify = () => {};
+  await assert.rejects(() => ex2.adoptToken({ token: jwt(inHours(-1)) }), /不可用|过期/, '过期 token 仍拒绝');
+}
+
 console.log('✓ va-auth.test.js 全部通过');

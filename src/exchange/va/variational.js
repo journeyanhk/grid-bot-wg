@@ -144,10 +144,24 @@ export class VariationalExchange extends EventEmitter {
     const llToken = typeof input === 'object' && input ? (input.llToken || '') : '';
     const info = this.auth.adopt(token, llToken);   // 校验/落库；不可用直接抛错
     try {
-      // refresh 模式：立刻续期一次，验证 ll-token 与 vr-token 同会话且链路可用
+      // refresh 模式：立刻续期一次，验证 ll-token 与 vr-token 同会话且链路可用。
+      // 若续期失败但刚贴的 token 本身有效（未过期）→ 降级为手动模式接纳，
+      // 避免"官方回退/端点不可用"时把有效 token 锁死在门外（2026-10-02 实测陷阱）。
       if (this.auth.mode() === 'refresh') {
         const ok = await this.auth.ensure({ force: true, boot: true });
-        if (!ok) throw new Error('凭证已接纳，但续期失败（vr-ll-token 与 vr-token 可能不是同一会话，或 ll-token 已失效）');
+        if (!ok) {
+          const exp = decodeJwtExp(this.auth.token);
+          const tokenUsable = this.auth.hasToken() && (exp == null || exp * 1000 > Date.now());
+          if (!tokenUsable) {
+            throw new Error('凭证已接纳，但续期失败且 token 不可用（vr-ll-token 与 vr-token 可能不是同一会话，或均已失效）');
+          }
+          this.auth.disableRefresh();
+          this._notify({
+            source: 'va', level: 'warn', key: 'refresh-disabled', cooldownMs: 60 * 60_000,
+            title: 'Variational 自动续期已临时停用',
+            message: '⚠️ 续期端点不可用（疑似官方回退），已按手动 token 继续交易；请在 token 临期前手动更换（三档预警已恢复）。',
+          });
+        }
       }
       await this._refreshAccount();            // portfolio 打通才算凭证真的可用
       this._tradingReady = true;
