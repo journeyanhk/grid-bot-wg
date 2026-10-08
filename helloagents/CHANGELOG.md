@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+## [1.6.14] - 2026-10-02
+
+### 变更（官方疑似回退 5 分钟机制：恢复手动 token，功能保留）
+- refresh 自动续期改为**显式门控**：仅 .env `VA_LL_TOKEN`（或面板显式提供）时启用；
+  缓存残留的旧 ll-token 不再单独触发（防止 7 天手动 token 临期撞已下线端点误告警）
+- 面板撤掉 vr-ll-token 输入，恢复"粘贴 vr-token"单入口 + 文案更新
+- 7 天手动 token 的"临期三档预警"随 mode()=manual 自动恢复
+- refresh 实现（worker/auth/transport/面板后端）保留，官方恢复后配置 VA_LL_TOKEN 即可再启用
+- docs/omni-api.md 记录回退处置与再启用步骤；.env.example 注释更新
+
+### 测试
+- va-auth 追加显式门控用例（缓存残值不启用 / 显式才启用）；npm test 15 项全绿
+
 ## [1.6.13] - 2026-10-02
 
 ### 修复（Review24：VA 续期 P1 + P2×2）

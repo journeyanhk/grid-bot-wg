@@ -51,6 +51,9 @@ export class VaAuth {
     this.token = '';
     this.exp = null;              // 秒
     this.llToken = String(llToken || '').trim();  // 构造期即可判 mode()；init 时按 cache/env 规则再校准
+    // 显式门控（2026-10-02 官方回退 5 分钟机制）：仅 .env/面板显式提供 ll-token 才启用 refresh 模式；
+    // 缓存残留的旧 ll-token 不再单独触发（否则 7 天手动 token 临期会撞已下线的 refresh 端点）。
+    this._refreshExplicit = !!this.envLLToken;
     this._loginTimes = [];        // 近 1h 登录尝试时间戳（节流）
     this._lastLoginAt = 0;
     this._refreshTimes = [];      // 近 10min refresh 时间戳（节流）
@@ -65,7 +68,7 @@ export class VaAuth {
 
   /** 模式：refresh（ll-token 自动续期）/ siwe（私钥）/ manual（人工 token）。 */
   mode() {
-    if (this.llToken && typeof this.http?.refresh === 'function') return 'refresh';
+    if (this._refreshExplicit && this.llToken && typeof this.http?.refresh === 'function') return 'refresh';
     if (this.hasPrivateKey && typeof this.http?.login === 'function') return 'siwe';
     return 'manual';
   }
@@ -158,7 +161,7 @@ export class VaAuth {
   adopt(token, llToken = '') {
     const t = String(token || '').trim();
     const ll = String(llToken || '').trim();
-    if (ll) this.llToken = ll;
+    if (ll) { this.llToken = ll; this._refreshExplicit = true; }
     if (!t) {
       if (this.mode() === 'refresh' && this.hasToken()) {
         this._writeCache(this.token);

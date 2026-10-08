@@ -368,4 +368,20 @@ const mkCache = () => path.join(os.tmpdir(), `vatok-${Date.now()}-${Math.random(
   assert.equal(notes.length, 1, '60s 节流内不重复');
 }
 
+// ㉔ 显式门控（2026-10-02 官方回退）：缓存残留 ll-token 不再单独启用 refresh 模式
+{
+  const cache = mkCache();
+  fs.writeFileSync(cache, JSON.stringify({ token: jwt(inHours(5)), llToken: 'stale.ll', envSeed: 'stale.ll' }));
+  const http = makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) }));
+  const a = new VaAuth({ http, address: '0xA', cachePath: cache });
+  await a.init();
+  assert.equal(a.mode(), 'manual', '仅缓存 ll-token -> 不启用 refresh（避免撞已下线端点）');
+  assert.equal(http.refreshCalls.length, 0);
+  assert.equal(a.llToken, 'stale.ll', '值仍解析（供未来显式再启用）');
+  // 显式配置（env/面板）才启用
+  const b = new VaAuth({ http: makeRefreshHttp(async () => ({ ok: true, status: 200, token: jwt(inHours(1)) })), address: '0xA', llToken: 'stale.ll' });
+  assert.equal(b.mode(), 'refresh', '显式 ll-token -> refresh 模式保留');
+  fs.unlinkSync(cache);
+}
+
 console.log('✓ va-auth.test.js 全部通过');
