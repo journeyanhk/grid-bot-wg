@@ -1,7 +1,7 @@
 // 阶段1 影子记录器测试：全生命周期（入场/加仓/分批止盈/移动止损/止损/信号退出/持仓熔断）、
 // 三组参数隔离、同根去重、成本四档、盘口滑点、决断门统计。
 import assert from 'node:assert/strict';
-import { createShadowRecorder, SHADOW_DEFAULTS } from '../src/strategy/shadow-recorder.js';
+import { createShadowRecorder, PARAM_SETS, SHADOW_DEFAULTS } from '../src/strategy/shadow-recorder.js';
 import { allScenarioCosts, fundingCost, legCost, slippageFromBook } from '../src/strategy/shadow-cost-model.js';
 import { computeStats, evaluateGate } from '../src/strategy/shadow-persistence.js';
 
@@ -24,7 +24,7 @@ function enterLong(rec) {
 
 // ── 生命周期：分批止盈到全平 ──
 test('多头全生命周期：入场 → TP1 → TP2 全平（tp_full）+ 三组隔离', () => {
-  const rec = createShadowRecorder({ now: () => 1_000_000_000 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 1_000_000_000 });
   enterLong(rec);
   assert.ok(r2(rec).position, 'r2fast 应已入场');
   assert.ok(bal(rec).position, 'balanced 应已入场（阈值 60）');
@@ -59,7 +59,7 @@ test('多头全生命周期：入场 → TP1 → TP2 全平（tp_full）+ 三组
 
 // ── 止损路径 ──
 test('止损：触发初始止损 -> reason=stop，净亏大于毛亏', () => {
-  const rec = createShadowRecorder({ now: () => 1_000_000_000 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 1_000_000_000 });
   enterLong(rec);
   const pos = r2(rec).position;
   const size = pos.filledSize;
@@ -74,7 +74,7 @@ test('止损：触发初始止损 -> reason=stop，净亏大于毛亏', () => {
 // ── 加仓路径 ──
 test('分层加仓：低点触及 Add1 -> 成交并更新均价，超时熔断收尾', () => {
   let fakeNow = 1_000_000_000;
-  const rec = createShadowRecorder({ now: () => fakeNow, shadowCfg: { ...SHADOW_DEFAULTS, maxHoldingHours: 0.001 } });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => fakeNow, shadowCfg: { ...SHADOW_DEFAULTS, maxHoldingHours: 0.001 } });
   enterLong(rec);
   const pos = r2(rec).position;
   const layer0 = pos.filledSize;
@@ -91,7 +91,7 @@ test('分层加仓：低点触及 Add1 -> 成交并更新均价，超时熔断�
 
 // ── 信号退出 ──
 test('信号退出：score 跌破退出阈值 -> reason=signal_exit', () => {
-  const rec = createShadowRecorder({ now: () => 1_000_000_000 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 1_000_000_000 });
   enterLong(rec);
   rec.onBar({ candle5m: candle(100, 101, 99, 100, 3), signal: { score: 10, direction: null }, barKey: 3, features: FEATURES });
   const trade = r2(rec).trades[0];
@@ -101,7 +101,7 @@ test('信号退出：score 跌破退出阈值 -> reason=signal_exit', () => {
 
 // ── 同根去重 ──
 test('同 barKey 重复驱动被忽略（入场/管理都不重复）', () => {
-  const rec = createShadowRecorder({ now: () => 1_000_000_000 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 1_000_000_000 });
   rec.onBar({ candle5m: candle(100, 100, 100, 100, 1), signal: SIG_LONG, barKey: 1, features: FEATURES });
   rec.onBar({ candle5m: candle(100, 100, 100, 100, 1), signal: SIG_LONG, barKey: 1, features: FEATURES });
   const evals1 = rec.getState().evaluations;
@@ -157,7 +157,7 @@ test('computeStats：PF/回撤/单日亏损', () => {
 });
 
 test('evaluateGate：样本不足时不通过且给出逐项原因', () => {
-  const rec = createShadowRecorder({ now: () => 1_000_000_000 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 1_000_000_000 });
   const gate = evaluateGate(rec.exportData(), { equity: 10_000, startedAt: Date.now() - 86_400_000 });
   assert.equal(gate.pass, false);
   assert.ok(gate.checks.some((c) => !c.ok), '应有未达标项');

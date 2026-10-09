@@ -75,6 +75,16 @@ export function accrueFunding(pos, toTime, fundingPoints, { finalize = false } =
   pos.funding.accruedThrough = cursor;
 }
 
+/**
+ * 当前激活的影子变体（2026-10-09 十七日终审）：
+ *   - r2fast：决策对象（正跑满 30 笔结案流程）
+ *   - strict：全周期 PF 最优（0.94）对照组
+ *   - balanced 停用（PF 0.83，与 strict 同构冗余）；r2faster 停用并死刑复核维持
+ *     （PF 0.46 / 净 -$10；低 ATR 段费率放大 2.4x 是主因）。
+ * PARAM_SETS 目录保留：历史报表解析旧数据、未来若立项第二季可直接复启用。
+ */
+export const ACTIVE_VARIANTS = Object.freeze(['r2fast', 'strict']);
+
 export const SHADOW_DEFAULTS = Object.freeze({
   equity: 10_000,          // 虚拟权益（仓位计算基准）
   initialRiskPct: 0.0015,  // 初始层风险 0.15%
@@ -88,7 +98,7 @@ export const SHADOW_DEFAULTS = Object.freeze({
 let tradeSeq = 0;
 
 export function createShadowRecorder(opts = {}) {
-  const paramSets = opts.paramSets || PARAM_SETS;
+  const paramSets = opts.paramSets || PARAM_SETS.filter((p) => ACTIVE_VARIANTS.includes(p.id));
   const shadow = { ...SHADOW_DEFAULTS, ...(opts.shadowCfg || {}) };
   const fees = { ...FEE_DEFAULTS, ...(opts.fees || {}) };
   const scenarios = opts.scenarios || COST_SCENARIOS;

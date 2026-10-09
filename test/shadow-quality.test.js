@@ -2,7 +2,7 @@
 // 资金费率逐时段累计/缺失、断档 K 线补处理、未平仓 MTM 入口径、覆盖率与资金完整度闸门、
 // ATR 来源一致性、盘口滑点仅诊断、重启恢复、有符号基差统计。
 import assert from 'node:assert/strict';
-import { accrueFunding, createShadowRecorder, SHADOW_DEFAULTS } from '../src/strategy/shadow-recorder.js';
+import { accrueFunding, createShadowRecorder, PARAM_SETS, SHADOW_DEFAULTS } from '../src/strategy/shadow-recorder.js';
 import { computePendingBars } from '../src/strategy/shadow-runner.js';
 import { evaluateRegime } from '../src/strategy/regime.js';
 import { composeDailyReport, computeStats, evaluateGate, fundingCompleteness, summarizeBasis } from '../src/strategy/shadow-persistence.js';
@@ -53,7 +53,7 @@ test('accrueFunding：finalize 尾段按最后已知费率估算，无已知费�
 
 test('recorder 集成：持仓横跨两个整点、费率中途变化 -> trade.fundingUsd 为分段和', () => {
   let fake = 0;
-  const rec = createShadowRecorder({ now: () => fake });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => fake });
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
   const pos = rec.configs.get('r2fast').position;
@@ -75,7 +75,7 @@ test('recorder 集成：持仓横跨两个整点、费率中途变化 -> trade.f
 
 test('recorder 集成：资金费率数据不可用 -> fundingUsd=0 且 missingMs>0（不当 0 计）', () => {
   let fake = 0;
-  const rec = createShadowRecorder({ now: () => fake });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => fake });
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
   fake = 3_600_000;
@@ -165,7 +165,7 @@ test('evaluateGate：未平仓 MTM 纳入后净收益与回撤使用浮动口径
 
 // ── ATR 来源 / 盘口采样口径（P1-1 / P1-2） ──
 test('ATR 来源：atr1h 缺失时不入场（不得退回 5M ATR）', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   const noAtr1h = { atr5m: 10, atr1h: null, structureLow: 95, structureHigh: 105 };
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: noAtr1h });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: noAtr1h });
@@ -174,7 +174,7 @@ test('ATR 来源：atr1h 缺失时不入场（不得退回 5M ATR）', () => {
 
 test('盘口采样：仅记录 bookObservedSlippage，不改变净 PnL（Review Option A）', () => {
   const drive = (withBook) => {
-    const rec = createShadowRecorder({ now: () => 0 });
+    const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
     rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
     rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT, bookSample: withBook ? { entryBps: 8.5 } : null });
     rec.onBar({ candle5m: cdl(600_000), signal: { score: 5, direction: null }, barKey: 600_000, features: FEAT });
@@ -188,12 +188,12 @@ test('盘口采样：仅记录 bookObservedSlippage，不改变净 PnL（Review 
 
 // ── 重启恢复 / 基差统计（P2-2 / 恢复） ──
 test('重启恢复：export/loadData 保留 funding 累计、bookSamples 与持仓', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT, bookSample: { entryBps: 3.2 } });
   rec.configs.get('r2fast').position.funding.totalUsd = 0.123;
   const data = rec.exportData();
-  const rec2 = createShadowRecorder({ now: () => 0 });
+  const rec2 = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   rec2.loadData(data);
   assert.equal(rec2.configs.get('r2fast').position.funding.totalUsd, 0.123, 'funding 累计恢复');
   assert.equal(rec2.configs.get('r2fast').position.side, 'long', '持仓恢复');
@@ -213,7 +213,7 @@ test('summarizeBasis：有符号均值 / |P95| / 溢价占比', () => {
 // ── Review2 首夜优化（v1.7.2） ──
 test('短命交易（<1h 未跨整点）：尾段用最近费率点回退 -> 完整度 100%', () => {
   let fake = 0;
-  const rec = createShadowRecorder({ now: () => fake });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => fake });
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
   // 持仓 30 分钟后信号退出（10:05 -> 10:35 类比，未跨整点）
@@ -227,7 +227,7 @@ test('短命交易（<1h 未跨整点）：尾段用最近费率点回退 -> 完
 });
 
 test('onBar 返回平仓事件（含完整 trade）供明细日志', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
   const events = rec.onBar({ candle5m: cdl(600_000), signal: { score: 5, direction: null }, barKey: 600_000, features: FEAT });
@@ -238,7 +238,7 @@ test('onBar 返回平仓事件（含完整 trade）供明细日志', () => {
 });
 
 test('统计分布：byExit / bySide 计数', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT });
   rec.onBar({ candle5m: cdl(600_000), signal: { score: 5, direction: null }, barKey: 600_000, features: FEAT });
@@ -248,7 +248,7 @@ test('统计分布：byExit / bySide 计数', () => {
 });
 
 test('盘口观测分布：4 位精度 + P50/P95/Max', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   const samples = [0.0012, 0.0031, 0.0008, 0.0095];
   rec.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   let i = 0;
@@ -257,7 +257,7 @@ test('盘口观测分布：4 位精度 + P50/P95/Max', () => {
     rec.configs.get('r2fast').bookObserved = { entryBps: bps };
   }
   // 通过 onBar 路径注入一次真实采样并校验摘要精度
-  const rec2 = createShadowRecorder({ now: () => 0 });
+  const rec2 = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   rec2.onBar({ candle5m: cdl(0), signal: SIG, barKey: 0, features: FEAT });
   rec2.onBar({ candle5m: cdl(300_000), signal: SIG, barKey: 300_000, features: FEAT, bookSample: { entryBps: 0.001234 } });
   const sum = rec2.getState().bookObserved;
@@ -267,7 +267,7 @@ test('盘口观测分布：4 位精度 + P50/P95/Max', () => {
 });
 
 test('composeDailyReport：首日模式不刷决断门；时间戳含 UTC 标注；明细含退出分布', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   const emptyData = rec.exportData();
   const firstDay = composeDailyReport({
     recorderData: emptyData,
@@ -300,7 +300,7 @@ const regimeFeatures = (adx = 30) => ({
 });
 
 test('r2faster：单次 5M 确认 + 阈值 40（r2fast 双确认对照）', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   const feat = regimeFeatures(30);
   const sig = evaluateRegime(feat);
   rec.onBar({ candle5m: cdl(0), signal: sig, barKey: 0, features: feat });
@@ -312,7 +312,7 @@ test('r2faster：单次 5M 确认 + 阈值 40（r2fast 双确认对照）', () =
 });
 
 test('r2faster 变体级 ADX 15：基准判 RANGE 的 ADX16 行情下可入场', () => {
-  const rec = createShadowRecorder({ now: () => 0 });
+  const rec = createShadowRecorder({ paramSets: PARAM_SETS, now: () => 0 });
   const feat = regimeFeatures(16);
   const base = evaluateRegime(feat);
   assert.equal(base.regime, 'range', '基准 adxMin=18 判 RANGE（ADX16）');
