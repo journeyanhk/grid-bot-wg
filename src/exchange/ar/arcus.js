@@ -1000,8 +1000,12 @@ export class ArcusExchange extends EventEmitter {
           message: `24 小时内已触发 ${this._dmsTriggers.length} 次自动撤单（上限 ${DMS_TRIGGER_QUOTA}）。配额用尽后进程再崩，挂单将无人兜底 —— 先查明崩溃原因，别急着重启。`,
         };
       }
+      // 已计入配额，清零避免下一轮把同一次触发再数一遍。
+      this._dmsDeadlineMs = 0;
     }
-    this._dmsDeadlineMs = 0;             // 先清掉，失败时下一轮才能重新识别"过期"
+    // 不能先清零再续期：续期失败时交易所侧的旧 deadline 还在走表，本地归零就
+    // 永远识别不到那次真触发（配额少算一类）。成功时 _armDms 自己覆盖，失败时
+    // 保留旧值让下一轮 tick 补判。
     await this._armDms();
   }
 

@@ -367,5 +367,38 @@ test('parsePositions 认 "按 marketId 键的对象" 与 averageEntryPrice', asy
   assert.equal(acct.equity, 981.7);
 });
 
+test('DMS 续期失败时保留旧 deadline，且同一次触发只计一次', async () => {
+  const ex = Object.create(ArcusExchange.prototype);
+  ex._dmsTriggers = [];
+  ex._dmsArms = [];
+  ex.operationalIssue = null;
+  // deadline 已过期 20s（grace 15s）→ 应判为"已触发"
+  ex._dmsDeadlineMs = Date.now() - 20_000;
+  let fail = true;
+  ex._armDms = async () => {
+    if (fail) throw new Error('network down');
+    ex._dmsArms.push(Date.now());
+    ex._dmsDeadlineMs = Date.now() + 60_000;
+    return true;
+  };
+
+  await ex._dmsTick().catch(() => {});
+  assert.equal(ex._dmsTriggers.length, 1, '过期未续期必须计一次触发（不能被清零后漏判）');
+
+  await ex._dmsTick().catch(() => {});
+  assert.equal(ex._dmsTriggers.length, 1, '同一次触发不能重复计数');
+
+  fail = false;
+  await ex._dmsTick().catch(() => {});
+  assert.ok(ex._dmsDeadlineMs > Date.now(), '续期成功后 deadline 应回到未来');
+
+  // 续期失败但尚未过期的场景：旧 deadline 必须原样保留，供下一轮补判
+  const future = Date.now() + 30_000;
+  ex._dmsDeadlineMs = future;
+  fail = true;
+  await ex._dmsTick().catch(() => {});
+  assert.equal(ex._dmsDeadlineMs, future, '续期失败不得把 deadline 清零');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

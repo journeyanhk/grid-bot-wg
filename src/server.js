@@ -879,7 +879,11 @@ async function resumeIfWasRunning(bot, exchange, key) {
         open = await exchange.fetchOpenOrders(snap.config.marketId);
       } catch { /* 读不到就按原路径走，让看门狗兜底 */ }
       if (Array.isArray(open) && open.length === 0) {
-        const pos = typeof exchange.getPosition === 'function' ? exchange.getPosition(snap.config.marketId) : null;
+        // getPosition 是 async：漏掉 await 读的是 Promise 的属性，sizeBase 恒为 0，
+        // 这条分支的全部意义（告诉人"单没了、仓还在"）就哑火了。
+        const pos = typeof exchange.getPosition === 'function'
+          ? await exchange.getPosition(snap.config.marketId).catch(() => null)
+          : null;
         const sizeBase = Math.abs(Number(pos?.sizeBase) || 0);
         logger.warn('server', `[恢复] ${key.toUpperCase()} 在簿 0 单（停机超死手 deadline 已全撤），改走全新铺梯；存量仓位 ${sizeBase || 0}`);
         if (snap.config.mode === 'recovery') {
