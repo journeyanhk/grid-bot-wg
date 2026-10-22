@@ -360,12 +360,20 @@ export class ArcusExchange extends EventEmitter {
       this.feeRate = (Number(def.makerFeePpm) || 0) / 1e6;
     }
     // 启动即断言：maker 不为 0 时网格单位经济不成立（1 格才 1 美分）。
+    // testnet 的费率表是模拟值（150/450ppm），不是真实成本——把它升成
+    // operationalIssue 会让测试网长跑永远挂着一条"运营异常"，验收单的
+    // "operationalIssue 全程 null" 也就永远不可能通过。测试网只留 warning。
     if (def && def.makerFeePpm > 0) {
-      this.operationalIssue = {
-        title: 'Arcus maker 费率非零',
-        message: `BTC-USD maker ${def.makerFeePpm}ppm / taker ${def.takerFeePpm}ppm。单格毛利约 $0.01，请重算净利后再启动实盘。`,
-      };
-      logger.warn('ar', this.operationalIssue.message);
+      const message = `BTC-USD maker ${def.makerFeePpm}ppm / taker ${def.takerFeePpm}ppm。单格毛利约 $0.01，请重算净利后再启动实盘。`;
+      if (this.network === 'testnet') {
+        this.feeWarning = { title: 'testnet 模拟费率', message };
+        logger.warn('ar', `${message}（testnet 模拟费率，不计入 operationalIssue）`);
+      } else {
+        this.operationalIssue = { title: 'Arcus maker 费率非零', message };
+        logger.warn('ar', message);
+      }
+    } else {
+      this.feeWarning = null;
     }
   }
 

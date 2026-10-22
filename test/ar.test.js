@@ -400,5 +400,22 @@ test('DMS 续期失败时保留旧 deadline，且同一次触发只计一次', a
   assert.equal(ex._dmsDeadlineMs, future, '续期失败不得把 deadline 清零');
 });
 
+test('testnet 模拟费率只进 warning，不污染 operationalIssue', async () => {
+  const markets = { markets: [{
+    marketId: 1, marketDisplayName: 'BTC-USD', symbol: 'BTC-USD',
+    makerFeePpm: 150, takerFeePpm: 450,
+    tickSize: '0.1', stepSize: '0.00000001', minOrderNotional: '5',
+    maxLeverage: 40, status: 'ACTIVE',
+  }] };
+  const expectations = [['testnet', false], ['mainnet', true]];
+  for (const [network, shouldFlag] of expectations) {
+    const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network });
+    ex._http = async () => markets;
+    await ex._loadMarkets(true);
+    assert.equal(!!ex.operationalIssue, shouldFlag, `${network} 的 operationalIssue 判定`);
+    if (!shouldFlag) assert.ok(ex.feeWarning, 'testnet 要留 warning 供巡检查看');
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

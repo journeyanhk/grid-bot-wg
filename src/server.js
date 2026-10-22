@@ -323,7 +323,19 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
       return send(res, 200, { analysis, candles: (candles || []).slice(-120) });
     }
 
-    if (subPath === '/state') return send(res, 200, bot.getState());
+    if (subPath === '/state') {
+      const state = bot.getState();
+      // 适配器级健康面（死手续期/触发计数、fills 游标年龄）不在 bot 的 getState() 里，
+      // 单独挂出来：24h 验收单要读 dmsDeadlineInMs / lastFillPollAgeMs，没有这个
+      // 字段就只能靠猜日志。取不到不影响主状态。
+      if (typeof exchange.health === 'function') {
+        try {
+          const h = exchange.health();
+          state.exchangeHealth = (h && typeof h.then === 'function') ? await h : h;
+        } catch { /* 健康面读失败不该让状态接口 500 */ }
+      }
+      return send(res, 200, state);
+    }
 
     if (subPath === '/start' && req.method === 'POST') {
       try { return send(res, 200, await bot.start(await readBody(req))); }

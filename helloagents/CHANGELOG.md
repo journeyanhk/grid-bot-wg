@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+## [1.6.23] - 2026-10-22
+
+### 让 24h 验收单"能被读到"的两处修正
+
+- **`/api/<key>/state` 挂出适配器健康面**（`exchangeHealth`）：死手续期次数 / 触发次数 /
+  `dmsDeadlineInMs`、`lastFillPollAgeMs` 原本只在适配器内部，状态接口读不到，验收只能靠猜日志。
+- **testnet 模拟费率不再升级成 `operationalIssue`**：testnet 费率表是 150/450ppm 的模拟值，
+  之前每次启动都把"maker 费率非零"写成运营异常，导致测试网长跑的
+  "operationalIssue 全程 null" 永远不可能通过。改为 `feeWarning`（仅供巡检查看），
+  主网仍按红线拦。新增回归测试（34 项全绿）。
+
+
 ## [1.6.22] - 2026-10-22
 
 ### D4 断网演练抓到的续跑崩溃（`send(...).catch is not a function`）
