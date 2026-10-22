@@ -401,11 +401,12 @@ test('DMS 续期失败时保留旧 deadline，且同一次触发只计一次', a
 });
 
 test('testnet 模拟费率只进 warning，不污染 operationalIssue', async () => {
+  // 字段名照抄 /v1/markets 真实回包：费率是 effectiveXxxFeePpm，状态必须是 ONLINE
   const markets = { markets: [{
     marketId: 1, marketDisplayName: 'BTC-USD', symbol: 'BTC-USD',
-    makerFeePpm: 150, takerFeePpm: 450,
+    effectiveMakerFeePpm: 150, effectiveTakerFeePpm: 450,
     tickSize: '0.1', stepSize: '0.00000001', minOrderNotional: '5',
-    maxLeverage: 40, status: 'ACTIVE',
+    maxLeverage: 40, status: 'ONLINE',
   }] };
   const expectations = [['testnet', false], ['mainnet', true]];
   for (const [network, shouldFlag] of expectations) {
