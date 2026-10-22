@@ -418,5 +418,14 @@ test('testnet 模拟费率只进 warning，不污染 operationalIssue', async ()
   }
 });
 
+test('空轮成交轮询也要打心跳（否则游标年龄永远是 null）', async () => {
+  const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network: 'testnet' });
+  ex._fetchFillRows = async () => [];
+  assert.equal(ex._lastFillPollAt, 0, '初始应为 0');
+  await ex._pollFills();
+  assert.ok(ex._lastFillPollAt > 0, '没有新成交也要更新心跳时间');
+  assert.equal(ex._fillsPrimed, true, '空轮同样算完成首轮对齐');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

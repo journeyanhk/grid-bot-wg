@@ -582,10 +582,14 @@ export class ArcusExchange extends EventEmitter {
   async _pollFills() {
     const from = Math.max(0, Math.floor((this._fillsFromMs - FILLS_OVERLAP_MS) * 1000));
     const rows = await this._fetchFillRows(from);
+    // 心跳先打，再判空：空轮直接 return 会让 lastFillPollAgeMs 在平静期永远是 null，
+    // 巡检分不清"这段时间没有成交"和"轮询循环已经死了"——验收单第 2 项直接失效。
+    this._lastFillPollAt = Date.now();
+    const priming = !this._fillsPrimed;
+    this._fillsPrimed = true;
     if (!rows.length) return;
     let newest = this._fillsFromMs;
     const fresh = [];
-    const priming = !this._fillsPrimed;
     for (const row of rows) {
       const f = this._mapFill(row);
       if (!f) continue;
@@ -601,13 +605,11 @@ export class ArcusExchange extends EventEmitter {
       fresh.push(f);
       if (f.createdAt > newest) newest = f.createdAt;
     }
-    this._fillsPrimed = true;
     if (this._fillsSeen.size > FILLS_SEEN_MAX) {
       const drop = [...this._fillsSeen].slice(0, this._fillsSeen.size - FILLS_SEEN_MAX + 1000);
       for (const k of drop) this._fillsSeen.delete(k);
     }
     if (newest > this._fillsFromMs) this._fillsFromMs = newest;
-    this._lastFillPollAt = Date.now();
     // 由旧到新推送，保证 bot 的补单顺序正确
     fresh.sort((a, b) => a.createdAt - b.createdAt);
     for (const f of fresh) {
