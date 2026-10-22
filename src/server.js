@@ -12,11 +12,19 @@ import { getConfig, ROOT } from './config.js';
 import { createExchange as createDeExchange } from './exchange/de/index.js';
 import { createExchange as createExExchange } from './exchange/ex/index.js';
 import { createExchange as createRsExchange } from './exchange/rs/index.js';
+import { createExchange as createLrExchange } from './exchange/lr/index.js';
+import { createExchange as createHlExchange } from './exchange/hl/index.js';
+import { createExchange as createVaExchange } from './exchange/va/index.js';
 import { GridBot } from './bot.js';
 import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
 import { loadSnapshot, saveSnapshot } from './persist.js';
 import { createAiService } from './ai/service.js';
+import { createAuditService } from './audit.js';
+import { notifier } from './notify.js';
+import { createResumeGuard, tryResumeBot } from './resume-guard.js';
+import { createMarketGate } from './market-gate.js';
+import { getEvents, upcomingEvents, activeWindow, firingEdges, getCalendarConfig, TYPE_LABEL, daysUntilExhausted } from './calendar/index.js';
 import { logger } from './log.js';
 
 // ── 启动配置 ─────────────────────────────────────────────────────────────────
@@ -45,6 +53,18 @@ logger.info('server', `启动 v${APP_VERSION}`);
     if (!cfg.rs.account) missing.push(['RISEx   ', 'ACCOUNT_ADDRESS', 'RISEx 应用的账户 / API 设置']);
     if (!cfg.rs.signerKey) missing.push(['RISEx   ', 'SIGNER_PRIVATE_KEY', 'RISEx 应用的账户 / API 设置']);
   }
+  if (cfg.lr.mode === 'live') {
+    if (!Number.isInteger(cfg.lr.accountIndex)) missing.push(['RHC     ', 'LIGHTER_ACCOUNT_INDEX', 'RHC 账户索引（数字）']);
+    if (!Number.isInteger(cfg.lr.apiKeyIndex) || cfg.lr.apiKeyIndex < 4) missing.push(['RHC     ', 'LIGHTER_API_KEY_INDEX', 'RHC API Key 索引（4-254，0-3 平台保留）']);
+    if (!cfg.lr.apiPrivateKey && !cfg.lr.apiPrivateKeyFile) missing.push(['RHC     ', 'LIGHTER_API_PRIVATE_KEY(_FILE)', 'RHC API 签名私钥或私钥文件路径']);
+  }
+  if (cfg.hl.mode === 'live') {
+    if (!cfg.hl.accountAddress) missing.push(['Entropy ', 'HL_ACCOUNT_ADDRESS', 'agent 钱包地址（官网授权可交易不可提现）']);
+    if (!cfg.hl.agentPrivateKey && !cfg.hl.agentPrivateKeyFile) missing.push(['Entropy ', 'HL_AGENT_PRIVATE_KEY(_FILE)', 'agent 钱包私钥或私钥文件路径']);
+  }
+  if (cfg.va.mode === 'live') {
+    if (!cfg.va.token && !cfg.va.privateKey) missing.push(['Variational', 'VARIATIONAL_TOKEN 或 VA_WALLET_PRIVATE_KEY', '贴 token 或独立热钱包私钥（SIWE 自动登录）之一']);
+  }
   if (missing.length) {
     console.error('\n[启动失败] 有交易所被设为 live 实盘模式，但 .env 里还缺以下凭据：\n');
     for (const [ex, key, where] of missing) {
@@ -69,7 +89,7 @@ if (proxyResult.used) {
     console.log('[代理检测] ✓ 代理正常，当前出口 IP: ' + chk.ip);
   } else {
     console.error('[代理检测] ✗ 代理无法联网：' + chk.error);
-    const hasLive = cfg.de.mode === 'live' || cfg.ex.mode === 'live' || cfg.rs.mode === 'live';
+    const hasLive = cfg.de.mode === 'live' || cfg.ex.mode === 'live' || cfg.rs.mode === 'live' || cfg.lr.mode === 'live' || cfg.hl.mode === 'live' || cfg.va.mode === 'live';
     if (hasLive) {
       console.error('  实盘模式已中止启动，以免在断网状态下运行造成挂单失控。');
       process.exit(1);
@@ -86,9 +106,26 @@ const deExchange = createDeExchange(cfg.de);
 const exExchange = createExExchange(cfg.ex);
 const rsExchange = createRsExchange(cfg.rs);
 
-const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s) });
-const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s) });
-const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s) });
+const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s),
+  onAlert: (a) => notifier.send({ source: 'de', message: `[Decibel] ${a.message}`, level: a.level, key: a.key ? 'de:' + a.key : undefined }) });
+const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s),
+  onAlert: (a) => notifier.send({ source: 'ex', message: `[Extended] ${a.message}`, level: a.level, key: a.key ? 'ex:' + a.key : undefined }) });
+const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s),
+  onAlert: (a) => notifier.send({ source: 'rs', message: `[RISEx] ${a.message}`, level: a.level, key: a.key ? 'rs:' + a.key : undefined }) });
+const lrExchange = createLrExchange(cfg.lr);
+const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s),
+  onAlert: (a) => notifier.send({ source: 'lr', message: `[RHC] ${a.message}`, level: a.level, key: a.key ? 'lr:' + a.key : undefined }) });
+const hlExchange = createHlExchange(cfg.hl);
+const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s),
+  onAlert: (a) => notifier.send({ source: 'hl', message: `[Entropy] ${a.message}`, level: a.level, key: a.key ? 'hl:' + a.key : undefined }) });
+const vaExchange = createVaExchange(cfg.va);
+// VA 会话 token 三档寿命预警：交易所内部判寿命，经通知总线按级别推送（info 仅面板，warn/critical 推手机）。
+vaExchange.onNotify = (p) => notifier.send({
+  source: p.source || 'va', level: p.level, message: p.message, title: p.title,
+  key: p.key ? 'va:' + p.key : undefined, cooldownMs: p.cooldownMs,
+});
+const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
+  onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
 // Restore cumulative stats / config from the previous run (display continuity).
 // Trading does NOT auto-resume; stray-order cleanup happens after each exchange
@@ -96,24 +133,126 @@ const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s) }
 deBot.restore(loadSnapshot('de'));
 exBot.restore(loadSnapshot('ex'));
 rsBot.restore(loadSnapshot('rs'));
+lrBot.restore(loadSnapshot('lr'));
+hlBot.restore(loadSnapshot('hl'));
+vaBot.restore(loadSnapshot('va'));
 
 // Belt-and-suspenders: ensure every exchange always has an 'error' listener so a
 // stray emit can never crash the process (the GridBot also attaches one).
-for (const ex of [deExchange, exExchange, rsExchange]) {
+for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange, vaExchange]) {
   ex.on('error', (e) => { logger.error('exchange', e?.message || String(e)); });
 }
 
 // ── AI 服务（哨兵/日报/分析/对话/出区间建议）────────────────────────────────
 const aiService = createAiService({
-  bots: { de: deBot, ex: exBot, rs: rsBot },
-  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange },
+  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  marketGate: () => marketGate, // 晚绑定：三绿看门创建于下方，AI 日报生成时读取
 });
 aiService.start();
+
+// ── VA 核账服务：每日一次对账（FIFO 实现盈亏 + 计数器增量 + _dynLog 回填），
+// 无异常发 info（仅面板），有异常升级 warn/critical 推手机。仅 live 生效。────
+const vaAudit = createAuditService({ bot: vaBot, exchange: vaExchange, source: 'va' });
+
+// ── 事件日历调度器：CPI/FOMC/非农 前后 ±window 分钟预警；可选自动暂停入场侧 ──
+const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot };
+let _calPrevTick = Date.now();
+const _calTimer = setInterval(() => {
+  try {
+    const { windowMin, autoPause } = getCalendarConfig();
+    const now = Date.now();
+    for (const { event, edge } of firingEdges(now, _calPrevTick, windowMin)) {
+      const label = TYPE_LABEL[event.type] || event.type;
+      const when = new Date(event.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+      if (edge === 'pre') {
+        notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + event.id + ':pre',
+          title: `事件预警 · ${label}`,
+          message: `⚠️ 约 ${windowMin} 分钟后：${event.title}（北京时间 ${when} 公布）。数据发布前后波动放大，注意单边风险。` });
+      } else {
+        notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + event.id + ':at',
+          title: `事件发布 · ${label}`,
+          message: `⚠️ ${event.title} 现已发布（北京时间 ${when}）。留意行情异动，未来约 ${windowMin} 分钟谨慎操作。` });
+      }
+    }
+    if (autoPause) {
+      const hit = activeWindow(now, windowMin);
+      if (hit) {
+        const until = hit.ts + windowMin * 60_000;
+        for (const b of Object.values(CAL_BOTS)) b.pauseOpening(until, `事件窗口：${hit.title}`);
+      }
+    }
+    _calPrevTick = now;
+  } catch (e) { logger.error('calendar', e?.message || String(e)); }
+}, 30_000);
+if (_calTimer.unref) _calTimer.unref();
+
+// 启动自检：①事件表 60 天内耗尽 → 年度更新兜底提醒；②若当前正落在事件窗口内 → 补发一条。
+{
+  const _now = Date.now();
+  const _daysLeft = daysUntilExhausted(_now);
+  if (_daysLeft < 60) {
+    notifier.send({ source: 'calendar', level: 'warn', key: 'cal:exhaust',
+      title: '事件日历即将耗尽',
+      message: `⚠️ 事件日历仅剩约 ${_daysLeft} 天数据，最后一个事件后将静默失效。请更新 src/calendar/index.js 的年度事件表。`,
+      cooldownMs: 24 * 60 * 60_000 });
+  }
+  const _hit = activeWindow(_now, getCalendarConfig().windowMin);
+  if (_hit) {
+    const _when = new Date(_hit.ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    notifier.send({ source: 'calendar', level: 'warn', key: 'cal:' + _hit.id + ':boot',
+      title: `事件窗口 · ${TYPE_LABEL[_hit.type] || _hit.type}`,
+      message: `⚠️ 当前正处于事件窗口：${_hit.title}（北京时间 ${_when}）。行情波动可能放大，注意单边风险。` });
+  }
+}
+
+// ── 存活看门狗（第二层）────────────────────────────────────────────────────
+// systemd 的 OnFailure 只能抓「进程整体崩溃」。但传输层子进程退出、轮询长时间
+// 卡死时，主进程还活着，systemd 一无所知——这半边由这里兜底。
+// 判据：交易所为 live 实盘、机器人在跑、已成功拉过一次数据（lastOkAt>0），
+// 但最近一次成功已超过 5 分钟 → 判定失联，critical 推送（30 分钟冷却）。
+// 恢复后补一条 info（仅面板，不打扰手机）。
+const LIVENESS_STALE_MS = 5 * 60_000;
+const _livenessStale = new Set();
+const _LIVENESS_TARGETS = [
+  { prefix: 'va', name: 'Variational', ex: vaExchange, bot: vaBot },
+  { prefix: 'de', name: 'Decibel', ex: deExchange, bot: deBot },
+  { prefix: 'ex', name: 'Extended', ex: exExchange, bot: exBot },
+  { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
+  { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
+  { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
+];
+const _wdTimer = setInterval(() => {
+  const now = Date.now();
+  for (const { prefix, name, ex, bot } of _LIVENESS_TARGETS) {
+    try {
+      const watched = ex?.mode === 'live' && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
+      if (!watched) { _livenessStale.delete(prefix); continue; }
+      const ageMs = now - ex.lastOkAt;
+      if (ageMs > LIVENESS_STALE_MS) {
+        _livenessStale.add(prefix);
+        const mins = Math.round(ageMs / 60_000);
+        notifier.send({ source: prefix, level: 'critical', key: 'liveness:' + prefix, cooldownMs: 30 * 60_000,
+          title: `${name} 失联`,
+          message: `🔴 ${name} 已 ${mins} 分钟未拉到交易所数据（进程仍在跑，systemd 无法察觉）。挂单可能处于无人监管状态，请立即检查 token/网络/子进程。` });
+      } else if (_livenessStale.has(prefix)) {
+        _livenessStale.delete(prefix);
+        notifier.send({ source: prefix, level: 'info', key: 'liveness:' + prefix + ':ok',
+          title: `${name} 已恢复`,
+          message: `✅ ${name} 数据连接已恢复正常。` });
+      }
+    } catch (e) { logger.error('watchdog', e?.message || String(e)); }
+  }
+}, 60_000);
+if (_wdTimer.unref) _wdTimer.unref();
 
 // SSE 客户端集合（按交易所分组）
 const deClients = new Set();
 const exClients = new Set();
 const rsClients = new Set();
+const lrClients = new Set();
+const hlClients = new Set();
+const vaClients = new Set();
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 const MIME = {
@@ -185,7 +324,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/stop' && req.method === 'POST') {
-      try { return send(res, 200, await bot.stop(await readBody(req))); }
+      try { bot.cancelAutoRestart?.(); return send(res, 200, await bot.stop(await readBody(req))); } // 手动停机：取消自动重启
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
@@ -200,12 +339,17 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/cancel-orders' && req.method === 'POST') {
-      try { return send(res, 200, await bot.cancelAllOrders()); }
+      try { bot.cancelAutoRestart?.(); return send(res, 200, await bot.cancelAllOrders()); } // 手动撤单取消自动重启
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
     if (subPath === '/start-recovery' && req.method === 'POST') {
       try { return send(res, 200, await bot.startRecovery(await readBody(req))); }
+      catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    if (subPath === '/refill' && req.method === 'POST') {
+      try { return send(res, 200, await bot.refillGrid()); }
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
@@ -222,17 +366,12 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
           const snap = loadSnapshot(key);
           if (snap?.running && snap?.config) {
             try {
-              // marketId 是按连接会话编号的，可能已漂移：按市场名称重新解析
-              const markets = await exchange.getMarkets();
-              const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-              const m = markets.find((x) => norm(x.displayName) === norm(snap.config.displayName) || norm(x.name) === norm(snap.config.displayName));
-              if (m) snap.config.marketId = m.marketId;
-              await bot.resume(snap);
+              // 共享续跑助手（与看门狗同源）：按市场名重解析 marketId 后接管
+              await tryResumeBot(bot, exchange, snap, key, logger);
               resumed = true;
-              logger.info('server', `${key.toUpperCase()} 重连成功后已自动续跑，接管挂单并完成对账。`);
             } catch (e) {
-              resumeError = e?.message || String(e); // 续跑失败不撤单：挂单保留，可重启程序再试
-              logger.error('server', `${key.toUpperCase()} 重连后续跑失败（${resumeError}），挂单保留未动。`);
+              resumeError = e?.message || String(e); // 续跑失败不撤单：挂单保留，看门狗会持续重试与兜底
+              logger.error('server', `${key.toUpperCase()} 重连后续跑失败（${resumeError}），挂单保留未动（看门狗接管重试）。`);
             }
           }
         }
@@ -244,7 +383,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/close-position' && req.method === 'POST') {
-      try { const b = await readBody(req); return send(res, 200, await bot.closePositionNow(b && b.marketId)); }
+      try { bot.cancelAutoRestart?.(); const b = await readBody(req); return send(res, 200, await bot.closePositionNow(b && b.marketId)); } // 手动平仓取消自动重启
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
@@ -267,20 +406,26 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
 const deHandler = makeExchangeHandler('/api/de', deBot, deExchange, cfg.de, deClients, 'Decibel');
 const exHandler = makeExchangeHandler('/api/ex', exBot, exExchange, cfg.ex, exClients, 'Extended');
 const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsClients, 'RISEx');
+const lrHandler = makeExchangeHandler('/api/lr', lrBot, lrExchange, cfg.lr, lrClients, 'RHC Lighter');
+const hlHandler = makeExchangeHandler('/api/hl', hlBot, hlExchange, cfg.hl, hlClients, 'Entropy');
+const vaHandler = makeExchangeHandler('/api/va', vaBot, vaExchange, cfg.va, vaClients, 'Variational');
 
 // ── 鉴权守卫（VPS 安全）──────────────────────────────────────────────────────
 // 三层防护：
 //  1. Origin 校验：带 Origin 头的请求必须来自回环来源或 PUBLIC_ORIGIN 白名单
 //     （阻断跨站请求 / CSRF）。
-//  2. Host 校验：未配置 DASHBOARD_TOKEN 时仅允许回环 Host（阻断 DNS rebinding
-//     兜底 —— 恶意域名即使解析到本机也无法通过 Host 校验）。
-//  3. Token 校验：配置了 DASHBOARD_TOKEN 后，所有 /api/* 请求必须携带有效令牌
-//     （X-Auth-Token header 或 SSE 的 ?token=），常量时间比较防时序侧信道。
+//  2. Host 校验：未配置任何鉴权时仅允许回环 Host（阻断 DNS rebinding 兜底）。
+//  3. 认证：账号密码模式（DASHBOARD_USER/PASS）→ 会话令牌；
+//     仅 DASHBOARD_TOKEN → 静态令牌；两者都不配 → 免认证（回环兜底）。
+//     令牌/会话比较均用常量时间比较防时序侧信道。
 const DASHBOARD_TOKEN = cfg.dashboardToken || '';
 const ALLOWED_ORIGINS = new Set([
   `http://localhost:${cfg.port}`, `http://127.0.0.1:${cfg.port}`, `http://[::1]:${cfg.port}`,
   ...cfg.publicOrigins,
 ]);
+const LOGIN_ENABLED = !!(cfg.dashboardUser && cfg.dashboardPass);
+const SESSION_MS = Math.max(60_000, Number(process.env.DASHBOARD_SESSION_MS || 12 * 3600 * 1000)); // 默认 12h
+const SESSIONS = new Map(); // sessionToken -> expiresAt
 
 function isLoopbackHost(host) {
   if (!host) return false;
@@ -289,17 +434,38 @@ function isLoopbackHost(host) {
 }
 
 function originAllowed(origin) {
-  if (!origin) return true; // 无 Origin（curl / 同源）→ 由 Host/token 校验兜底
+  if (!origin) return true; // 无 Origin（curl / 同源）→ 由 Host/认证校验兜底
   return ALLOWED_ORIGINS.has(String(origin).replace(/\/+$/, ''));
+}
+
+function timingEq(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
 
 function tokenValid(provided) {
   if (!DASHBOARD_TOKEN) return true; // 未配置令牌：免令牌（Host 校验兜底）
   if (!provided) return false;
-  const a = Buffer.from(DASHBOARD_TOKEN);
-  const b = Buffer.from(String(provided));
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  return timingEq(provided, DASHBOARD_TOKEN);
 }
+
+function sessionValid(token) {
+  if (!LOGIN_ENABLED) return tokenValid(token); // 无账号密码时退回静态令牌模式
+  if (!token) return false;
+  const exp = SESSIONS.get(String(token));
+  if (!exp) return false;
+  if (Date.now() > exp) { SESSIONS.delete(String(token)); return false; }
+  return true;
+}
+
+function issueSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  SESSIONS.set(token, Date.now() + SESSION_MS);
+  return token;
+}
+
+function authMode() { return LOGIN_ENABLED ? 'login' : (DASHBOARD_TOKEN ? 'token' : 'none'); }
 
 function rejectAuth(res, code, error) {
   if (res.headersSent) { try { res.end(); } catch { /* ignore */ } return;
@@ -312,29 +478,58 @@ const server = http.createServer(async (request, res) => {
   const p = url.pathname;
 
   try {
-    // ── 鉴权守卫（所有请求，含 SSE）──────────────────────────────────────
+    // ── 鉴权守卫（所有请求，含 SSE；/api/login 除外）─────────────────────
     if (!originAllowed(request.headers.origin)) {
       return rejectAuth(res, 403, '来源被拒绝');
     }
-    if (!DASHBOARD_TOKEN && !isLoopbackHost(request.headers.host || '')) {
+    if (!LOGIN_ENABLED && !DASHBOARD_TOKEN && !isLoopbackHost(request.headers.host || '')) {
       return rejectAuth(res, 403, '来源被拒绝');
     }
-    if (p.startsWith('/api/')) {
+    if (p.startsWith('/api/') && p !== '/api/login' && p !== '/api/version') {
       const token = request.headers['x-auth-token']
         || url.searchParams.get('token') || '';
-      if (!tokenValid(token)) return rejectAuth(res, 401, '未授权：缺少或错误的有效令牌');
+      if (!sessionValid(token)) return rejectAuth(res, 401, '未授权：请先登录');
     }
     // ── 版本号（前端展示用）────────────────────────────────────────────────
     if (p === '/api/version') {
-      return send(res, 200, { name: 'grid-bot-all', version: APP_VERSION });
+      return send(res, 200, { name: 'grid-bot-all', version: APP_VERSION, auth: authMode(), login: LOGIN_ENABLED });
+    }
+
+    // ── 登录 / 登出（账号密码模式）────────────────────────────────────────
+    if (p === '/api/login' && request.method === 'POST') {
+      try {
+        const b = await readBody(request);
+        if (!LOGIN_ENABLED) return send(res, 400, { error: '未配置账号密码（请在 .env 设置 DASHBOARD_USER/DASHBOARD_PASS）' });
+        const u = String(b.user || ''), pw = String(b.pass || '');
+        if (!timingEq(u, cfg.dashboardUser) || !timingEq(pw, cfg.dashboardPass)) {
+          return send(res, 401, { error: '用户名或密码错误' });
+        }
+        // 登录成功后顺手清理过期会话
+        const now = Date.now();
+        for (const [t, exp] of SESSIONS) if (exp <= now) SESSIONS.delete(t);
+        return send(res, 200, { ok: true, token: issueSession(), expiresInMs: SESSION_MS });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/logout' && request.method === 'POST') {
+      const t = request.headers['x-auth-token'] || url.searchParams.get('token') || '';
+      SESSIONS.delete(String(t));
+      return send(res, 200, { ok: true });
     }
 
     // ── 总览 API ──────────────────────────────────────────────────────────
+    if (p === '/api/market-gate') {
+      return send(res, 200, marketGate ? marketGate.snapshot() : { enabled: false });
+    }
+
     if (p === '/api/overview') {
       return send(res, 200, {
+        marketGate: marketGate ? marketGate.snapshot() : null,
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
+        lr: pick(lrBot.getState(), cfg.lr.mode),
+        hl: pick(hlBot.getState(), cfg.hl.mode),
+        va: pick(vaBot.getState(), cfg.va.mode),
       });
     }
 
@@ -348,15 +543,31 @@ const server = http.createServer(async (request, res) => {
       // send the current snapshot immediately (don't leave the client blank
       // until the next 1s broadcast tick)
       const initial = {
+        marketGate: marketGate ? marketGate.snapshot() : null,
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
+        lr: pick(lrBot.getState(), cfg.lr.mode),
+        va: pick(vaBot.getState(), cfg.va.mode),
+        hl: pick(hlBot.getState(), cfg.hl.mode),
       };
       res.write(`data: ${JSON.stringify(initial, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}\n\n`);
       const overviewClients = server._overviewClients;
       overviewClients.add(res);
       request.on('close', () => overviewClients.delete(res));
       return;
+    }
+
+    // ── 事件日历 API ───────────────────────────────────────────────────────
+    if (p === '/api/calendar') {
+      const now = Date.now();
+      const { windowMin, autoPause } = getCalendarConfig();
+      return send(res, 200, {
+        now, config: { windowMin, autoPause },
+        events: getEvents(),
+        upcoming: upcomingEvents(now, 45),
+        active: activeWindow(now, windowMin),
+      });
     }
 
     // ── AI 助手 API ───────────────────────────────────────────────────────
@@ -407,14 +618,15 @@ const server = http.createServer(async (request, res) => {
         de: process.env.DECIBEL_PROXY || '',
         ex: process.env.EXTENDED_PROXY || '',
         rs: process.env.RISEX_PROXY || '',
+        lr: process.env.LIGHTER_PROXY || '',
       });
     }
 
     if (p === '/api/env' && request.method === 'POST') {
       try {
         const { key, value } = await readBody(request);
-        const PROXY_KEYS = ['GLOBAL_PROXY','DECIBEL_PROXY','EXTENDED_PROXY','RISEX_PROXY'];
-        const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK'];
+        const PROXY_KEYS = ['GLOBAL_PROXY','DECIBEL_PROXY','EXTENDED_PROXY','RISEX_PROXY','LIGHTER_PROXY'];
+        const AI_KEYS = ['AI_PROVIDER','AI_API_KEY','AI_BASE_URL','AI_MODEL','AI_MODEL_SMALL','AI_SENTINEL_MINUTES','AI_MARKET_MINUTES','AI_REPORT_HOUR','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','NOTIFY_WEBHOOK','SERVERCHAN_SENDKEY','CALENDAR_ALERT_MINUTES','CALENDAR_AUTO_PAUSE'];
         if (!PROXY_KEYS.includes(key) && !AI_KEYS.includes(key)) return send(res, 400, { error: '不允许修改该字段: ' + key });
         // SECURITY: the value is written verbatim into .env. Reject anything that
         // could break out of a single KEY=VALUE line (newlines / control chars)
@@ -438,6 +650,10 @@ const server = http.createServer(async (request, res) => {
             if (!/^\d{1,2}$/.test(val) || Number(val) > 23) return send(res, 400, { error: '日报时间必须是 0-23 的整点小时。' });
           } else if (key === 'AI_BASE_URL' || key === 'NOTIFY_WEBHOOK') {
             if (!/^https?:\/\/\S+$/i.test(val)) return send(res, 400, { error: '必须是 http(s):// 开头的 URL。' });
+          } else if (key === 'CALENDAR_ALERT_MINUTES') {
+            if (!/^\d{1,4}$/.test(val) || Number(val) < 1) return send(res, 400, { error: '预警窗口必须是 ≥1 的分钟数。' });
+          } else if (key === 'CALENDAR_AUTO_PAUSE') {
+            if (!/^(on|off|1|0|true|false|yes|no)$/i.test(val)) return send(res, 400, { error: '自动暂停只能是 on / off。' });
           }
         }
         // 更新内存中的环境变量
@@ -468,6 +684,30 @@ const server = http.createServer(async (request, res) => {
     }
     if (p.startsWith('/api/rs/')) {
       return await rsHandler(request, res, p.slice('/api/rs'.length), url);
+    }
+    if (p.startsWith('/api/lr/')) {
+      return await lrHandler(request, res, p.slice('/api/lr'.length), url);
+    }
+    if (p.startsWith('/api/hl/')) {
+      return await hlHandler(request, res, p.slice('/api/hl'.length), url);
+    }
+    // VA 会话令牌热切换：自动登录被 Cloudflare 挑战拦截时，粘贴新 vr-token 免重启恢复。
+    if (p === '/api/va/token' && request.method === 'POST') {
+      try {
+        if (typeof vaExchange.adoptToken !== 'function') {
+          return send(res, 400, { error: 'Variational 当前非实盘会话，无需粘贴 token。' });
+        }
+        const { token, llToken } = await readBody(request);
+        return send(res, 200, await vaExchange.adoptToken({ token, llToken }));
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    // 手动触发一次 VA 核账并返回报告（面板"立即核账"按钮 / 排查用）。
+    if (p === '/api/va/audit') {
+      try { return send(res, 200, await vaAudit.runNow()); }
+      catch (e) { return send(res, 500, { error: e.message }); }
+    }
+    if (p.startsWith('/api/va/')) {
+      return await vaHandler(request, res, p.slice('/api/va'.length), url);
     }
 
     // ── 静态文件 ──────────────────────────────────────────────────────────
@@ -503,14 +743,33 @@ setInterval(() => {
     const data = `data: ${stringify(rsBot.getState())}\n\n`;
     for (const r of rsClients) { try { r.write(data); } catch { rsClients.delete(r); } }
   }
+  if (lrClients.size > 0) {
+    const data = `data: ${stringify(lrBot.getState())}\n\n`;
+    for (const r of lrClients) { try { r.write(data); } catch { lrClients.delete(r); } }
+  }
+  if (hlClients.size > 0) {
+    const data = `data: ${stringify(hlBot.getState())}\n\n`;
+    for (const r of hlClients) { try { r.write(data); } catch { hlClients.delete(r); } }
+  }
+  if (vaClients.size > 0) {
+    const data = `data: ${stringify(vaBot.getState())}\n\n`;
+    for (const r of vaClients) { try { r.write(data); } catch { vaClients.delete(r); } }
+  }
   if (server._overviewClients.size > 0) {
     const deState = deBot.getState();
     const exState = exBot.getState();
     const rsState = rsBot.getState();
+    const lrState = lrBot.getState();
+    const hlState = hlBot.getState();
+    const vaState = vaBot.getState();
     const overview = {
+      marketGate: marketGate ? marketGate.snapshot() : null,
       de: pick(deState, cfg.de.mode),
       ex: pick(exState, cfg.ex.mode),
       rs: pick(rsState, cfg.rs.mode),
+      lr: pick(lrState, cfg.lr.mode),
+      hl: pick(hlState, cfg.hl.mode),
+      va: pick(vaState, cfg.va.mode),
     };
     const data = `data: ${stringify(overview)}\n\n`;
     for (const r of server._overviewClients) { try { r.write(data); } catch { server._overviewClients.delete(r); } }
@@ -535,6 +794,10 @@ function pick(s, mode) {
     health: s.health ?? null,
     lastPrice: s.lastPrice,
     config: s.config,
+    position: s.position ?? null,
+    operationalIssue: s.operationalIssue ?? null,
+    apiWalletAddress: s.apiWalletAddress ?? null,
+    dynamic: s.dynamic ?? null,   // 动态网格状态（计数/自动停机/影子）供总览渲染
   };
 }
 
@@ -574,6 +837,9 @@ await Promise.all([
   initExchange(deExchange, 'Decibel', cfg.de),
   initExchange(exExchange, 'Extended', cfg.ex),
   initExchange(rsExchange, 'RISEx', cfg.rs),
+  initExchange(lrExchange, 'RHC Lighter', cfg.lr),
+  initExchange(hlExchange, 'Entropy', cfg.hl),
+  initExchange(vaExchange, 'Variational', cfg.va),
 ]);
 
 // ── 崩溃恢复 / 续跑 ────────────────────────────────────────────────────────────
@@ -585,7 +851,7 @@ async function resumeIfWasRunning(bot, exchange, key) {
   const snap = loadSnapshot(key);
   if (!(snap?.running && snap?.config)) return;
   if (exchange.dataSource == null) {
-    logger.info('server', `[恢复] ${key.toUpperCase()} 交易所未连接，跳过续跑；保留挂单待下次连接。`);
+    logger.info('server', `[恢复] ${key.toUpperCase()} 交易所未连接，跳过本轮续跑；已移交续跑看门狗持续重连与接管。`);
     return;
   }
   try {
@@ -593,15 +859,55 @@ async function resumeIfWasRunning(bot, exchange, key) {
     await bot.resume(snap);
     logger.info('server', `[恢复] ${key.toUpperCase()} 已续跑，接管挂单并完成对账。`);
   } catch (e) {
-    logger.error('server', `[恢复] ${key.toUpperCase()} 续跑失败（${e?.message || e}），改为撤销遗留挂单。`);
-    await bot.recoverStrayOrders().catch(() => {});
+    logger.error('server', `[恢复] ${key.toUpperCase()} 续跑失败（${e?.message || e}），已移交续跑看门狗重试与兜底。`);
   }
 }
 await Promise.all([
   resumeIfWasRunning(deBot, deExchange, 'de'),
   resumeIfWasRunning(exBot, exExchange, 'ex'),
   resumeIfWasRunning(rsBot, rsExchange, 'rs'),
+  resumeIfWasRunning(lrBot, lrExchange, 'lr'),
+  resumeIfWasRunning(hlBot, hlExchange, 'hl'),
+  resumeIfWasRunning(vaBot, vaExchange, 'va'),
 ]);
+
+// ── 续跑看门狗（Review22 / 9·21）────────────────────────────────────────────
+// 接管缺失态防护：快照 running=true 但 bot 未运行（重启时交易所未连上/续跑失败）
+// -> 自动退避重连（1/2/5/15 分，封顶永续）+ 补续跑（≥3 次尝试）+ 响亮告警
+// （卡片红 + notify 每 30 分钟重复）+ 10 分钟兜底撤单（仅撤单、永不动仓位）。
+const resumeGuard = createResumeGuard({
+  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  loadSnapshot, notifier, logger,
+});
+resumeGuard.start();
+
+// ── 市场三绿看门（重开窗口指示：BTC 1h 三指标）──────────────────────────────
+// 主源 Binance 公共 K 线（免密钥）；连续失败 2 次自动切换适配器 getCandles 兜底。
+// MARKET_GATE=0 可关闭；MARKET_GATE_SYMBOL 改标的（默认 BTC）。
+let marketGate = null;
+if (String(process.env.MARKET_GATE || '1') !== '0') {
+  const normSym = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const fallbackFetcher = async () => {
+    for (const [name, ex] of [['Extended', exExchange], ['RHC', lrExchange], ['Decibel', deExchange], ['RISEx', rsExchange], ['Entropy', hlExchange], ['Variational', vaExchange]]) {
+      try {
+        if (ex?.dataSource == null) continue;
+        const markets = await ex.getMarkets();
+        const m = markets.find((x) => normSym(x.symbol) === 'BTC' || normSym(x.displayName).startsWith('BTC') || normSym(x.name).startsWith('BTC'));
+        if (!m) continue;
+        const candles = await ex.getCandles(m.marketId, 3600, 96);
+        if (Array.isArray(candles) && candles.length >= 25) return { candles, source: name };
+      } catch { /* 换下一家 */ }
+    }
+    return null;
+  };
+  marketGate = createMarketGate({
+    fetchFallback: fallbackFetcher,
+    notifier, logger,
+    config: { symbol: process.env.MARKET_GATE_SYMBOL || 'BTC' },
+  });
+  marketGate.start();
+}
 
 // After init, surface any LEFTOVER position so the dashboard can prompt the user
 // (recovery ladder / re-grid / market close). Decibel & Extended RE-NUMBER their
@@ -637,6 +943,9 @@ server.listen(cfg.port, cfg.host, () => {
   console.log(`  Decibel  [${cfg.de.mode.toUpperCase()}]  ${cfg.de.network}`);
   console.log(`  Extended [${cfg.ex.mode.toUpperCase()}]  ${cfg.ex.network}`);
   console.log(`  RISEx    [${cfg.rs.mode.toUpperCase()}]  ${cfg.rs.network}`);
+  console.log(`  RHC      [${cfg.lr.mode.toUpperCase()}]  ${cfg.lr.network}`);
+  console.log(`  Entropy  [${cfg.hl.mode.toUpperCase()}]  ${cfg.hl.network} (${cfg.hl.dex})`);
+  console.log(`  Variational [${cfg.va.mode.toUpperCase()}]  ${cfg.va.network}`);
   console.log(`${'─'.repeat(52)}`);
   if (cfg.de.mode === 'paper' || cfg.ex.mode === 'paper' || cfg.rs.mode === 'paper') {
     console.log('  ⚠ 部分交易所为模拟模式，不涉及真实资金。');

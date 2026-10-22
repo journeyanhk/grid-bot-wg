@@ -52,9 +52,17 @@
 - RISEx 余额 `balance` 字段单位账户间不一致（原始 18 位 vs 人/币单位）：适配器用阈值启发式归一化（>1e12 ÷1e18）
 
 ## 已知问题（已规避）
+- Extended/RISEx 不启用开仓单安全重试（supportsSafeOpeningRetry=false，对齐原版仅 Lighter 开启的保守设计）：两者 open-orders 快照存在已知抖动，与"两次快照去重"的安全重试机制冲突
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
 ## 变更历史
+- [202609071613_entropy-hl](../../history/2026-09/202609071613_entropy-hl/) - 第5交易所 Entropy(HL) 接入 + 总览过滤（review19 后修复校准）
+- [202608311641_review5-optimize](../../history/2026-08/202608311641_review5-optimize/) - 零费率覆盖/AIMD 自适应配速/平仓腿优先
+- [202608311620_market-float-fix](../../history/2026-08/202608311620_market-float-fix/) - market.js 浮点缺陷修复（平台无关 stepSize/stepPrice）
+- [202608311611_rhc-throttle-fix](../../history/2026-08/202608311611_rhc-throttle-fix/) - RHC 铺单限流自激修复（批间配速/确认多轮/轮询降载/写请求间隔）
+- [202608311355_lighter-port](../../history/2026-08/202608311355_lighter-port/) - RHC Lighter 接入 + 部分成交记账修复
+- [202608191510_decibel-safety-l12](../../history/2026-08/202608191510_decibel-safety-l12/) - Decibel 第 1+2 层防护：撤单重试/幽灵单清理/回收撤单跳过幽灵
+- [202608181326_vps-hardening-v12](../../history/2026-08/202608181326_vps-hardening-v12/) - 撤单失败保留跟踪/forgetOrder/强平价/Decibel 错误翻译（operationalIssue）
 - [202608171533_risex-leverage](../../history/2026-08/202608171533_risex-leverage/) - 修复杠杆设置（permit_params + WAD）
 - [202608141916_risex-balance-unit](../../history/2026-08/202608141916_risex-balance-unit/) - 余额单位启发式归一化
 - [202608141857_risex-balance-fix](../../history/2026-08/202608141857_risex-balance-fix/) - 修复 RISEx 余额 1e18 单位换算 + 读取失败日志化

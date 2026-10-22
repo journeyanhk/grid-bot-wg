@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────
+# 崩溃告警单元（被 grid-bot.service 的 OnFailure= 触发）
+#
+# 作用：当主服务 grid-bot 在 10 分钟内连续崩溃 5 次、systemd 放弃重启
+#       并把它标记为 failed 时，本单元被自动拉起，往手机推一条 Server酱
+#       通知。这是「存活告警两层」里的第一层（进程整体趴下）。
+#       第二层（进程还活着但轮询卡死/失联）由 server.js 里的看门狗负责。
+#
+# 安装：
+#   1. 去 https://sct.ftqq.com 登录拿 SENDKEY（形如 SCTxxxxxxxx...）
+#   2. 编辑下方 ExecStart，把 <SENDKEY> 替换成你的真实 key
+#      （或改用 EnvironmentFile 从 .env 读，见文件末尾注释）
+#   3. cp deploy/grid-bot-alert.service /etc/systemd/system/
+#      systemctl daemon-reload
+#   4. 无需 enable —— 它由 grid-bot.service 的 OnFailure 自动触发
+#
+# 自测：systemctl start grid-bot-alert  应立即收到一条手机推送
+# ─────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Grid Bot 崩溃告警 - 主服务趴下时推送手机
+
+[Service]
+Type=oneshot
+# 把 <SENDKEY> 换成 Server酱 的真实 SENDKEY；%H 会展开成主机名
+ExecStart=/usr/bin/curl -fsS --max-time 20 \
+  "https://sctapi.ftqq.com/<SENDKEY>.send" \
+  --data-urlencode "title=🔴 网格机器人已崩溃 (%H)" \
+  --data-urlencode "desp=grid-bot 服务在 10 分钟内连续重启失败，systemd 已放弃拉起并标记为 failed。请立即 SSH 上机排查：journalctl -u grid-bot -n 100 --no-pager"
+# 推送失败不影响退出码，避免告警单元自己也进 failed 触发循环
+SuccessExitStatus=0 1 2 6 7 28
+
+# ── 备选：把 SENDKEY 放进 /etc/grid-bot-alert.env（SERVERCHAN_SENDKEY=SCTxxx），
+#    然后：
+#      EnvironmentFile=/etc/grid-bot-alert.env
+#      ExecStart=/usr/bin/curl -fsS --max-time 20 \
+#        "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" ...
+#    好处是 key 不进 git、多单元共用。

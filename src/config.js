@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** 可选数值环境变量：空/未配置返回 NaN（供 Lighter 的 accountIndex 等用）。 */
+function optionalNumber(name) {
+  const raw = process.env[name];
+  return raw == null || String(raw).trim() === '' ? Number.NaN : Number(raw);
+}
+
 export function loadEnv() {
   const file = path.join(root, '.env');
   if (fs.existsSync(file)) {
@@ -89,9 +95,12 @@ export function getConfig() {
   };
 
   // ── 仪表盘鉴权 ────────────────────────────────────────────────────────────
-  // DASHBOARD_TOKEN: 可选。配置后所有 /api/* 请求必须携带该令牌
-  // （REST 用 X-Auth-Token header，SSE 用 ?token= 参数），防止 VPS 公网部署
-  // 时被未授权访问。未配置时仅允许回环 Host 访问。
+  // 账号密码模式：DASHBOARD_USER + DASHBOARD_PASS 配置后，所有 /api/*（除
+  // /api/login）必须通过登录获取的会话令牌访问，VPS 公网部署推荐使用。
+  // 兼容模式：仅配置 DASHBOARD_TOKEN 时退化为静态令牌；两者都不配则仅允许
+  // 回环 Host 访问。
+  const dashboardUser = process.env.DASHBOARD_USER || '';
+  const dashboardPass = process.env.DASHBOARD_PASS || '';
   const dashboardToken = process.env.DASHBOARD_TOKEN || '';
   // PUBLIC_ORIGIN: 可选。逗号分隔的允许 Origin（VPS 用域名访问时配置，如
   // https://trade.example.com）。用于 Origin 校验，阻断跨站请求/DNS rebinding。
@@ -100,18 +109,98 @@ export function getConfig() {
     .map((s) => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
+  // ── Robinhood Chain Lighter (RHC) ────────────────────────────────────────
+  // 固定官方主网端点/profile。从不接收 ETH 钱包私钥，无提现/转账操作。
+  const lr = {
+    mode: (process.env.LR_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    apiUrl: 'https://api.rh.lighter.xyz',
+    wsUrl: 'wss://api.rh.lighter.xyz/stream',
+    chainId: 466324,
+    accountIndex: optionalNumber('LIGHTER_ACCOUNT_INDEX'),
+    apiKeyIndex: optionalNumber('LIGHTER_API_KEY_INDEX'),
+    apiPrivateKey: process.env.LIGHTER_API_PRIVATE_KEY || '',
+    apiPrivateKeyFile: process.env.LIGHTER_API_PRIVATE_KEY_FILE || '',
+    pythonPath: process.env.LIGHTER_PYTHON || '',
+    feeRate: Number(process.env.LIGHTER_FEE_RATE || 0.0005),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.LIGHTER_PROXY || globalProxy,
+  };
+
+  // ── Hyperliquid (HL) / Entropy io dex ────────────────────────────────────
+  // 固定官方主网端点 + dex:"io" 命名空间（HIP-3 建设者市场，如 io:ANTH）。
+  // 签名器只持 agent wallet 私钥（可交易不可提现）。
+  const hl = {
+    mode: (process.env.HL_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    apiUrl: 'https://api.hyperliquid.xyz',
+    infoUrl: 'https://api.hyperliquid.xyz/info',
+    chainId: 42161,
+    dex: process.env.HL_DEX || 'io',
+    accountAddress: process.env.HL_ACCOUNT_ADDRESS || '',
+    agentPrivateKey: process.env.HL_AGENT_PRIVATE_KEY || '',
+    agentPrivateKeyFile: process.env.HL_AGENT_PRIVATE_KEY_FILE || '',
+    pythonPath: process.env.HL_PYTHON || '',
+    feeRate: Number(process.env.HL_FEE_RATE || 0.0005),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.HL_PROXY || globalProxy,
+  };
+
+  // ── Variational Omni (VA) ────────────────────────────────────────────────
+  // RFQ/OLP 报价模型（无订单簿），全有或全无限价单，零手续费（点差成本）。
+  // LIVE 鉴权用 vr-token cookie（VARIATIONAL_TOKEN，贴 token 优先）。
+  // 精度默认保守，未经实盘校验前不要放大下单量（见 market.js 说明）。
+  const vaUnderlyings = (process.env.VA_UNDERLYINGS || 'BTC')
+    .split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+  const vaFundingInterval = optionalNumber('VA_FUNDING_INTERVAL_S');
+  const vaLeverage = optionalNumber('VA_LEVERAGE');
+  const va = {
+    mode: (process.env.VA_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: 'mainnet',
+    baseUrl: process.env.VA_BASE_URL || 'https://omni.variational.io',
+    underlyings: vaUnderlyings.length ? vaUnderlyings : ['BTC'],
+    token: process.env.VARIATIONAL_TOKEN || '',
+    llToken: process.env.VA_LL_TOKEN || '',   // vr-ll-token（长期凭证；5 分钟 token 自动续期）
+    address: process.env.VA_ADDRESS || '',
+    // 独立热钱包自动登录（SIWE）：配了私钥即可无人值守续签 vr-token；贴 token 仍优先。
+    privateKey: process.env.VA_WALLET_PRIVATE_KEY || '',
+    tokenCachePath: process.env.VA_TOKEN_CACHE || '.runtime/va_token.json',
+    slippageLimit: process.env.VA_SLIPPAGE_LIMIT || '0.005',
+    // Cloudflare: Node fetch -> 403, curl_cffi(Chrome) -> 200. 'bridge' spawns the
+    // Python transport worker and is the only mode that passes CF in prod.
+    transport: (process.env.VA_TRANSPORT || 'bridge').toLowerCase() === 'node' ? 'node' : 'bridge',
+    pythonPath: process.env.VA_PYTHON || '',
+    // 50 orders/instrument/order-type is a HARD server limit (probe-verified: 51st => HTTP 422).
+    maxOpenOrders: optionalNumber('VA_MAX_OPEN_ORDERS') || 50,
+    leverage: Number.isFinite(vaLeverage) ? vaLeverage : null,
+    instrument: {
+      instrumentType: process.env.VA_INSTRUMENT_TYPE || 'perpetual_future',
+      settlementAsset: process.env.VA_SETTLEMENT_ASSET || 'USDC',
+      fundingIntervalS: Number.isFinite(vaFundingInterval) ? vaFundingInterval : undefined,
+      kind: process.env.VA_KIND || '',
+    },
+    feeRate: Number(process.env.VA_FEE_RATE || 0.0001),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.VA_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
     // LIVE trading and edit .env) is NOT exposed to the local network. Set
     // HOST=0.0.0.0 explicitly only if you understand the risk and add your own auth.
     host: process.env.HOST || '127.0.0.1',
+    dashboardUser,
+    dashboardPass,
     dashboardToken,
     publicOrigins,
     globalProxy,
     de,
     ex,
     rs,
+    lr,
+    hl,
+    va,
   };
 }
 

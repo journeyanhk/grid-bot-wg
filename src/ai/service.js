@@ -9,14 +9,15 @@ import { aiChat, extractJson, notify, getAiConfig } from './provider.js';
 import { analyzeTrend } from '../trend.js';
 import { loadSnapshot, saveSnapshot } from '../persist.js';
 
-const EXNAMES = { de: 'Decibel', ex: 'Extended', rs: 'RISEx' };
+const EXNAMES = { de: 'Decibel', ex: 'Extended', rs: 'RISEx', lr: 'RHC Lighter', hl: 'Entropy' };
 
-export function createAiService({ bots, exchanges }) {
-  return new AiService(bots, exchanges);
+export function createAiService({ bots, exchanges, marketGate = null }) {
+  return new AiService(bots, exchanges, marketGate);
 }
 
 class AiService {
-  constructor(bots, exchanges) {
+  constructor(bots, exchanges, marketGate = null) {
+    this._marketGate = marketGate; // () => snapshot | null（三绿看门，晚绑定）
     this.bots = bots;             // { de, ex, rs } -> GridBot
     this.exchanges = exchanges;   // { de, ex, rs } -> adapter
     this.sentinel = null;         // 最近一次巡检 {t, level, summary, detail, advice}
@@ -81,7 +82,7 @@ class AiService {
   // ---------- 状态快照（喂给 AI 的紧凑上下文） ----------
   _snapshot() {
     const out = {};
-    for (const key of ['de', 'ex', 'rs']) {
+    for (const key of ['de', 'ex', 'rs', 'lr', 'hl']) {
       const s = this.bots[key].getState();
       out[key] = {
         exchange: EXNAMES[key], tradeMode: s.mode,
@@ -158,7 +159,7 @@ class AiService {
   // ---------- 2) 每日复盘 ----------
   _rebaseline() {
     const per = {};
-    for (const key of ['de', 'ex', 'rs']) {
+    for (const key of ['de', 'ex', 'rs', 'lr', 'hl']) {
       const s = this.bots[key].getState();
       per[key] = { equity: s.equity, realizedPnl: s.realizedPnl, completedRungs: s.stats?.completedRungs || 0, volume: s.volume || 0 };
     }
@@ -173,7 +174,7 @@ class AiService {
       const snap = this._snapshot();
       const base = this._baseline;
       const diff = {};
-      for (const key of ['de', 'ex', 'rs']) {
+      for (const key of ['de', 'ex', 'rs', 'lr', 'hl']) {
         const b = base?.per?.[key] || {};
         const s = snap[key];
         diff[key] = {
@@ -184,6 +185,15 @@ class AiService {
         };
       }
       const sinceHrs = base ? Math.round((Date.now() - base.t) / 3600_000 * 10) / 10 : null;
+      let gateLine = '';
+      try {
+        const mg = this._marketGate?.() || null;
+        if (mg?.ok) {
+          gateLine = `\n市场三绿（${mg.symbol}）：${mg.allGreen ? '🟢 达成（重开窗口开启）' : '🔴 未达成'} ｜ 振幅 ${mg.values?.amplitudePct}%（≤${mg.thresholds?.ampMaxPct}%）｜ 斜率 ${mg.values?.slopePctPerH}%/h ｜ 距上次极值 ${mg.values?.extremeAgeH}h${mg.gaps?.length ? '（' + mg.gaps.join('；') + '）' : ''}`;
+        } else if (mg) {
+          gateLine = `\n市场三绿（${mg.symbol}）：数据暂不可用${mg.error ? '（' + mg.error + '）' : ''}`;
+        }
+      } catch { /* 看门状态注入失败不影响日报 */ }
       const text = await aiChat({
         json: false, maxTokens: 1200, temperature: 0.4,
         system: [
@@ -192,7 +202,7 @@ class AiService {
           '3)风险点（保证金、区间边缘、挂单异常）；4)下一步的 1-3 条可执行建议。',
           '数字保留两位小数；paper 为模拟盘要注明；没跑的交易所一句话带过。总长 300 字以内。',
         ].join('\n'),
-        messages: [{ role: 'user', content: `统计周期：${sinceHrs != null ? '近 ' + sinceHrs + ' 小时' : '本期'}\n当前快照：${JSON.stringify(snap)}\n周期增量：${JSON.stringify(diff)}` }],
+        messages: [{ role: 'user', content: `统计周期：${sinceHrs != null ? '近 ' + sinceHrs + ' 小时' : '本期'}${gateLine}\n当前快照：${JSON.stringify(snap)}\n周期增量：${JSON.stringify(diff)}` }],
       });
       this.report = { t: Date.now(), text: text.trim() };
       this._rebaseline(); // 下一期从现在起算
@@ -257,7 +267,7 @@ class AiService {
     this._busy.market = true;
     try {
       let src = null, marketId = null;
-      for (const key of ['ex', 'de', 'rs']) {
+      for (const key of ['ex', 'de', 'rs', 'lr']) {
         const ex = this.exchanges[key];
         if (ex.dataSource !== 'real') continue; // 合成行情分析没有意义
         try {
@@ -303,14 +313,14 @@ class AiService {
     // 白名单过滤：任何未知 action 一律置为 none
     const ALLOWED = ['adjust_range', 'stop_grid', 'cancel_orders', 'close_position', 'reconnect', 'start_recovery', 'start_grid', 'none'];
     if (!j.action || !ALLOWED.includes(j.action.type)) j.action = { type: 'none' };
-    if (j.action.type !== 'none' && !['de', 'ex', 'rs'].includes(j.action.exchange)) j.action = { type: 'none' };
+    if (j.action.type !== 'none' && !['de', 'ex', 'rs', 'lr', 'hl'].includes(j.action.exchange)) j.action = { type: 'none' };
     return { reply: j.reply || '', action: j.action };
   }
 
   // ---------- 5) 出区间建议（跳变触发） ----------
   async _checkOutOfRange() {
     const cfg = getAiConfig();
-    for (const key of ['de', 'ex', 'rs']) {
+    for (const key of ['de', 'ex', 'rs', 'lr', 'hl']) {
       const bot = this.bots[key];
       const cur = !!(bot.running && bot.outOfRange);
       const prev = !!this._prevOor[key];

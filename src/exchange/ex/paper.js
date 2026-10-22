@@ -155,6 +155,12 @@ export class PaperExchange extends EventEmitter {
     this.orders.set(String(orderId), { orderId: String(orderId), marketId: Number(marketId), levelIndex, side, price: Number(price), sizeBase: Number(sizeBase), reduceOnly: false });
   }
 
+  forgetOrder(orderId) { this.orders.delete(String(orderId)); }
+
+  forgetOrders(marketId) {
+    for (const [id, o] of this.orders) if (Number(o.marketId) === Number(marketId)) this.orders.delete(id);
+  }
+
   getPosition(marketId) {
     const p = this.positions.get(Number(marketId));
     if (!p || p.sizeBase === 0) return null;

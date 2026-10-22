@@ -14,6 +14,7 @@
 // that reports its filledQty); only a positively-confirmed fill is reported.
 import { EventEmitter } from 'node:events';
 import { logger } from '../../log.js';
+import { createSnapshotJitterWatcher } from '../snapshot-jitter.js';
 import {
   selfTest, orderMsgHash, starkSign, settlementAmounts, alignToStep, parseDec, toHex,
   publicKeyFromPrivate,
@@ -39,9 +40,29 @@ export class ExtendedExchange extends EventEmitter {
     this.apiUrl = (opts.apiUrl || '').replace(/\/$/, '');
     this.network = opts.network || 'mainnet';
     this.feeRate = opts.feeRate || '0.0005'; // max fee signed into orders (taker is 0.00025)
+    this.displayFeeRate = opts.displayFeeRate ?? 0; // Extended maker 费率=0：仅用于展示/风控预检，与签名 maxFee 分离（消除虚假手续费告警）
     this.pollMs = opts.pollMs ?? 2500;
     this._graceMs = this.pollMs * 2; // grace before judging a just-placed order "gone"
     this.lastOkAt = 0;
+    this._emptyStreakStart = 0; // 空快照连击起点（>3min 升级健康事件）
+    // 抖动检测器（Review14）：连击时长逻辑对"高频翻转"失明（0 秒连击 ×1306 次 = 静默降级）；
+    // 滑动窗口空快照率 >30%（近10分钟/≥10轮）升级健康事件，恢复自动清除。
+    this._snapWatch = createSnapshotJitterWatcher({
+      tag: 'ex', label: 'Extended', logger,
+      onIssue: (j) => {
+        this.operationalIssue = {
+          title: 'Extended 挂单快照高频抖动',
+          message: `成交确认降级中（近10分钟空快照率 ${j.emptyRatePct}%，${j.empties}/${j.rounds} 轮）；建议重连交易所，持续抖动请记录会话差异并升级 WS 改造`,
+        };
+        if (Date.now() - (this._jitterAlertAt || 0) > 30_000) {
+          this._jitterAlertAt = Date.now();
+          this.emit('error', new Error(`Extended 挂单快照高频抖动：空快照率 ${j.emptyRatePct}%（${j.empties}/${j.rounds} 轮）——成交确认降级中，建议重连交易所。`));
+        }
+      },
+      onRecover: () => {
+        if (this.operationalIssue?.title === 'Extended 挂单快照高频抖动') this.operationalIssue = null;
+      },
+    });
     this.lastError = null;
     this.domain = DOMAINS[this.network] || DOMAINS.mainnet;
     this.markets = new Map();   // marketId -> market
@@ -265,12 +286,14 @@ export class ExtendedExchange extends EventEmitter {
       marketId: m.marketId, levelIndex: o.levelIndex, side: o.side,
       price: Number(priceStr), sizeBase: Number(qtyStr), seen: false,
       externalId, placedAt: Date.now(), goneAttempts: 0, resolving: false,
+      _crossedUp: false, _crossedDown: false, // 价格穿越推定（Review14 第三证据源）
     });
     return { orderId };
   }
 
   async cancelOrder(marketId, orderId) {
-    this._tracked.delete(String(orderId));
+    // 不在撤单请求前清跟踪：撤单失败时订单仍在交易所，保留跟踪才能继续
+    // 处理成交/对账；确认消失后由 GridBot 调用 forgetOrder 清理。
     return this._req('DELETE', `/api/v1/user/order/${orderId}`);
   }
 
@@ -306,8 +329,19 @@ export class ExtendedExchange extends EventEmitter {
     this._tracked.set(String(orderId), {
       marketId: mId, levelIndex, side, price: Number(price), sizeBase: Number(sizeBase),
       seen: false, placedAt: Date.now(), goneAttempts: 0, resolving: false,
+      _crossedUp: false, _crossedDown: false,
     });
   }
+
+  /** 撤单确认后清理本地跟踪（由 GridBot 在确认订单消失后调用） */
+  forgetOrder(orderId) { this._tracked.delete(String(orderId)); }
+
+  forgetOrders(marketId) {
+    for (const [id, o] of this._tracked) if (o.marketId === Number(marketId)) this._tracked.delete(id);
+  }
+
+  /** 空快照率（健康详情展示：降级状态必须可见）。 */
+  snapshotEmptyRatePct() { return this._snapWatch ? this._snapWatch.emptyRatePct() : null; }
 
   getPosition(marketId) {
     const p = this._pos.get(Number(marketId));
@@ -356,13 +390,48 @@ export class ExtendedExchange extends EventEmitter {
         const m = this.markets.get(mId);
         if (!m) continue;
         // price (also emitted for the dashboard)
-        this.getPrice(mId, { touch: false }).then((px) => { if (px) this.emit('price', { marketId: mId, price: px }); }).catch(() => {});
+        this.getPrice(mId, { touch: false }).then((px) => {
+          if (px) {
+            this.emit('price', { marketId: mId, price: px });
+            // 价格穿越推定：记录每个 tracked 是否曾被市场价格穿过其价位（Review14）
+            for (const t of this._tracked.values()) {
+              if (t.marketId !== Number(mId)) continue;
+              if (px >= t.price) t._crossedUp = true;
+              if (px <= t.price) t._crossedDown = true;
+            }
+          }
+        }).catch(() => {});
         // open orders -> fill detection
         let open = null;
-        try { open = await this._get(`/api/v1/user/orders?market=${encodeURIComponent(m.name)}`); } catch { /* keep */ }
+        try { open = await this._get(`/api/v1/user/orders?market=${encodeURIComponent(m.name)}`); } catch { open = null; }
+        // 抖动检测（Review14）：滑动窗口统计（有效快照轮次；取数失败不计数）
+        this._snapWatch.record(open, this._tracked.size);
+        // 适配器层空快照守卫（Review10 P2）：接口预热/抖动返回空数组但本地 tracking 很多时，
+        // 视为异常快照 —— 本轮不做任何 gone 判定（不启动/累积 goneAttempts），等下轮复核，
+        // 避免一次预热毛刺预支整梯 10 分钟耐心后批量判死。
+        if (Array.isArray(open) && open.length === 0 && this._tracked.size >= 10) {
+          if (!this._emptyStreakStart) this._emptyStreakStart = Date.now();
+          // Review12：空快照持续 >3 分钟视为健康事件（仪表盘变红，Telegram/AI 哨兵可见）
+          if (this._emptyStreakStart && Date.now() - this._emptyStreakStart > 3 * 60_000) {
+            this.operationalIssue = { title: 'Extended 挂单快照持续为空', message: '成交检测暂停中，请检查交易所状态 / 代理出口 IP' };
+          }
+          this._emptySnapshotAt = this._emptySnapshotAt || 0;
+          if (Date.now() - this._emptySnapshotAt > 60_000) {
+            this._emptySnapshotAt = Date.now();
+            logger.warn('ex', `快照为空但本地跟踪 ${this._tracked.size} 单，本轮跳过 gone 判定（已持续 ${Math.round((Date.now() - this._emptyStreakStart) / 1000)}s）。`);
+          }
+          open = null;
+        } else {
+          // 快照恢复：清除空快照健康事件与连击计时
+          this._emptyStreakStart = 0;
+          if (this.operationalIssue?.title === 'Extended 挂单快照持续为空') this.operationalIssue = null;
+        }
         if (open) {
           const liveIds = new Set(open.map((o) => String(o.id)));
-          for (const o of open) { const t = this._tracked.get(String(o.id)); if (t) { t.seen = true; t.goneAttempts = 0; } }
+          for (const o of open) {
+            const t = this._tracked.get(String(o.id));
+            if (t) { t.seen = true; t.goneAttempts = 0; t.goneFirstAt = 0; t._lastProbeAt = 0; } // 订单重现：耐心计时器归零（Review10 P1）
+          }
           const now = Date.now();
           for (const [id, t] of [...this._tracked]) {
             if (t.marketId !== mId || liveIds.has(id) || t.resolving) continue;
@@ -385,6 +454,7 @@ export class ExtendedExchange extends EventEmitter {
               sizeBase: size, entryPrice: Number(p.openPrice),
               unrealizedPnl: Number(p.unrealisedPnl ?? 0),
               leverage: p.leverage != null ? Number(p.leverage) : null,
+              liquidationPrice: firstFinite(p.liquidationPrice, p.estimatedLiquidationPrice, p.liquidation_price),
             });
           } else { this._pos.delete(mId); }
         } catch { /* keep last */ }
@@ -432,12 +502,14 @@ export class ExtendedExchange extends EventEmitter {
           if (avg > 0) fillPrice = avg;
         } else if (/CANCELLED|REJECTED|EXPIRED/i.test(st)) {
           verdict = 'cancelled';
+          t.confirmedCancel = true; // 记录"终态确认为取消"，见下方事件
         } else if (/NEW|OPEN|ACCEPTED|PENDING|UNTRIGGERED|PARTIAL/i.test(st)) {
           // History says the order is STILL LIVE: the open-orders snapshot that
           // reported it "gone" was a glitch. Revive tracking and bail out —
           // counting these toward the give-up threshold used to drop dozens of
           // perfectly live orders during an API hiccup.
           t.goneAttempts = 0;
+          t.goneFirstAt = 0; // P2-b: 复活后清零时间制耐心，二次消失重新计时（否则被上轮消耗提前判死）
           t.seen = true;
           return;
         }
@@ -445,15 +517,56 @@ export class ExtendedExchange extends EventEmitter {
     } catch { /* keep 'unknown' */ }
 
     if (verdict === 'unknown') {
-      t.goneAttempts = (t.goneAttempts || 0) + 1;
-      if (t.goneAttempts < 12) return; // re-check; tolerate order-history settlement lag
-      verdict = 'cancelled';           // never confirmed filled -> assume NOT filled (no re-quote)
+      // 修复（Review7）：把耐心从"次数(12轮≈60s)"改为"时间(10min)"。订单已不在簿上，
+      // 多等不会产生重复挂单风险；而"误判已成交为已撤销"的代价（档位永久空洞+库存无对腿）
+      // 远大于多等几分钟。夜间 API 结算滞后正是 12 次耐心被击穿的原因。
+      t.goneFirstAt = t.goneFirstAt || Date.now();
+      const unresolvedMs = Date.now() - t.goneFirstAt;
+      // 第二证据源：成交流水（尽力而为；端点/结构异常则忽略，不阻断主流程）。
+      // 订单消失 20 秒后再查，且每单 30s 节流——避免 20 单同时未决时每秒 8 个额外
+      // 请求，恰好给已滞后的 API 加压造成限流雪崩。
+      if (unresolvedMs >= 20_000 && Date.now() - (t._lastProbeAt || 0) >= 30_000) {
+        t._lastProbeAt = Date.now();
+        try {
+          const mkt = this.markets.get(Number(t.marketId))?.name || '';
+          const fills = await this._get(`/api/v1/user/trades?market=${encodeURIComponent(mkt)}`).catch(() => null);
+          const arr = Array.isArray(fills) ? fills : (Array.isArray(fills?.data) ? fills.data : []);
+          const row = arr.find((f) => String(f.order_id ?? f.orderId ?? f.external_id ?? '') === String(id)
+            || (t.externalId && String(f.order_id ?? f.orderId ?? f.external_id ?? '') === String(t.externalId)));
+          if (row) {
+            const fq = Number(row.filled_base_amount ?? row.filled_qty ?? row.filled_quantity ?? 0);
+            if (fq > 0) { verdict = 'filled'; fillSize = fq; const avg = Number(row.avg_price ?? row.average_price ?? row.price ?? 0); if (avg > 0) fillPrice = avg; }
+          }
+        } catch { /* 流水不可得：靠 10min 耐心兜底 */ }
+      }
+    }
+    // 第三证据源 — 价格穿越推定（Review14）：端点滞后击穿 history+trades 时，
+    // maker 限价单从簿上消失 + 市场价格曾穿越其价位 ≈ 成交（真成交场景可靠）。
+    // 90 秒分层：把补挂延迟从 10 分钟压到 1.5 分钟；未穿越的照旧走 10 分钟耐心（真取消保持正确）。
+    // 误判保险：方向与真成交相反，库存审计会立刻报反向漂移，形成闭环校验。
+    if (verdict === 'unknown') {
+      const unresolvedMs = Date.now() - (t.goneFirstAt || 0);
+      const crossed = (t.side === 'sell' && t._crossedUp) || (t.side === 'buy' && t._crossedDown);
+      if (crossed && unresolvedMs >= 90_000) {
+        verdict = 'filled'; fillPrice = t.price; fillSize = t.sizeBase;
+        this.crossInferredFills = (this.crossInferredFills || 0) + 1;
+        logger.warn('ex', `订单 ${id}（${t.side} @ ${t.price}）依据价格穿越推定成交（端点滞后），已记账并补挂对腿（累计 ${this.crossInferredFills}）。`);
+      }
+    }
+    if (verdict === 'unknown') {
+      if (Date.now() - (t.goneFirstAt || 0) < 10 * 60_000) return; // 10 分钟耐心（时间制）
+      // 响亮告警 + 计数，不再静默丢弃档位
+      this.droppedLevels = (this.droppedLevels || 0) + 1;
+      this.emit('error', new Error(`⚠️ 订单 ${id}（${t.side} @ ${t.price}）10 分钟仍无法确认终态，已放弃跟踪。该档位已空洞（累计 ${this.droppedLevels}），请核对交易所真实成交并考虑重启网格补齐。`));
+      verdict = 'cancelled';
     }
     this._tracked.delete(id);
     if (verdict === 'filled') {
       this.emit('fill', { orderId: id, marketId: t.marketId, side: t.side, price: fillPrice, sizeBase: fillSize, levelIndex: t.levelIndex });
-    } else {
-      this.emit('error', new Error(`订单 ${id}（${t.side} @ ${t.price}）未确认成交，已停止跟踪（不补单）。`));
+    } else if (verdict === 'cancelled' && t.confirmedCancel) {
+      // P2-c: 确认撤销恢复事件（措辞含"取消"以命中 _handleExError 的熔断正则，
+      // 否则 Extended 上批量撤单（如保证金不足）对撤单风暴熔断失明）
+      this.emit('error', new Error(`订单 ${id}（${t.side} @ ${t.price}）已被交易所取消（终态确认），该档位不补单。`));
     }
   }
 
@@ -471,4 +584,12 @@ export class ExtendedExchange extends EventEmitter {
       /* otherwise keep last known balance */
     }
   }
+}
+
+function firstFinite(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }

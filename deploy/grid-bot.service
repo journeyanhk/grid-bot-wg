@@ -8,8 +8,9 @@
 #   2. 配置 .env（务必设置 HOST=0.0.0.0 / DASHBOARD_TOKEN / PUBLIC_ORIGIN，
 #      VPS 安全要求见 README「VPS / 公网部署安全配置」）:
 #        cp .env.example .env && 编辑 .env
-#   3. 安装并启动服务:
-#        cp deploy/grid-bot.service /etc/systemd/system/
+#   3. 安装并启动服务（两个单元一起装：主服务 + 崩溃告警）:
+#        cp deploy/grid-bot.service deploy/grid-bot-alert.service /etc/systemd/system/
+#        编辑 /etc/systemd/system/grid-bot-alert.service 填入 Server酱 SENDKEY
 #        systemctl daemon-reload
 #        systemctl enable --now grid-bot
 #   4. 查看:
@@ -30,6 +31,11 @@ Documentation=https://github.com/journeyanhk/grid-bot-wg
 # 等待网络就绪再启动（机器人启动即连接交易所 API）
 After=network-online.target
 Wants=network-online.target
+# 10 分钟内连续崩溃 5 次仍拉不起来 → 进入 failed 状态，触发下面的告警单元
+StartLimitIntervalSec=600
+StartLimitBurst=5
+# 进程彻底趴下（超过重启上限）时，systemd 拉起告警单元推一条手机通知
+OnFailure=grid-bot-alert.service
 
 [Service]
 Type=simple

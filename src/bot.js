@@ -19,21 +19,29 @@ export class GridBot {
     this.active = new Map();        // orderId -> {levelIndex, side, price, opening, placedAt}
     this.fills = [];                // recent fills (capped)
     this.alerts = [];               // recent alerts (capped)
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0 };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0 };
     this.startBalance = null;
     this.lastPrice = null;
     this.outOfRange = false;
+    this._outTicks = 0;             // recover 迟滞：连续越过外侧半格的价格拍数（进破界需 ≥2 拍）
     this.risk = null;
     this._stopping = false;         // re-entrancy guard for auto-stop
     this._coidSeq = 0;              // monotonic client-order-id counter
     this._placeFails = 0;          // cumulative order-placement failures
     this._lastFailAt = 0;
     this._exchangeOpenOrders = null; // last reconciled real open-order count
+    this._exchangeOpenOrdersVerifiedAt = null; // authoritative REST snapshot time
     this._pendingLevels = new Set(); // levels with a placement in flight (dedup guard)
     this._recoveryOccupied = new Set(); // recovery: real exchange-occupied levels (from reconcile)
     this._reconTimer = null;
     this.recovery = false;          // standalone reduce-only recovery mode
     this._onChange = typeof opts.onChange === 'function' ? opts.onChange : null; // persistence hook
+    this._onAlert = typeof opts.onAlert === 'function' ? opts.onAlert : null;   // 通知总线钩子（server 接线，含来源标签）
+    this._fillLog = [];              // 成交流哨兵：近 1h 全部成交 {t, side, levelIndex, closing}
+    this._lastTrendAlertAt = 0;      // 成交流哨兵推送去重
+    // 触发阈值：显式设 TREND_FILL_N 则用之，否则按格数相对取值 max(5, round(格数×0.4))。
+    this._trendFillN = Number(process.env.TREND_FILL_N) || 0;
+    this._trendFillWindowMs = 60 * 60_000;
     this._onFill = (f) => this._handleFill(f);
     this._onPrice = (p) => this._handlePrice(p);
     // CRITICAL: an EventEmitter that emits 'error' with no listener crashes the
@@ -45,10 +53,37 @@ export class GridBot {
     this._refillPausedUntil = 0;     // back-off window: pause new placements until this time
     this._lastErrAlertAt = 0;
     this._lastErrLogAt = 0;
-    this._retryQueue = [];           // failed CLOSING-leg placements awaiting retry (never opening legs)
+    this._retryQueue = [];           // failed safe-to-retry placements awaiting authoritative reconciliation
+    this._retryDrainInFlight = false;
+    this._placementPasses = 0;
+    this._placementProgress = null;  // startup/refill target vs confirmed/pending levels
     this._noPosStreak = 0;           // consecutive empty-position observations (recovery finish guard)
     this._pnlBase = null;            // realizedPnl baseline; resetStats uses an offset because some
                                      // adapters (RISEx) re-fetch realizedPnl from the exchange every poll
+    // ── 动态网格（calm-gated auto-restart + drift recenter，默认影子模式）──
+    this._dynTimer = null;
+    this._dynInFlight = false;
+    this._lastDynActionAt = 0;
+    this._lastCalmDeniedAt = 0;
+    this._lastShadowGateLogAt = 0; // 动态影子：库存门拦截日志节流
+    // 动态动作记录（分支A/B，含影子'本应'）：毕业评审唯一数据源；进快照、封顶 200。
+    this._dynLog = [];
+    // 门拦截计数（每门每小时最多累加一次，近似'多少个小时窗内该门拦下了本应发生的动作'）。
+    this._dynGateBlocked = { inventory: 0, calm: 0, cooldown: 0 };
+    this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
+    this._auditNeedsRebase = false; // 恢复路径缺省既无基线又无锚点时，首次观测重校准
+    this._autoStopped = null;        // { at, reason:'breakout'|'maxloss', config } 自动停机记录 → 冷静门重启
+    this._lastVanishAlertAt = 0;
+    // Cancellation is safety-critical: require consecutive exchange snapshots
+    // showing target orders gone before local state is cleared or trading moves on.
+    this._cancelVerifyAttempts = opts.cancelVerifyAttempts ?? 12;
+    this._cancelVerifyDelayMs = opts.cancelVerifyDelayMs ?? 750;
+    this._cancelVerifyStableReads = opts.cancelVerifyStableReads ?? 2;
+    this._recoveryCancelInFlight = false;
+    this._finishingRecovery = false;
+    // 动态网格的统计计数器（getState 随 stats 输出，跨重启由快照保留）
+    this.stats.recenters = this.stats.recenters || 0;
+    this.stats.autoRestarts = this.stats.autoRestarts || 0;
   }
 
   /**
@@ -77,6 +112,15 @@ export class GridBot {
   /** Notify the persistence layer (if any) that durable state changed. */
   _changed() { try { this._onChange?.(this.snapshot()); } catch { /* never let persistence break trading */ } }
 
+  /** 外部组件（续跑看门狗）设置/清除 bot 级运营异常：优先级高于交易所自身 operationalIssue。 */
+  setOperationalIssue(issue) {
+    const next = issue ? { title: String(issue.title || ''), message: String(issue.message || '') } : null;
+    const cur = this._operationalIssue || null;
+    if (JSON.stringify(cur) === JSON.stringify(next)) return;
+    this._operationalIssue = next;
+    this._changed();
+  }
+
   /** Durable snapshot for crash recovery / resume. Includes resting orders. */
   snapshot() {
     return {
@@ -84,6 +128,14 @@ export class GridBot {
       recovery: this.recovery, pnlBase: this._pnlBase,
       startBalance: this.startBalance, outOfRange: this.outOfRange, lastPrice: this.lastPrice,
       active: [...this.active.entries()],
+      placementProgress: this._placementProgress,
+      retryQueue: this._retryQueue,
+      autoStopped: this._autoStopped,   // 动态网格：自动停机→冷静门重启状态
+      invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
+      auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
+      auditSellsBase: this._auditSellsBase ?? 0,
+      dynLog: this._dynLog,             // 动态动作记录（毕业评审数据源）
+      dynGateBlocked: this._dynGateBlocked, // 门拦截计数
     };
   }
 
@@ -94,9 +146,23 @@ export class GridBot {
   restore(snap) {
     if (!snap || !snap.config) return;
     this.config = snap.config;
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, ...(snap.stats || {}) };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
+    this._placementProgress = snap.placementProgress ?? null;
+    this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
+    this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
+    this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : []; // 动态动作记录（毕业评审）
+    this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
+      ? { inventory: 0, calm: 0, cooldown: 0, ...snap.dynGateBlocked } : { inventory: 0, calm: 0, cooldown: 0 };
+    this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
+    this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线
+    this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0); // 审计锚点（旧快照缺省=从现在重新对账）
+    this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
+    // Review13: 旧快照缺省时不"只重置锚点"（基线沿用旧值会不同步 layer 假漂移）——打重校准标记，首次观测时基线与锚点同刻校正
+    if (!Number.isFinite(Number(snap.auditBuysBase)) || !Number.isFinite(Number(snap.invBase))) this._auditNeedsRebase = true;
+    // P1-a: 崩溃重启后自动停机态可能待消费——监督器必须跨重启常驻，否则"跨重启自动重启"是死的
+    if (snap.config?.dynamic?.enabled) this._startDynTimer();
     try {
       this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
       this._recomputeRisk();
@@ -117,10 +183,23 @@ export class GridBot {
     if (snap.recovery || snap.config.mode === 'recovery') return this._resumeRecovery(snap);
     if (!Array.isArray(snap.active)) throw new Error('无可恢复的运行中网格快照');
     this.config = snap.config;
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, ...(snap.stats || {}) };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
+    this._placementProgress = snap.placementProgress ?? null;
+    this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
+      .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
+    this._restorePendingPlacementRetries();
+    this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线（跨重启保留）
+    // 审计锚点：旧快照缺省时取当前 stats（等效"从现在起重新对账"，跨重启不双重计数）
+    this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0);
+    this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
+    if (!Number.isFinite(Number(snap.auditBuysBase)) || !Number.isFinite(Number(snap.invBase))) this._auditNeedsRebase = true; // 基线/锚点同步（Review13）
     this.outOfRange = !!snap.outOfRange;
+    this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : [];
+    this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
+      ? { inventory: 0, calm: 0, cooldown: 0, ...snap.dynGateBlocked } : { inventory: 0, calm: 0, cooldown: 0 };
+    this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
     this.lastPrice = snap.lastPrice ?? null;
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
     this._recomputeRisk();
@@ -141,11 +220,17 @@ export class GridBot {
       }
     }
 
+    // 防重复附着（Review23 P2）：看门狗对 resume 失败做每分钟重试，附着后若
+    // ex.start() 抛错则 running 未置位、下轮重试会再挂一遍 -> 事件双倍处理。
+    // 先 off 再 on，保证监听恰好一份（对齐 _resumeTradingRuntime 既有模式）。
+    this.ex.off('fill', this._onFill);
+    this.ex.off('price', this._onPrice);
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);
     if (typeof this.ex.start === 'function') this.ex.start();
     this.running = true;
     this._startReconcileTimer();
+    this._startDynTimer();
     this._alert(`已恢复运行中的 ${this.config.displayName} ${labelMode(this.config.mode)}：接管 ${this.active.size} 个挂单，正在与交易所对账…`);
     this.reconcileOpenOrders().catch(() => {}); // immediate reconcile
     this._changed();
@@ -155,13 +240,16 @@ export class GridBot {
   /** Resume a standalone reduce-only recovery ladder after a process restart. */
   async _resumeRecovery(snap) {
     this.config = snap.config;
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, ...(snap.stats || {}) };
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this.grid = null; this.risk = null;
     this.recovery = true; this.outOfRange = false;
     this.lastPrice = snap.lastPrice ?? null;
-    this._noPosStreak = 0; this._retryQueue = [];
+    this._noPosStreak = 0;
+    this._placementProgress = snap.placementProgress ?? null;
+    this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
+      .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
     this.active.clear();
     for (const [id, info] of (Array.isArray(snap.active) ? snap.active : [])) {
       const oid = String(id);
@@ -173,6 +261,9 @@ export class GridBot {
         });
       } catch { /* best effort */ }
     }
+    // 防重复附着（Review23 P2）：同 resume()——看门狗重试前先 off 再 on
+    this.ex.off('fill', this._onFill);
+    this.ex.off('price', this._onPrice);
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);
     if (typeof this.ex.start === 'function') this.ex.start();
@@ -194,9 +285,118 @@ export class GridBot {
    */
   async recoverStrayOrders() {
     if (!this.config) return;
-    await this.ex.cancelAll(this.config.marketId).catch(() => {});
+    await this._cancelAllConfirmed(this.config.marketId, '恢复失败后清理遗留挂单');
     this._alert('⚠️ 检测到上次运行未正常结束：已撤销该市场遗留挂单。请确认仓位后重新启动网格。');
     this._changed();
+  }
+
+  /** Temporarily stop bot-side fill/price handling while cancellation is verified. */
+  _pauseTradingRuntime() {
+    this._stopReconcileTimer();
+    this.ex.off('fill', this._onFill);
+    this.ex.off('price', this._onPrice);
+  }
+
+  /** Restore tracking after a failed cancellation without duplicating listeners. */
+  _resumeTradingRuntime() {
+    if (!this.running || !this.config) return;
+    for (const [orderId, info] of this.active) {
+      try {
+        this.ex.adoptOrder?.({
+          orderId, marketId: this.config.marketId, levelIndex: info.levelIndex,
+          side: info.side, price: info.price, sizeBase: info.sizeBase ?? this.config.sizeBase,
+        });
+      } catch { /* reconciliation will retry */ }
+    }
+    this.ex.off('fill', this._onFill);
+    this.ex.off('price', this._onPrice);
+    this.ex.on('fill', this._onFill);
+    this.ex.on('price', this._onPrice);
+    if (typeof this.ex.start === 'function') this.ex.start();
+    this._startReconcileTimer();
+  }
+
+  /**
+   * Wait until all market orders (or selected IDs) are absent in consecutive
+   * snapshots. A single empty snapshot is not trusted because some APIs
+   * transiently return an incorrect empty order list.
+   */
+  async _confirmOrdersGone(marketId, orderIds = null) {
+    if (typeof this.ex.fetchOpenOrders !== 'function') {
+      throw new Error('交易所适配器不支持查询真实挂单，无法安全确认撤单。');
+    }
+    const wanted = orderIds ? new Set([...orderIds].map(String)) : null;
+    let stableEmpty = 0, sawValidSnapshot = false, lastRemaining = null, lastError = null;
+    for (let attempt = 1; attempt <= this._cancelVerifyAttempts; attempt++) {
+      try {
+        const real = await this.ex.fetchOpenOrders(marketId);
+        if (Array.isArray(real)) {
+          this._exchangeOpenOrders = real.length;
+          this._exchangeOpenOrdersVerifiedAt = Date.now();
+          sawValidSnapshot = true;
+          const remaining = wanted
+            ? real.filter((o) => wanted.has(String(o.orderId)))
+            : real;
+          lastRemaining = remaining.length;
+          if (remaining.length === 0) {
+            stableEmpty++;
+            if (stableEmpty >= this._cancelVerifyStableReads) return true;
+          } else {
+            stableEmpty = 0;
+          }
+        } else {
+          stableEmpty = 0;
+        }
+      } catch (e) {
+        lastError = e;
+        stableEmpty = 0;
+      }
+      if (attempt < this._cancelVerifyAttempts) await sleep(this._cancelVerifyDelayMs);
+    }
+    if (!sawValidSnapshot) {
+      throw new Error('撤单请求已发送，但无法从交易所读取挂单快照进行确认'
+        + (lastError ? `：${lastError?.message || lastError}` : '。'));
+    }
+    throw new Error(`撤单未完成确认：交易所仍检测到 ${lastRemaining ?? '未知'} 笔目标挂单。`);
+  }
+
+  /** Refresh the displayed real-order count without turning a successful trade
+   * action into a failure when the exchange's read endpoint is temporarily slow. */
+  async _refreshExchangeOpenOrderCount() {
+    if (!this.config || typeof this.ex.fetchOpenOrders !== 'function') return null;
+    try {
+      const real = await this.ex.fetchOpenOrders(this.config.marketId);
+      if (!Array.isArray(real)) return null;
+      this._exchangeOpenOrders = real.length;
+      this._exchangeOpenOrdersVerifiedAt = Date.now();
+      return real.length;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Ensure no order submission can land after the cancellation confirmation. */
+  async _waitForPendingPlacements() {
+    const deadline = Date.now() + 300_000;
+    while (this._pendingLevels.size > 0 || this._placementPasses > 0 || this._retryDrainInFlight) {
+      if (Date.now() >= deadline) {
+        throw new Error(`仍有下单/安全重试流程未结束（在途 ${this._pendingLevels.size} 笔），无法安全开始撤单。`);
+      }
+      await sleep(50);
+    }
+  }
+
+  /** Cancel a whole market and forget local adapter state only after confirmation. */
+  async _cancelAllConfirmed(marketId, action = '撤销全部挂单') {
+    await this._waitForPendingPlacements();
+    let accepted;
+    try { accepted = await this.ex.cancelAll(marketId); }
+    catch (e) { throw new Error(`${action}失败：${e?.message || e}`, { cause: e }); }
+    if (accepted === false) throw new Error(`${action}失败：交易所未接受撤单请求。`);
+    try { await this._confirmOrdersGone(marketId); }
+    catch (e) { throw new Error(`${action}后未能完成确认：${e?.message || e}`, { cause: e }); }
+    try { this.ex.forgetOrders?.(marketId); } catch { /* remote state is authoritative */ }
+    return true;
   }
 
   /** @param cfg {marketId, mode, lower, upper, gridCount, sizeBase, leverage, outOfRangeAction} */
@@ -211,6 +411,14 @@ export class GridBot {
     const market = (await this.ex.getMarkets()).find((m) => m.marketId === Number(cfg.marketId));
     if (!market) throw new Error('找不到该市场 marketId=' + cfg.marketId);
 
+    // VA 硬约束：单合约单一订单类型（limit）最多 50 个挂单（探针验证，第 51 个 => HTTP 422）。
+    // 网格挂单与回收阶梯共用这个额度，预留 5 格安全垫，避免补格/回收时触顶被拒。
+    if (market.maxOpenOrders) {
+      const budget = market.maxOpenOrders - 5;
+      if (Number(cfg.gridCount) > budget) {
+        throw new Error(`网格数 ${cfg.gridCount} 超过 ${market.displayName} 的挂单上限（${market.maxOpenOrders} 单/合约，需预留补格与回收阶梯，建议 ≤ ${budget}）。`);
+      }
+    }
     const leverage = Math.min(Number(cfg.leverage || 3), market.maxLeverage || 50);
     const sizeBase = Math.max(Number(cfg.sizeBase), market.minOrderSize || 0);
     this.config = {
@@ -220,15 +428,58 @@ export class GridBot {
       gridCount: Number(cfg.gridCount), sizeBase, leverage,
       // 区间外止损策略：'close'=冲破区间平仓（撤单+平仓+停止）；'recover'=只减仓回收阶梯
       outOfRangeAction: cfg.outOfRangeAction === 'recover' ? 'recover' : 'close',
+      // 破界出口纪律：recover 模式下若未实现亏损达到该上限（USDC），强制撤单+市价平仓+停止
+      // （recover 本身不止损，此值给单边行情一条硬退出线；0/缺省 = 不启用）
+      recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
+      // recover 破界迟滞：进/出破界都以「边界 ± recoverHystFrac 格」为缓冲带，配合连续 2 拍确认，
+      // 避免价格贴边抖动反复切换模式（默认半格）。0 = 仅保留 2 拍去抖、无空间缓冲。
+      recoverHystFrac: (Number.isFinite(cfg.recoverHystFrac) && Number(cfg.recoverHystFrac) >= 0) ? Number(cfg.recoverHystFrac) : 0.5,
+      // recover 回收阶梯首档偏移：从「边界 ± N 格」起挂 reduce-only 减仓单（默认 2 格，
+      // 给刚破界的抖动留缓冲，避免一破界就减仓）。显式传 Infinity/'inf'/'none' = 不挂阶梯
+      // （破界后纯持有，只靠 recoverMaxLossUsd 硬退出）。回测结论出来前不默认 ∞。
+      recoverLadderOffsetGrids: (() => {
+        const v = cfg.recoverLadderOffsetGrids;
+        // 存字符串 'inf' 而非 JS Infinity：JSON.stringify(Infinity)=null，重启 restore
+        // 后 Number(null)=0 会静默把"不挂阶梯"变成"从边界本身开始挂"（比默认还激进）。
+        if (v === Infinity || v === 'inf' || v === 'infinity' || v === 'none') return 'inf';
+        return (Number.isFinite(Number(v)) && Number(v) >= 0) ? Number(v) : 2;
+      })(),
+      minOrderSize: market.minOrderSize || 0,   // 尘埃仓守卫用：部分成交低于最小下单量时跳过补挂对腿
+      // 动态网格：核心是"冷静门控自动重启"（破界止损后只在市场平静时回场），
+      // 另有"漂移重定"（默认影子模式）。所有动作只复用 start/adjustRange，无新增下单路径。
+      dynamic: {
+        enabled: !!(cfg.dynamic && cfg.dynamic.enabled),
+        shadow: !(cfg.dynamic && cfg.dynamic.shadow === false),   // 默认影子模式
+        driftFrac: Number.isFinite(cfg.dynamic?.driftFrac) ? Number(cfg.dynamic.driftFrac) : 0.33,   // 偏心 > 宽度×此值才考虑重定
+        invGateGrids: Number.isFinite(cfg.dynamic?.invGateGrids) ? Number(cfg.dynamic.invGateGrids) : 2,   // 净库存 ≤ N 格才允许重定
+        recenterCooldownMin: Number.isFinite(cfg.dynamic?.recenterCooldownMin) ? Number(cfg.dynamic.recenterCooldownMin) : 360,
+        // 分支 A 独立开关（Review21）：默认关闭——放行顺序必须"先 B 后 A"，
+        // 影子模式关闭时若未显式启用，A 继续以影子方式记录"本应重定"样本
+        recenterEnabled: !!(cfg.dynamic && cfg.dynamic.recenterEnabled),
+        restartEnabled: !(cfg.dynamic && cfg.dynamic.restartEnabled === false), // 价值主体
+        restartCooldownMin: Number.isFinite(cfg.dynamic?.restartCooldownMin) ? Number(cfg.dynamic.restartCooldownMin) : 120,
+        calmWindowH: Number.isFinite(cfg.dynamic?.calmWindowH) ? Number(cfg.dynamic.calmWindowH) : 120,   // 动量窗口：5 天
+        calmMaxMovePct: Number.isFinite(cfg.dynamic?.calmMaxMovePct) ? Number(cfg.dynamic.calmMaxMovePct) : 3,   // |N日涨跌| ≤3% 视为平静
+      },
       stepSize: market.stepSize, stepPrice: market.stepPrice,
     };
     this.grid = buildGrid({ lower: this.config.lower, upper: this.config.upper, gridCount: this.config.gridCount });
     this._recomputeRisk();
     this._refillPausedUntil = 0; this._cancelTimes = []; // fresh start clears any back-off
     this._retryQueue = []; this._noPosStreak = 0;
+    this._placementProgress = null;
     this.recovery = false;
+    this._outTicks = 0;
 
     // record the starting equity up front (margin pre-check, returnPct, recovery)
+    // 库存基线：保留持仓重启时，把启用时刻的已有持仓记为基线，库存漂移审计减去它，
+    // 避免"每次保留持仓重启都报假警"（用户明知的遗留库存）。
+    try { this._invBase = Number(this.ex.getPosition?.(market.marketId)?.sizeBase) || 0; } catch { this._invBase = 0; }
+    // 审计锚点：与库存基线同一时刻记录成交计数起点——成交计数是跨重启累计的，
+    // 重启前的成交既算进基线持仓、又留在流水推导里会被双重计数成"假漂移"。
+    // 锚定后推导只统计"这次重启之后"的成交（Review11）。
+    this._auditBuysBase = this.stats.buys;
+    this._auditSellsBase = this.stats.sells;
     if (this.startBalance == null) {
       this.startBalance =
         typeof this.ex.equity === 'number' ? this.ex.equity
@@ -250,7 +501,8 @@ export class GridBot {
     }
 
     // ---- fee vs spacing sanity check ----
-    const feeRate = Number(this.ex.feeRate) || 0.0005;
+    const feeRaw = Number(this.ex.displayFeeRate ?? this.ex.feeRate); // 优先真实费率（Extended displayFeeRate=maker0 / RHC=feeRate 零费率）
+    const feeRate = Number.isFinite(feeRaw) ? feeRaw : 0.0005; // 区分"零费率"与"未知"：0 合法，仅未知才兜底
     const roundTripFeePct = feeRate * 2 * 100;
     if (this.risk.spacingPct <= roundTripFeePct) {
       this._alert(`⚠️ 网格间距 ${this.risk.spacingPct}% 不足以覆盖往返手续费（约 ${round2(roundTripFeePct)}%），每完成一格可能亏损。建议拉大间距或减少网格数。`);
@@ -258,7 +510,7 @@ export class GridBot {
 
     const levOk = await this.ex.setLeverage(market.marketId, leverage).catch(() => false);
     if (levOk === false) this._alert(`⚠️ 杠杆设置 ${leverage}x 未生效，将沿用交易所端该市场的当前杠杆，请在交易所网页端核实后再继续。`);
-    await this.ex.cancelAll(market.marketId).catch(() => {});
+    await this._cancelAllConfirmed(market.marketId, '启动网格前撤销原有挂单');
 
     this.lastPrice = await this.ex.getPrice(market.marketId);
     if (!Number.isFinite(this.lastPrice) || this.lastPrice <= 0) {
@@ -267,30 +519,62 @@ export class GridBot {
     if (this.lastPrice < this.config.lower * 0.5 || this.lastPrice > this.config.upper * 2) {
       throw new Error(`最新价 ${this.lastPrice} 与网格区间 [${this.config.lower}, ${this.config.upper}] 偏离过大，已取消启动。请刷新行情后重设区间。`);
     }
-    this.outOfRange = this.lastPrice < this.config.lower || this.lastPrice > this.config.upper;
+    // 与运行时迟滞一致：启动也按「边界 ± 半格」判定破界，避免恰好贴边启动时
+    // 以 outOfRange=true 空转、直到价格回到内侧半格才铺单（P2-1）。
+    const h0 = (this.config.recoverHystFrac ?? 0.5) * (this.grid?.spacing || 0);
+    this.outOfRange = this.lastPrice < this.config.lower - h0 || this.lastPrice > this.config.upper + h0;
 
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);
     if (typeof this.ex.start === 'function') this.ex.start();
 
     // ---- seed the ladder (every seed order is an OPENING leg) ----
-    const seeds = seedOrders({ levels: this.grid.levels, price: this.lastPrice, mode: this.config.mode, spacing: this.grid.spacing });
-    for (const s of seeds) await this._place({ ...s, opening: true });
+    let seeds = seedOrders({ levels: this.grid.levels, price: this.lastPrice, mode: this.config.mode, spacing: this.grid.spacing });
+    // 限流/慢铺单时，离现价近的档位优先上账：首批即可让网格开始工作，远端档慢慢补齐
+    seeds.sort((a, b) => Math.abs(a.price - this.lastPrice) - Math.abs(b.price - this.lastPrice));
+    const placementId = this._beginPlacementProgress('start', seeds);
+    // Mark the bot as running before the RHC seed pass. A seed order can fill
+    // while later batches are still being submitted; fill
+    // handling and crash-safe persistence must already be active at that point.
+    this.running = true;
+    this._changed();
+    await this._placeMany(seeds.map((s) => ({ ...s, opening: true, _placementId: placementId })));
+    this._finishPlacementPass();
+
+    await this._refreshExchangeOpenOrderCount();
 
     if (this.startBalance == null && typeof this.ex.balance === 'number') this.startBalance = this.ex.balance;
-    this.running = true;
+    // 手动/普通启动：视为人工介入，清空"自动停机→冷静门重启"状态；动态监督器常驻
+    this._autoStopped = null;
     this._startReconcileTimer();
-    this._alert(`已启动 ${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x，挂出 ${this.active.size} 单。`);
+    this._startDynTimer();
+    const progress = this._placementProgressView();
+    if (progress?.status === 'complete') {
+      this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。动态网格：${this._dynModeText()}。`);
+      this._placementProgress.completionAlerted = true;
+    } else {
+      const paceSec = (Number(this.ex.orderBatchPaceMs) || 1500) / 1000;
+      const est = Math.ceil((progress?.target ?? seeds.length) / 15) * Math.max(2, Math.round(paceSec + 2)); // 批 × (配速+确认)
+      this._alert(`网格已进入运行管理，但启动挂单尚未全部确认：目标 ${progress?.target ?? seeds.length} 单 / 已确认 ${progress?.confirmed ?? this.active.size} 单 / 待安全重试 ${progress?.pending ?? 0} 单。程序会先与交易所对账再补挂，预计约 ${est} 秒内铺完（限流保护配速），请勿中途停止。`);
+    }
     logger.info('bot', `网格已启动 ${this.config.displayName}`, { mode: this.config.mode, gridCount: this.grid.count, lower: this.config.lower, upper: this.config.upper, leverage, orders: this.active.size });
     this._changed();
     return this.getState();
   }
 
   async stop({ closePosition = true } = {}) {
-    this._stopReconcileTimer();
+    const wasRunning = this.running;
+    this._pauseTradingRuntime();
+    try {
+      if (this.config) await this._cancelAllConfirmed(this.config.marketId, '停止网格时撤销挂单');
+    } catch (e) {
+      if (wasRunning) this._resumeTradingRuntime();
+      this._alert(`❌ ${e?.message || e} 已中止停止/平仓流程，本地挂单跟踪已保留。`);
+      this._changed();
+      throw e;
+    }
     if (!this.running) {
       if (this.config) {
-        await this.ex.cancelAll(this.config.marketId).catch(() => {});
         if (closePosition && typeof this.ex.closePosition === 'function') {
           await this._closeWithConfirm(this.config.marketId);
         }
@@ -298,12 +582,10 @@ export class GridBot {
       }
       this.active.clear();
       this._retryQueue = [];
+      this._placementProgress = null;
       this._changed();
       return this.getState();
     }
-    this.ex.off('fill', this._onFill);
-    this.ex.off('price', this._onPrice);
-    await this.ex.cancelAll(this.config.marketId).catch(() => {});
     this.active.clear();
     let closeRequested = false;
     if (closePosition && typeof this.ex.closePosition === 'function') {
@@ -313,6 +595,7 @@ export class GridBot {
     this.running = false;
     this.recovery = false;
     this._retryQueue = [];
+    this._placementProgress = null;
     this._alert(closeRequested
       ? '机器人已停止：挂单已撤销，已发送平仓指令（请在交易所确认仓位已平）。'
       : '机器人已停止，挂单已撤销（未平仓）。');
@@ -328,14 +611,21 @@ export class GridBot {
    */
   async cancelAllOrders() {
     if (!this.config) throw new Error('尚未配置市场，没有可撤的挂单。');
-    this._stopReconcileTimer();
-    this.ex.off('fill', this._onFill);
-    this.ex.off('price', this._onPrice);
-    await this.ex.cancelAll(this.config.marketId).catch((e) => this._alert('撤单失败: ' + (e?.message || e)));
+    const wasRunning = this.running;
+    this._pauseTradingRuntime();
+    try {
+      await this._cancelAllConfirmed(this.config.marketId, '一键撤销挂单');
+    } catch (e) {
+      if (wasRunning) this._resumeTradingRuntime();
+      this._alert(`❌ ${e?.message || e} 本地跟踪和网格运行状态已保留。`);
+      this._changed();
+      throw e;
+    }
     this.active.clear();
     this.running = false;
     this._refillPausedUntil = 0; this._cancelTimes = []; this._retryQueue = [];
-    this._alert('已一键撤销该市场全部挂单（持仓保留、未平仓）。网格已停止，如需继续请重新启动。');
+    this._placementProgress = null;
+    this._alert(`已一键撤销该市场全部挂单（持仓保留、未平仓），交易所已连续确认当前 ${this._exchangeOpenOrders ?? 0} 单。网格已停止，如需继续请重新启动。`);
     this._changed();
     return this.getState();
   }
@@ -363,25 +653,94 @@ export class GridBot {
       throw new Error(`保证金不足以支持新区间：约需 ${round2(requiredMargin)} USDC，当前可用 ${round2(available)} USDC。请缩小区间/减少格数后再试。`);
     }
 
-    await this.ex.cancelAll(this.config.marketId).catch(() => {});
+    this._pauseTradingRuntime();
+    try {
+      await this._cancelAllConfirmed(this.config.marketId, '调整区间前撤销原网格挂单');
+    } catch (e) {
+      this._resumeTradingRuntime();
+      this._alert(`❌ ${e?.message || e} 已取消区间调整，保留原网格状态。`);
+      this._changed();
+      throw e;
+    }
     this.active.clear();
     this._refillPausedUntil = 0; this._cancelTimes = []; // user re-set the range: clear back-off
+    this._retryQueue = [];
+    this._placementProgress = null;
     this.config = { ...this.config, lower: lo, upper: hi };
     this.grid = newGrid;
     this._recomputeRisk();
     this.outOfRange = Number.isFinite(price) ? (price < lo || price > hi) : false;
+    this._outTicks = 0; // 新区间：清空迟滞去抖计数
+    this._resumeTradingRuntime();
     if (!this.outOfRange && Number.isFinite(price) && price > 0) {
       const seeds = seedOrders({ levels: newGrid.levels, price, mode: this.config.mode, spacing: newGrid.spacing });
-      for (const s of seeds) await this._place({ ...s, opening: true });
+      const placementId = this._beginPlacementProgress('adjust', seeds);
+      await this._placeMany(seeds.map((s) => ({ ...s, opening: true, _placementId: placementId })));
+      this._finishPlacementPass();
     }
-    this._alert(`已调整区间为 [${lo}, ${hi}]，${newGrid.count} 格，间距 ${newGrid.spacing}（${this.risk.spacingPct}%），重新挂出 ${this.active.size} 单（持仓保留）。`);
+    await this._refreshExchangeOpenOrderCount();
+    const adjustProgress = this._placementProgressView();
+    this._alert(adjustProgress && adjustProgress.status !== 'complete'
+      ? `区间已调整为 [${lo}, ${hi}]（持仓保留）；新挂单目标 ${adjustProgress.target} / 已确认 ${adjustProgress.confirmed} / 待安全重试 ${adjustProgress.pending}。`
+      : `已调整区间为 [${lo}, ${hi}]，${newGrid.count} 格，间距 ${newGrid.spacing}（${this.risk.spacingPct}%），重新挂出 ${this.active.size} 单（持仓保留）。`);
+    this._changed();
+    return this.getState();
+  }
+
+  /**
+   * 一键补格（手动触发）：把当前没有挂单的网格档位重新补种上开仓单——低于现价
+   * 补买、高于现价补卖，与启动铺单逻辑一致。之所以只做手动：对账机制故意不自动
+   * 补开仓单（自动补种曾导致单方向持续开仓的事故），由人工确认场景安全后再补。
+   */
+  async refillGrid() {
+    if (!this.running || !this.config || !this.grid) throw new Error('网格未在运行，无法补格。');
+    if (this.recovery) throw new Error('回收模式没有网格，无需补格。');
+    if (this.outOfRange) throw new Error('价格在区间外，暂不能补格；等价格回到区间内再操作。');
+    if (this._refillPausedUntil && Date.now() < this._refillPausedUntil) {
+      throw new Error('订单频繁被取消的保护期内，暂不补格，请稍后再试。');
+    }
+    const price = this.lastPrice;
+    if (!Number.isFinite(price) || price <= 0) throw new Error('未能获取有效最新价，请稍后重试。');
+    // 先对账：拿到真实占用情况（交易所上已有的挂单会被接管而不是重复补）
+    await this.reconcileOpenOrders().catch(() => {});
+    const occupied = new Set([...this.active.values()].map((o) => o.levelIndex));
+    const seeds = seedOrders({ levels: this.grid.levels, price, mode: this.config.mode, spacing: this.grid.spacing })
+      .filter((s) => !occupied.has(s.levelIndex));
+    if (!seeds.length) {
+      this._placementProgress = null;
+      this._alert('补格检查：所有格位都已有挂单，无需补格。');
+      this._changed();
+      return this.getState();
+    }
+    // 新增开仓单的保证金预检
+    const addMargin = (seeds.length * this.config.sizeBase * price) / this.config.leverage;
+    const available = typeof this.ex.equity === 'number' ? this.ex.equity
+      : typeof this.ex.balance === 'number' ? this.ex.balance : null;
+    if (available != null && addMargin > available) {
+      throw new Error(`保证金不足以补 ${seeds.length} 格：约需 ${round2(addMargin)} USDC，当前权益 ${round2(available)} USDC。`);
+    }
+    if (available != null && addMargin > available * 0.5) {
+      this._alert(`⚠️ 补格将新占用约 ${round2(addMargin)} USDC 保证金（超过权益一半），请留意强平风险。`);
+    }
+    const before = this.active.size;
+    const placementId = this._beginPlacementProgress('refill', seeds);
+    await this._placeMany(seeds.map((s) => ({ ...s, opening: true, _placementId: placementId })));
+    this._finishPlacementPass();
+    const placed = this.active.size - before;
+    const verified = await this._refreshExchangeOpenOrderCount();
+    const refillProgress = this._placementProgressView();
+    this._alert(refillProgress && refillProgress.status !== 'complete'
+      ? `补格已提交但尚未全部确认：目标 ${refillProgress.target} / 已确认 ${refillProgress.confirmed} / 待安全重试 ${refillProgress.pending}${verified == null ? '；真实挂单总数暂未确认' : `；交易所当前真实挂单 ${verified} 单`}。`
+      : `一键补格完成：发现 ${seeds.length} 个空格位，成功补挂 ${placed} 单${verified == null ? '；交易所真实挂单数暂未确认' : `；交易所确认当前 ${verified} 单`}。`);
     this._changed();
     return this.getState();
   }
 
   /** Zero cumulative stats and re-baseline PnL to the current equity. */
   resetStats() {
-    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0 };
+    // 动作计数（recenters/autoRestarts）不是盈亏统计，重置时保留
+    this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0,
+                   recenters: this.stats.recenters || 0, autoRestarts: this.stats.autoRestarts || 0 };
     this.fills = [];
     this._placeFails = 0;
     this._lastFailAt = 0;
@@ -407,6 +766,111 @@ export class GridBot {
       requiredMargin: round2(notional / this.config.leverage),
       perRungProfit: round2(this.grid.spacing * this.config.sizeBase),
       spacingPct: round2((this.grid.spacing / mid) * 100),
+    };
+  }
+
+  _beginPlacementProgress(action, orders) {
+    const levels = [...new Set((orders || []).map((o) => Number(o.levelIndex)).filter(Number.isFinite))];
+    const id = `${Date.now()}-${(++this._coidSeq) % 1_000_000}`;
+    this._placementProgress = {
+      id, action, target: levels.length,
+      // Retain only public order intent (no credentials/signatures). If the
+      // process exits during a paced seed pass, resume can reconstruct the
+      // still-pending levels and continue through the same safe retry path.
+      orders: (orders || []).map((o) => ({
+        levelIndex: Number(o.levelIndex), side: o.side, price: Number(o.price),
+        sizeBase: Number(o.sizeBase) > 0 ? Number(o.sizeBase) : this.config?.sizeBase,
+        opening: o.opening !== false, reduceOnly: !!o.reduceOnly, recovery: !!o.recovery,
+        _placementId: id,
+      })),
+      confirmedLevels: [], pendingLevels: levels, failedLevels: [],
+      status: levels.length ? 'placing' : 'complete', initialPassDone: false,
+      completionAlerted: false, updatedAt: Date.now(),
+    };
+    return id;
+  }
+
+  _restorePendingPlacementRetries() {
+    const p = this._placementProgress;
+    if (!p || !this.ex.supportsSafeOpeningRetry || !Array.isArray(p.orders)) return;
+    p.initialPassDone = true;
+    const pending = new Set(p.pendingLevels || []);
+    for (const order of p.orders) {
+      if (!pending.has(order.levelIndex)) continue;
+      if (this._retryQueue.some((x) => x.levelIndex === order.levelIndex && x._placementId === p.id)) continue;
+      this._retryQueue.push({ ...order, _placementId: p.id, _tries: 0, _nextAt: Date.now() + 30_000, _lastError: '程序重启后恢复未完成挂单' });
+    }
+    this._refreshPlacementProgress(p);
+  }
+
+  _progressFor(order) {
+    const p = this._placementProgress;
+    return p && order?._placementId === p.id ? p : null;
+  }
+
+  _refreshPlacementProgress(p = this._placementProgress) {
+    if (!p) return;
+    const confirmed = new Set(p.confirmedLevels || []);
+    const failed = new Set(p.failedLevels || []);
+    p.pendingLevels = [...new Set(p.pendingLevels || [])].filter((level) => !confirmed.has(level) && !failed.has(level));
+    if (!p.initialPassDone) p.status = p.target ? 'placing' : 'complete';
+    else if (confirmed.size >= p.target) p.status = 'complete';
+    else if (p.pendingLevels.length) p.status = 'retrying';
+    else p.status = 'incomplete';
+    p.updatedAt = Date.now();
+  }
+
+  _markPlacementConfirmed(order) {
+    const p = this._progressFor(order);
+    if (!p) return;
+    const level = Number(order.levelIndex);
+    if (!Number.isFinite(level)) return;
+    if (!p.confirmedLevels.includes(level)) p.confirmedLevels.push(level);
+    p.pendingLevels = p.pendingLevels.filter((x) => x !== level);
+    p.failedLevels = p.failedLevels.filter((x) => x !== level);
+    const was = p.status;
+    this._refreshPlacementProgress(p);
+    if (p.initialPassDone && was !== 'complete' && p.status === 'complete' && !p.completionAlerted) {
+      p.completionAlerted = true;
+      const label = p.action === 'refill' ? '补格' : p.action === 'adjust' ? '区间调整挂单' : '启动挂单';
+      this._alert(`${label}已全部确认：目标 ${p.target} 单 / 已确认 ${p.target} 单 / 待重试 0 单。`);
+    }
+  }
+
+  _markPlacementPending(order) {
+    const p = this._progressFor(order);
+    if (!p) return;
+    const level = Number(order.levelIndex);
+    if (!Number.isFinite(level) || p.confirmedLevels.includes(level) || p.failedLevels.includes(level)) return;
+    if (!p.pendingLevels.includes(level)) p.pendingLevels.push(level);
+    this._refreshPlacementProgress(p);
+  }
+
+  _markPlacementFailed(order) {
+    const p = this._progressFor(order);
+    if (!p) return;
+    const level = Number(order.levelIndex);
+    if (!Number.isFinite(level)) return;
+    p.pendingLevels = p.pendingLevels.filter((x) => x !== level);
+    if (!p.failedLevels.includes(level)) p.failedLevels.push(level);
+    this._refreshPlacementProgress(p);
+  }
+
+  _finishPlacementPass() {
+    if (!this._placementProgress) return;
+    this._placementProgress.initialPassDone = true;
+    this._refreshPlacementProgress();
+  }
+
+  _placementProgressView() {
+    const p = this._placementProgress;
+    if (!p) return null;
+    return {
+      action: p.action, target: p.target,
+      confirmed: (p.confirmedLevels || []).length,
+      pending: (p.pendingLevels || []).length,
+      failed: (p.failedLevels || []).length,
+      status: p.status, updatedAt: p.updatedAt,
     };
   }
 
@@ -438,38 +902,251 @@ export class GridBot {
       }).catch((e) => {
         this._placeFails++; this._lastFailAt = Date.now();
         this._alert('下单失败: ' + e.message);
-        this._queueRetry({ ...o, opening, reduceOnly, sizeBase }); // closing legs get retried
+        this._queueRetry({ ...o, opening, reduceOnly, sizeBase }, e);
         return null;
       });
-      if (r?.orderId) this.active.set(String(r.orderId), { levelIndex: lvl, side: o.side, price: o.price, sizeBase, opening, recovery: !!o.recovery, placedAt: Date.now() });
+      if (r?.orderId) {
+        this.active.set(String(r.orderId), { levelIndex: lvl, side: o.side, price: o.price, sizeBase, opening, recovery: !!o.recovery, placedAt: Date.now() });
+        this._markPlacementConfirmed(o);
+        // 补单/铺单成功后立即落盘：_handleFill 里 _place 是 fire-and-forget，
+        // 末尾的 _changed() 早于本次成功执行，快照会漏掉这张新单，重启时只能靠
+        // 对账启发式接管（opening/levelIndex 从价格反推）。这里补一次持久化，
+        // 让重启接管拿到真实的 opening/levelIndex/placedAt。对六个交易所都生效。
+        this._changed();
+      }
     } finally {
       this._pendingLevels.delete(lvl);
     }
   }
 
   /**
-   * Queue a CLOSING / reduce-only order for retry after a failed placement.
-   * Only closing legs are retried — they can never ADD inventory, so retrying is
-   * always safe; silently dropping one (the old behavior) left inventory without
-   * its take-profit order forever, since replacements are only quoted on fills.
+   * Batch-capable seed placement. Exchanges without a batch API retain the
+   * original one-by-one behavior. Healthy batches are submitted continuously;
+   * only an actual exchange rate-limit response stops the pass and moves the
+   * current plus remaining levels into the reconciled retry queue.
    */
-  _queueRetry(o) {
-    if (o.opening !== false && !o.reduceOnly && !o.recovery) return; // opening legs: by design not retried
-    const tries = (o._tries || 0) + 1;
-    if (tries > 5) {
-      this._alert(`❌ 补挂平仓单（level ${o.levelIndex} @ ${o.price}）连续 ${tries - 1} 次失败，已放弃。请到交易所核实并手动挂单。`);
+  async _placeMany(orders) {
+    if (typeof this.ex.placeLimitOrders !== 'function') {
+      for (const order of orders) await this._place(order);
       return;
     }
-    this._retryQueue.push({ ...o, _tries: tries, _nextAt: Date.now() + 5000 * tries }); // linear back-off
+    const ready = [];
+    const reservedLevels = new Set();
+    for (const o of orders) {
+      const opening = o.opening !== false;
+      const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
+      if (opening && !o.recovery && this._refillPausedUntil && Date.now() < this._refillPausedUntil) continue;
+      const levelIndex = o.levelIndex;
+      if (this._pendingLevels.has(levelIndex) || reservedLevels.has(levelIndex)) {
+        if (o._tries) this._retryQueue.push({ ...o, _nextAt: Date.now() + 5_000 });
+        continue;
+      }
+      if ([...this.active.values()].some((a) => a.levelIndex === levelIndex)) {
+        this._markPlacementConfirmed(o);
+        continue;
+      }
+      reservedLevels.add(levelIndex);
+      const seq = (++this._coidSeq) % 1_000_000;
+      const clientOrderId = Number(`${Date.now() % 1_000_000_0}${String(seq).padStart(6, '0')}`);
+      const sizeBase = Number(o.sizeBase) > 0 ? Number(o.sizeBase) : this.config.sizeBase;
+      ready.push({
+        source: o, opening, reduceOnly, levelIndex, sizeBase,
+        payload: {
+          marketId: this.config.marketId, side: o.side, price: o.price,
+          sizeBase, reduceOnly, levelIndex, clientOrderId,
+        },
+      });
+    }
+    const batchSize = Math.max(1, Math.min(15, Number(this.ex.orderBatchSize) || 15));
+    const paceMs = Math.max(0, Number(this.ex.orderBatchPaceMs) || 0);
+    this._placementPasses++;
+    this.ex.setPollLight?.(true); // 铺单期间让适配器跳过重查询（限流防护）
+    try {
+      for (let offset = 0; offset < ready.length; offset += batchSize) {
+        // A fill during startup can occupy a future seed level. Recheck
+        // immediately before each batch so the closing leg wins and no duplicate
+        // opening order is stacked on that level.
+        const chunk = ready.slice(offset, offset + batchSize).filter((item) => {
+          if (this._pendingLevels.has(item.levelIndex)) return false;
+          if ([...this.active.values()].some((a) => a.levelIndex === item.levelIndex)) {
+            this._markPlacementConfirmed(item.source);
+            return false;
+          }
+          this._pendingLevels.add(item.levelIndex);
+          return true;
+        });
+        if (!chunk.length) continue;
+        let results;
+        let waitAfterMs = offset + batchSize < ready.length ? paceMs : 0;
+        let stopForRateLimit = false;
+        try {
+          results = await this.ex.placeLimitOrders(chunk.map((x) => x.payload));
+          if (!Array.isArray(results) || results.length !== chunk.length) throw new Error('交易所批量下单返回数量不一致。');
+        } catch (e) {
+          this._placeFails += chunk.length; this._lastFailAt = Date.now();
+          if (e?.rateLimited || e?.status === 429) {
+            logger.info('bot', `批量下单遇限流（${chunk.length} 笔），进入安全重试；剩余 ${Math.max(0, ready.length - offset - chunk.length)} 单待铺`);
+          } else {
+            this._alert(`批量下单失败（${chunk.length} 笔）: ${e?.message || e}`);
+          }
+          for (const item of chunk) this._queueRetry({ ...item.source, opening: item.opening, reduceOnly: item.reduceOnly, sizeBase: item.sizeBase }, e);
+          if (e?.rateLimited || e?.status === 429) {
+            waitAfterMs = Math.max(waitAfterMs, Number(e.retryAfterMs) || Number(this.ex.openingRetryBaseMs) || 30_000);
+            stopForRateLimit = true;
+            // Do not keep hammering later batches after the exchange has
+            // explicitly rate-limited this write. Queue every untouched level
+            // for the same de-duplicating retry path and end this pass now.
+            for (const item of ready.slice(offset + batchSize)) {
+              this._queueRetry({ ...item.source, opening: item.opening, reduceOnly: item.reduceOnly, sizeBase: item.sizeBase }, e);
+            }
+          }
+          results = null;
+        }
+        if (results) {
+          for (let i = 0; i < chunk.length; i++) {
+            const item = chunk[i], result = results[i];
+            if (result?.orderId) {
+              this.active.set(String(result.orderId), {
+                levelIndex: item.levelIndex, side: item.source.side,
+                price: Number(result.price ?? item.source.price),
+                sizeBase: Number(result.sizeBase ?? item.sizeBase),
+                opening: item.opening, recovery: !!item.source.recovery, placedAt: Date.now(),
+              });
+              this._markPlacementConfirmed(item.source);
+            } else {
+              this._placeFails++; this._lastFailAt = Date.now();
+              const error = new Error(`批量下单中的 level ${item.levelIndex} 未被交易所确认。`);
+              this._alert(error.message);
+              this._queueRetry({ ...item.source, opening: item.opening, reduceOnly: item.reduceOnly, sizeBase: item.sizeBase }, error);
+            }
+          }
+        }
+        for (const item of chunk) this._pendingLevels.delete(item.levelIndex);
+        this._changed();
+        if (stopForRateLimit) break;
+        if (waitAfterMs > 0 && offset + batchSize < ready.length) await sleep(waitAfterMs);
+      }
+    } finally {
+      for (const item of ready) this._pendingLevels.delete(item.levelIndex);
+      this._placementPasses--;
+      this.ex.setPollLight?.(this._placementPasses > 0); // 仅当无其他铺单进程在跑时恢复常规轮询
+    }
   }
 
-  /** Retry due closing-leg placements (driven by price ticks + reconcile timer). */
+  /**
+   * Queue a failed placement. Closing/reduce-only orders remain intrinsically
+   * safe to retry. Opening orders are accepted only for adapters (currently RHC)
+   * that opt into the two-snapshot, level-de-duplicated retry path below.
+   */
+  _queueRetry(o, error = null) {
+    const opening = o.opening !== false && !o.reduceOnly && !o.recovery;
+    if (opening && !this.ex.supportsSafeOpeningRetry) return;
+    const tries = (o._tries || 0) + 1;
+    const maxTries = opening ? (Number(this.ex.openingRetryMax) || 8) : 5;
+    if (tries > maxTries) {
+      this._markPlacementFailed(o);
+      this._alert(opening
+        ? `❌ 开仓挂单（level ${o.levelIndex} @ ${o.price}）连续 ${tries - 1} 次安全重试仍失败，已停止自动重试。请到交易所核实。`
+        : `❌ 补挂平仓单（level ${o.levelIndex} @ ${o.price}）连续 ${tries - 1} 次失败，已放弃。请到交易所核实并手动挂单。`);
+      return;
+    }
+    const configuredBase = Number(this.ex.openingRetryBaseMs) || 30_000;
+    // Fast first retry is reserved for an explicit rate-limit response. Other
+    // failures retain a five-second floor so transient network/server errors do
+    // not create a tight loop.
+    const base = opening
+      ? (error?.rateLimited ? configuredBase : Math.max(5_000, configuredBase))
+      : 5_000;
+    const exponential = opening ? Math.min(60_000, base * (2 ** (tries - 1))) : base * tries;
+    const delay = Math.max(exponential, Number(error?.retryAfterMs) || 0);
+    const queued = { ...o, _tries: tries, _nextAt: Date.now() + delay, _lastError: error?.message || String(error || '') };
+    const existing = this._retryQueue.find((x) => x.levelIndex === queued.levelIndex && x._placementId === queued._placementId);
+    if (existing) {
+      existing._nextAt = Math.max(existing._nextAt, queued._nextAt);
+      existing._tries = Math.max(existing._tries || 0, tries);
+      existing._lastError = queued._lastError;
+    } else {
+      this._retryQueue.push(queued);
+    }
+    this._markPlacementPending(queued);
+  }
+
+  /** Retry due placements (driven by price ticks + reconcile timer). */
   _drainRetryQueue() {
-    if (!this.running || !this._retryQueue.length) return;
+    if (!this.running || !this._retryQueue.length || this._retryDrainInFlight || this._placementPasses > 0) return Promise.resolve();
+    this._retryDrainInFlight = true;
+    return this._drainRetryQueueNow().finally(() => { this._retryDrainInFlight = false; });
+  }
+
+  async _drainRetryQueueNow() {
     const now = Date.now();
     const due = [];
     this._retryQueue = this._retryQueue.filter((o) => (o._nextAt <= now ? (due.push(o), false) : true));
-    for (const o of due) this._place(o); // _place re-queues on failure with tries+1
+    if (!due.length) return;
+    const opening = due.filter((o) => o.opening !== false && !o.reduceOnly && !o.recovery);
+    const ready = due.filter((o) => !opening.includes(o));
+    if (opening.length) {
+      try {
+        const snapshots = [];
+        for (let i = 0; i < 2; i++) {
+          const rows = await this.ex.fetchOpenOrders(this.config.marketId);
+          if (!Array.isArray(rows)) throw new Error('交易所没有返回有效挂单快照。');
+          // 空快照纵深防御（2026-09-08 HL 事故）：期望有单但交易所返回 0 单——
+          // 视为快照不可信（如 builder-dex 端点没认 dex 参数），本轮放弃重挂，
+          // 宁可慢、不可翻倍。四所通用，同类欺骗已两次骗过校验层。
+          if (rows.length === 0 && (this.active.size + this._retryQueue.length) >= 10) {
+            throw new Error('交易所挂单快照为空但本地预期有单，疑似接口异常，本轮不重挂。');
+          }
+          snapshots.push(rows);
+          if (i === 0) await sleep(750);
+        }
+        const merged = new Map();
+        for (const rows of snapshots) for (const order of rows) merged.set(String(order.orderId), order);
+        this._exchangeOpenOrders = snapshots.at(-1).length;
+        this._exchangeOpenOrdersVerifiedAt = Date.now();
+        const byLevel = new Map();
+        for (const order of merged.values()) {
+          const px = Number(order.price);
+          if (!Number.isFinite(px) || !this.grid?.spacing) continue;
+          const level = Math.round((px - this.grid.levels[0]) / this.grid.spacing);
+          if (level >= 0 && level < this.grid.levels.length && !byLevel.has(level)) byLevel.set(level, order);
+        }
+        for (const item of opening) {
+          const real = byLevel.get(item.levelIndex);
+          if (!real) { ready.push(item); continue; }
+          if (![...this.active.values()].some((a) => a.levelIndex === item.levelIndex)) {
+            const orderId = String(real.orderId);
+            const side = real.side === 'buy' ? 'buy' : 'sell';
+            try { this.ex.adoptOrder?.({ orderId, marketId: this.config.marketId, levelIndex: item.levelIndex, side, price: Number(real.price), sizeBase: Number(real.sizeBase || item.sizeBase || this.config.sizeBase) }); } catch {}
+            this.active.set(orderId, { levelIndex: item.levelIndex, side, price: Number(real.price), sizeBase: Number(real.sizeBase || item.sizeBase || this.config.sizeBase), opening: item.opening !== false, recovery: false, placedAt: Date.now() });
+          }
+          this._markPlacementConfirmed(item);
+        }
+      } catch (e) {
+        const retryAt = Date.now() + (Number(this.ex.openingRetryBaseMs) || 30_000);
+        for (const item of due) {
+          if (!this._retryQueue.some((x) => x.levelIndex === item.levelIndex && x._placementId === item._placementId)) {
+            this._retryQueue.push({ ...item, _nextAt: retryAt });
+          }
+        }
+        if (Date.now() - (this._lastRetryReconAlertAt || 0) > 30_000) {
+          this._lastRetryReconAlertAt = Date.now();
+          this._alert(`安全重试暂缓：无法连续读取两次交易所真实挂单（${e?.message || e}），本轮没有重新下单。`);
+        }
+        this._changed();
+        return;
+      }
+    }
+    if (!this.running) return;
+    if (ready.length) {
+      // 平仓/reduce-only 腿优先：限额紧张时止盈腿不被远端铺单饿死（迟到的
+      // 止盈可能错过一次往返，远端铺单晚 1 分钟毫无损失）
+      ready.sort((a, b) =>
+        ((a.reduceOnly || a.opening === false) ? 0 : 1) -
+        ((b.reduceOnly || b.opening === false) ? 0 : 1));
+      await this._placeMany(ready);
+    }
+    this._changed();
   }
 
   _handleFill(f) {
@@ -490,7 +1167,6 @@ export class GridBot {
     const closing = isRecovery ? true
       : (act ? act.opening === false
              : ((this.config.mode === 'short') ? f.side === 'buy' : f.side === 'sell'));
-    logger.info('bot', `成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName, closing });
     if (closing) {
       this.stats.completedRungs++;
       // Incremental accumulation with the ACTUAL fill size: adjustRange no longer
@@ -499,6 +1175,11 @@ export class GridBot {
       const sp = this.grid?.spacing ?? this.config.spacing ?? 0;
       this.stats.gridProfit = round2(this.stats.gridProfit + sp * fillSize);
     }
+    logger.info('bot', `成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName, closing });
+
+    // 成交流哨兵：所有成交进日志（含平仓腿/回收），由 _checkTrendFills 判定连续入场段。
+    // 关键修复：平仓腿必须进日志，否则中性网格健康震荡（买入场→卖平仓→…）会被误判为单边。
+    this._checkTrendFills({ side: f.side, levelIndex, closing });
 
     // Recovery-ladder fills are pure reduce-only EXITS of stranded inventory —
     // never re-quote a replacement for them.
@@ -507,7 +1188,14 @@ export class GridBot {
       if (repl && !this.outOfRange && this.running) {
         repl.opening = closing; // replacement is the opposite leg
         if (fillSize > 0) repl.sizeBase = fillSize; // partial fill: mirror the actually-filled qty
-        this._place(repl);
+        // 尘埃仓守卫：部分成交若低于最小下单量，交易所会拒绝补挂对腿并进入无意义
+        // 重试循环。此时跳过补挂，尘埃仓并入持仓由后续成交或手动处理。
+        const minSz = this.config.minOrderSize || 0;
+        if (minSz > 0 && repl.sizeBase < minSz) {
+          this._alert(`部分成交 ${fillSize} 低于最小下单量 ${minSz}，跳过补挂对腿；尘埃仓并入持仓，由后续成交或手动处理。`);
+        } else {
+          this._place(repl);
+        }
       }
     }
     this._changed();
@@ -516,9 +1204,18 @@ export class GridBot {
   _handlePrice(p) {
     if (p.marketId !== this.config.marketId) return;
     this.lastPrice = p.price;
-    this._drainRetryQueue();
+    // 破界出口纪律：recover 模式若亏损触及上限，强制硬止损（见 _checkMaxLoss）
+    this._checkMaxLoss();
+    this._drainRetryQueue().catch(() => {});
     if (this.recovery) { this._manageRecoveryStandalone(); return; }
-    const out = p.price < this.config.lower || p.price > this.config.upper;
+    // recover 迟滞去抖：进破界要求越过外侧半格且连续 2 拍（适配器 ~2.5s/拍 ≈ 5s），
+    // 出破界要求价格回到内侧半格。避免贴边单拍抖动反复切换模式（见 _placeRecoveryLadder 首档 L∓off 格，off=recoverLadderOffsetGrids）。
+    const sp = this.grid?.spacing || this.config.spacing || 0;
+    const h = (this.config.recoverHystFrac ?? 0.5) * sp;
+    const beyond = p.price < this.config.lower - h || p.price > this.config.upper + h;
+    const inside = p.price > this.config.lower + h && p.price < this.config.upper - h;
+    this._outTicks = beyond ? this._outTicks + 1 : 0;
+    const out = this.outOfRange ? !inside : this._outTicks >= 2;
     const action = this.config.outOfRangeAction || 'close';
     if (out && !this.outOfRange) {
       this.outOfRange = true;
@@ -529,16 +1226,53 @@ export class GridBot {
       } else {
         this._alert(`⚠️ 价格${where}（${round2(p.price)}），触发「冲破区间平仓」：撤单 + 平仓 + 停止。`);
         if (!this._stopping) {
+          this._noteAutoStop('breakout'); // 冷静门重启：破界后只在市场平静时回场
           this._stopping = true;
-          this.stop({ closePosition: true }).finally(() => { this._stopping = false; });
+          this.stop({ closePosition: true }).catch(() => {}).finally(() => { this._stopping = false; });
         }
       }
     } else if (out && this.outOfRange && action === 'recover') {
       this._placeRecoveryLadder(); // extend the ladder as price makes new extremes (dedup keeps it idempotent)
-    } else if (!out && this.outOfRange) {
-      this.outOfRange = false;
-      this._cancelRecoveryLadder();
-      this._alert(`价格回到区间内（${round2(p.price)}），撤销回收阶梯，恢复正常网格运行。`);
+    } else if (!out && this.outOfRange && !this._recoveryCancelInFlight) {
+      // Do not resume normal refill/replacement activity until the exchange has
+      // confirmed that every recovery order is really gone.
+      this._recoveryCancelInFlight = true;
+      this._cancelRecoveryLadder()
+        .then(() => {
+          this.outOfRange = false;
+          this._alert(`价格回到区间内（${round2(p.price)}），已确认撤销回收阶梯，恢复正常网格运行。`);
+          this._changed();
+        })
+        .catch((e) => {
+          this._alert(`❌ 价格已回到区间，但回收阶梯撤单未确认：${e?.message || e} 暂不恢复正常补单。`);
+          this._changed();
+        })
+        .finally(() => { this._recoveryCancelInFlight = false; });
+    }
+  }
+
+  /**
+   * 破界出口纪律：recover 模式下若未实现亏损达到 recoverMaxLossUsd 上限，强制
+   * 撤单 + 市价平仓 + 停止。recover 本身不止损，此方法给单边行情一条硬退出线，
+   * 避免"只会只减不加、趋势单边就无限扛"的敞口失控。
+   */
+  _checkMaxLoss() {
+    if (!this.running || !this.config) return;
+    // 独立回收模式（this.recovery=true）也应受硬止损约束——它持有被套库存，
+    // 是最需要止损线的场景；普通网格破界进入 recover 时 outOfRangeAction==='recover'。
+    if (this.config.outOfRangeAction !== 'recover' && !this.recovery) return;
+    const maxLoss = this.config.recoverMaxLossUsd;
+    if (!(maxLoss > 0)) return;
+    if (!this.outOfRange && !this.recovery) return;
+    const pos = this.ex.getPosition?.(this.config.marketId);
+    if (!pos) return;
+    const upnl = Number(pos.unrealizedPnl);
+    if (!Number.isFinite(upnl)) return;
+    if (upnl <= -maxLoss && !this._stopping) {
+      this._alert(`⚠️ recover 中未实现亏损 ${round2(upnl)} USDC 已达止损上限 ${round2(maxLoss)}，触发硬止损：撤单 + 市价平仓 + 停止。`);
+      this._noteAutoStop('maxloss'); // 冷静门重启的价值主体：止损后只在市场平静时回场
+      this._stopping = true;
+      this.stop({ closePosition: true }).catch(() => {}).finally(() => { this._stopping = false; });
     }
   }
 
@@ -554,24 +1288,33 @@ export class GridBot {
     if (!Number.isFinite(price) || price <= 0) return;
     const pos = this.ex.getPosition?.(this.config.marketId);
     if (!pos || !pos.sizeBase) return; // 没有可减的持仓
+    const off = ladderOffsetGrids(this.config.recoverLadderOffsetGrids);
+    if (!Number.isFinite(off)) return; // 偏移=∞ → 不挂回收阶梯（破界后纯持有，靠硬退出线）
     const sp = this.grid.spacing, lvl0 = this.grid.levels[0];
     const L = this.config.lower, U = this.config.upper;
     const long = pos.sizeBase > 0;
     const existing = new Set([...this.active.values()].filter((o) => o.recovery).map((o) => o.levelIndex));
-    const maxRungs = this.grid.count;
+    // VA 50 单/合约上限：回收阶梯与仍在挂的网格单共用额度。用「上限−已挂非回收单−2 安全垫」
+    // 与网格数取小，避免阶梯把挂单顶到 50 触发 422 被拒。
+    const cap = this.config.marketId != null ? (this.ex.getMarket?.(this.config.marketId)?.maxOpenOrders || 0) : 0;
+    let maxRungs = this.grid.count;
+    if (cap > 0) {
+      const activeNonRecovery = [...this.active.values()].filter((o) => !o.recovery).length;
+      maxRungs = Math.max(existing.size, Math.min(this.grid.count, cap - activeNonRecovery - 2));
+    }
     let placed = 0;
     const room = () => existing.size + placed < maxRungs;
     if (long && price < L) {
-      // 跌破下边界、手里是多头：在「现价 ↔ 下边界」之间挂 reduce-only 卖单
-      for (let lv = L - sp; lv > price && room(); lv -= sp) {
+      // 跌破下边界、手里是多头：从「下边界 − off 格」向现价挂 reduce-only 卖单（首档留 off 格缓冲，避免刚破界就减仓）
+      for (let lv = L - off * sp; lv > price && room(); lv -= sp) {
         const idx = Math.round((lv - lvl0) / sp);
         if (existing.has(idx)) continue;
         this._place({ levelIndex: idx, side: 'sell', price: lv, reduceOnly: true, recovery: true, opening: false });
         placed++;
       }
     } else if (!long && price > U) {
-      // 突破上边界、手里是空头：在「上边界 ↔ 现价」之间挂 reduce-only 买单
-      for (let lv = U + sp; lv < price && room(); lv += sp) {
+      // 突破上边界、手里是空头：从「上边界 + off 格」向现价挂 reduce-only 买单（首档留 off 格缓冲，避免刚破界就减仓）
+      for (let lv = U + off * sp; lv < price && room(); lv += sp) {
         const idx = Math.round((lv - lvl0) / sp);
         if (existing.has(idx)) continue;
         this._place({ levelIndex: idx, side: 'buy', price: lv, reduceOnly: true, recovery: true, opening: false });
@@ -588,11 +1331,25 @@ export class GridBot {
   async _cancelRecoveryLadder() {
     const ids = [...this.active].filter(([, o]) => o.recovery).map(([id]) => id);
     if (!ids.length) return;
-    for (const id of ids) {
-      await this.ex.cancelOrder?.(this.config.marketId, id)?.catch?.(() => {});
-      this.active.delete(id);
+    // 幽灵单防护：只对交易所真实挂单簿里仍然存在的订单发送撤单——本地跟踪中
+    // 但交易所已不存在的（链上未接受的幽灵单/已成交）直接跳过，避免对不存在
+    // 订单发链上撤单被拒绝、浪费 gas 并累积错误；这些订单由对账/成交确认流程清理。
+    let real = null;
+    try { real = await this.ex.fetchOpenOrders?.(this.config.marketId); } catch { /* 保持全部尝试 */ }
+    const realIds = Array.isArray(real) ? new Set(real.map((o) => String(o.orderId))) : null;
+    const toCancel = realIds ? ids.filter((id) => realIds.has(id)) : ids;
+    const skipped = ids.length - toCancel.length;
+    let requestErrors = 0;
+    for (const id of toCancel) {
+      try { await this.ex.cancelOrder?.(this.config.marketId, id); }
+      catch { requestErrors++; }
     }
-    this._alert(`已撤销 ${ids.length} 个回收阶梯挂单。`);
+    await this._confirmOrdersGone(this.config.marketId, ids);
+    for (const id of ids) {
+      this.active.delete(id);
+      try { this.ex.forgetOrder?.(id); } catch { /* ignore local cleanup */ }
+    }
+    this._alert(`已确认撤销 ${toCancel.length} 个回收阶梯挂单${skipped ? `，跳过 ${skipped} 个交易所已不存在的挂单（幽灵单）` : ''}${requestErrors ? `（${requestErrors} 笔撤单请求报错，但交易所快照已确认订单消失）` : ''}。`);
     this._changed();
   }
 
@@ -623,11 +1380,14 @@ export class GridBot {
         sizeBase, spacing, stepSize: market.stepSize, stepPrice: market.stepPrice,
         lower: null, upper: null, gridCount: null, leverage: pos.leverage ?? null,
         outOfRangeAction: 'recover',
+        // 独立回收模式的硬止损上限（同网格 recover 语义；0/缺省=不启用）
+        recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
         aboveEntryOnly: !!cfg.aboveEntryOnly, // 只在成本价上方(多)/下方(空)、即不亏的价位才挂减仓单
       };
       this.grid = null; this.risk = null;
       this.recovery = true; this.outOfRange = false; this.lastPrice = price;
       this._noPosStreak = 0; this._retryQueue = [];
+      this._placementProgress = null;
       this.active.clear();
       if (this.startBalance == null) {
         this.startBalance = typeof this.ex.equity === 'number' ? this.ex.equity
@@ -656,12 +1416,19 @@ export class GridBot {
   async closePositionNow(marketId) {
     const mId = Number(marketId ?? this.config?.marketId);
     if (!Number.isFinite(mId)) throw new Error('未指定市场，无法平仓。');
-    this._stopReconcileTimer();
-    this.ex.off('fill', this._onFill);
-    this.ex.off('price', this._onPrice);
-    await this.ex.cancelAll(mId).catch(() => {});
+    const wasRunning = this.running;
+    this._pauseTradingRuntime();
+    try {
+      await this._cancelAllConfirmed(mId, '市价平仓前撤销挂单');
+    } catch (e) {
+      if (wasRunning) this._resumeTradingRuntime();
+      this._alert(`❌ ${e?.message || e} 已中止市价平仓，本地挂单跟踪已保留。`);
+      this._changed();
+      throw e;
+    }
     this.active.clear();
     this._retryQueue = [];
+    this._placementProgress = null;
     let closed = false;
     if (typeof this.ex.closePosition === 'function') {
       await this._closeWithConfirm(mId);
@@ -708,7 +1475,7 @@ export class GridBot {
       // Require several CONSECUTIVE empty observations before declaring the
       // recovery finished — a single transient empty response from the position
       // endpoint (network blip) must not tear down the whole ladder.
-      if (++this._noPosStreak >= 5) this._finishRecovery();
+      if (++this._noPosStreak >= 5) this._finishRecovery().catch(() => {});
       return;
     }
     this._noPosStreak = 0;
@@ -753,18 +1520,26 @@ export class GridBot {
   }
 
   /** 持仓已减完 -> 结束回收。 */
-  _finishRecovery() {
-    if (!this.recovery) return;
-    this.recovery = false;
-    this._stopReconcileTimer();
-    this._recoveryOccupied = new Set();
-    this.ex.off('fill', this._onFill);
-    this.ex.off('price', this._onPrice);
-    this.ex.cancelAll?.(this.config.marketId)?.catch?.(() => {});
-    this.active.clear();
-    this.running = false;
-    this._alert('回收完成：持仓已全部减完，回收阶梯已停止。');
-    this._changed();
+  async _finishRecovery() {
+    if (!this.recovery || this._finishingRecovery) return;
+    this._finishingRecovery = true;
+    this._pauseTradingRuntime();
+    try {
+      await this._cancelAllConfirmed(this.config.marketId, '回收完成后撤销剩余阶梯');
+      this.recovery = false;
+      this._recoveryOccupied = new Set();
+      this.active.clear();
+      this.running = false;
+      this._alert('回收完成：持仓已全部减完，交易所已确认回收阶梯全部撤销。');
+      this._changed();
+    } catch (e) {
+      this._alert(`❌ 持仓已减完，但剩余回收阶梯撤单未确认：${e?.message || e} 程序保留跟踪并继续对账。`);
+      this._resumeTradingRuntime();
+      this._changed();
+      throw e;
+    } finally {
+      this._finishingRecovery = false;
+    }
   }
 
   /**
@@ -780,7 +1555,6 @@ export class GridBot {
     // Keep the adapter's price watch warm so a long-running market is never
     // pruned as "idle" (adapters drop unwatched markets after 10 min).
     this.ex.getPrice?.(this.config.marketId)?.catch?.(() => {});
-    this._drainRetryQueue();
     const recovery = !!this.recovery;
     // Recovery has no grid: derive levels straight from price via config.spacing.
     const sp = recovery ? this.config.spacing : this.grid?.spacing;
@@ -797,7 +1571,9 @@ export class GridBot {
     try { real = await this.ex.fetchOpenOrders(this.config.marketId); } catch { return; }
     if (!Array.isArray(real)) return;
     this._exchangeOpenOrders = real.length;
+    this._exchangeOpenOrdersVerifiedAt = Date.now();
     const realIds = new Set(real.map((o) => String(o.orderId)));
+    const realById = new Map(real.map((o) => [String(o.orderId), o]));
     const now = Date.now();
 
     // GUARD against transient bad snapshots: Extended's open-order endpoint has
@@ -812,10 +1588,23 @@ export class GridBot {
       this._lastVanishAlertAt = now;
       this._alert(`⚠️ 挂单对账：交易所返回 0 单但本地跟踪 ${this.active.size} 单，疑似接口异常快照，本轮不清理（等待下轮复核）。`);
     }
-    let pruned = 0;
+    let pruned = 0, repaired = 0;
     if (!massVanish) {
       for (const [oid, info] of [...this.active]) {
-        if (realIds.has(oid)) { info.goneRecon = 0; continue; }
+        if (realIds.has(oid)) {
+          info.goneRecon = 0;
+          // 方向漂移修正：接管/重启后本地方向可能与交易所不符（HL 'B'/'A' 解析历史缺陷）。
+          // oid 已匹配则交易所权威，同步纠正 active（图表 openByLevel 源）与适配器 _tracked。
+          const realSide = realById.get(oid)?.side;
+          if (realSide && info.side !== realSide) {
+            info.side = realSide;
+            const closing = recovery ? true : ((this.config.mode === 'short') ? realSide === 'buy' : realSide === 'sell');
+            info.opening = !closing;
+            try { this.ex.adoptOrder?.({ orderId: oid, marketId: this.config.marketId, levelIndex: info.levelIndex, side: realSide, price: info.price, sizeBase: info.sizeBase ?? this.config.sizeBase }); } catch { /* ignore */ }
+            repaired++;
+          }
+          continue;
+        }
         if (now - (info.placedAt || 0) <= PRUNE_GRACE_MS) continue;
         info.goneRecon = (info.goneRecon || 0) + 1;
         if (info.goneRecon >= 2) { this.active.delete(oid); pruned++; }
@@ -849,7 +1638,10 @@ export class GridBot {
         }
         continue;
       }
-      try { await this.ex.cancelOrder(this.config.marketId, o.orderId); this.active.delete(String(o.orderId)); trimmed++; }
+      // Do not clear local tracking on an accepted cancellation request. The
+      // next exchange snapshot will confirm disappearance and normal pruning
+      // will remove it; if cancellation failed, it remains tracked and retries.
+      try { await this.ex.cancelOrder(this.config.marketId, o.orderId); trimmed++; }
       catch { /* leave it; next cycle retries */ }
     }
     if (recovery) this._recoveryOccupied = occupied;
@@ -861,10 +1653,50 @@ export class GridBot {
     // The grid is now maintained ONLY by the normal fill -> opposite-leg
     // replacement chain. Reconcile just keeps tracking accurate (prune) and
     // enforces one-order-per-level (trim). It never opens new positions.
-    if (pruned || trimmed || adopted) {
-      this._alert(`挂单对账：交易所实际 ${real.length} 单；清理失效 ${pruned}，撤除重复 ${trimmed}${adopted ? `，接管 ${adopted}` : ''}。`);
+    if (pruned || trimmed || adopted || repaired) {
+      this._alert(`挂单对账：交易所实际 ${real.length} 单；清理失效 ${pruned}，撤除重复 ${trimmed}${adopted ? `，接管 ${adopted}` : ''}${repaired ? `，方向修正 ${repaired}` : ''}。`);
       this._changed();
     }
+    this._drainRetryQueue().catch(() => {});
+    this._auditInventoryDrift();
+  }
+
+  /**
+   * 库存漂移审计（Review7 修复 2）：把"成交确认丢失导致的静默漏气"变成可见告警。
+   * 实际持仓应约等于 (buys-sells)×sizeBase ± 容忍格；若偏差超阈值，说明有成交事件
+   * 未被确认（档位空洞 + 无对腿库存）。仅告警，不动作。1 小时节流防噪音。
+   */
+  _auditInventoryDrift() {
+    if (!this.running || !this.config || !this.config.sizeBase) return;
+    const ppos = this.ex.getPosition?.(this.config.marketId);
+    const actual0 = ppos ? Number(ppos.sizeBase) : NaN;
+    // Review13: 恢复路径首次观测时，把"基线"与"锚点"在同刻校正到当前持仓与成交计数——
+    // 基线和锚点必须永远同时设置，否则旧快照缺省时基线沿用旧值、锚点重置，会把
+    // 下午合法积累的库存当漂移。重校准后长期再叫才是真的。
+    if (this._auditNeedsRebase && Number.isFinite(actual0)) {
+      this._invBase = actual0;
+      this._auditBuysBase = this.stats.buys;
+      this._auditSellsBase = this.stats.sells;
+      this._auditNeedsRebase = false;
+      this._changed(); // 持久化新基线/锚点，下次重启不再回退
+      return; // 本轮不审计，从下轮起干净对账
+    }
+    const baseOccurrences = ((this.stats.buys - (this._auditBuysBase || 0))
+                             - (this.stats.sells - (this._auditSellsBase || 0)));
+    const expected = baseOccurrences * this.config.sizeBase;
+    const pos = this.ex.getPosition?.(this.config.marketId);
+    if (!pos) return;
+    const actual = Number(pos.sizeBase);
+    if (!Number.isFinite(actual)) return;
+    const toleranceGrids = Math.max(2, Math.ceil((this.config.gridCount || 40) * 0.03)); // 140格→5格：部分成交/尘埃仓正常噪音 1-2 格，抓得住 21 格事故
+    const base = this._invBase || 0; // 库存基线（保留持仓重启时不把已知遗留库存当漂移）
+    const net = Math.abs(actual - base - expected); // 全带符号：顺带修掉空头基线假警/方向翻转漏报（Review11 P3）
+    const tolerance = toleranceGrids * this.config.sizeBase;
+    if (net <= tolerance) return;
+    if (Date.now() - (this._lastDriftAlertAt || 0) < 60 * 60_000) return;
+    this._lastDriftAlertAt = Date.now();
+    const driftGrids = net / this.config.sizeBase;
+    this._alert(`⚠️ [${this.config.displayName}] 库存与成交流水不符：实际持仓 ${round4(actual)} 币（基线 ${round4(base)}），成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
   }
 
   _startReconcileTimer() {
@@ -874,11 +1706,254 @@ export class GridBot {
   }
   _stopReconcileTimer() { if (this._reconTimer) { clearInterval(this._reconTimer); this._reconTimer = null; } }
 
-  _alert(message) {
+  _alert(message, opts = {}) {
     this.alerts.unshift({ t: Date.now(), message });
     if (this.alerts.length > 30) this.alerts.pop();
     // 同步写入结构化日志（审计追溯），失败不影响主流程
     logger.warn('bot', String(message));
+    // 转发到通知总线（server 注入来源标签 + 多渠道推送 + 防疲劳）。
+    // level/key 可由调用点显式指定，否则由总线从 ⚠️/❌ 文本推断。失败绝不影响交易。
+    try { this._onAlert?.({ t: Date.now(), message: String(message), level: opts.level, key: opts.key }); }
+    catch { /* 通知失败不影响主流程 */ }
+  }
+
+  /**
+   * 外部（事件日历）请求暂停【入场侧】到某时刻：出场/减仓腿不受影响，窗口过后
+   * _refillPausedUntil 自然过期即恢复。幂等——只在真正延长暂停时告警一次。
+   */
+  pauseOpening(untilTs, reason = '') {
+    if (!this.running || !(untilTs > Date.now())) return;
+    if (untilTs > this._refillPausedUntil) {
+      this._refillPausedUntil = untilTs;
+      const t = new Date(untilTs).toLocaleTimeString('zh-CN');
+      this._alert(`⏸ 已暂停入场侧至 ${t}${reason ? '（' + reason + '）' : ''}；出场/减仓腿照常，窗口结束自动恢复。`, { level: 'warn', key: 'calendar-pause' });
+    }
+  }
+
+  /**
+   * 成交流哨兵（文档力荐、回测正期望的免费传感器）：连续同向【入场】成交 = 价格
+   * 正在切穿梯子。1h 内同向入场 ≥N 格 → 只发通知不碰订单（动作型在 BTC 网格上负期望）。
+   */
+  _checkTrendFills({ side, levelIndex, closing }) {
+    const now = Date.now();
+    this._fillLog.push({ t: now, side, levelIndex, closing });
+    this._fillLog = this._fillLog.filter((e) => now - e.t < this._trendFillWindowMs);
+    // 末尾若是平仓腿，本次成交不构成入场信号，直接返回。
+    const last = this._fillLog[this._fillLog.length - 1];
+    if (!last || last.closing) return;
+    const dirSide = last.side;
+    // 从末尾（最新）回溯：任何反向成交（含平仓）打断连续段；同向平仓跳过（不计数也不打断）；
+    // 入场档位必须单调推进（买越买越低=index 递增回看；卖越卖越高=index 递减回看）才算“切穿梯子”。
+    let run = 0;
+    let lastLvl = null;
+    for (let i = this._fillLog.length - 1; i >= 0; i--) {
+      const e = this._fillLog[i];
+      if (e.side !== dirSide) break;
+      if (e.closing) continue;
+      if (e.levelIndex != null && lastLvl != null) {
+        const monotonic = dirSide === 'buy' ? e.levelIndex > lastLvl : e.levelIndex < lastLvl;
+        if (!monotonic) break;
+      }
+      if (e.levelIndex != null) lastLvl = e.levelIndex;
+      run++;
+    }
+    // 阈值：显式 TREND_FILL_N 优先，否则相对格数 max(5, round(格数×0.4))。
+    const threshold = this._trendFillN > 0
+      ? this._trendFillN
+      : Math.max(5, Math.round((this.grid?.count || 20) * 0.4));
+    if (run >= threshold && now - this._lastTrendAlertAt > 30 * 60_000) {
+      this._lastTrendAlertAt = now;
+      const dir = dirSide === 'buy' ? '下跌' : '上涨';
+      const sp = this.grid?.spacing ?? this.config.spacing ?? 0;
+      const px = this.lastPrice || 0;
+      const travelPct = (sp > 0 && px > 0) ? round2((run * sp / px) * 100) : null;
+      this._alert(
+        `⚠️ 成交流哨兵：1 小时内连续 ${run} 格同向${dirSide === 'buy' ? '买入' : '卖出'}入场且档位单调推进`
+        + (travelPct != null ? `（约 ${travelPct}% 行程）` : '')
+        + `，${this.config?.displayName || ''} 疑似单边${dir}启动。请复核是否需要停止/平仓/撤单（本提醒不自动动手）。`,
+        { level: 'warn', key: 'trend-fills' },
+      );
+    }
+  }
+
+  /** 记录一次自动停机（供冷静门自动重启）。仅动态网格启用时记录。 */
+  _noteAutoStop(reason, snapshotConfig) {
+    if (!this.config?.dynamic?.enabled) return;
+    // 深拷贝最小必要配置（不含敏感字段），供后续 start() 复用
+    const c = snapshotConfig || this.config;
+    this._autoStopped = {
+      at: Date.now(), reason,
+      config: { ...c, dynamic: c.dynamic },
+    };
+  }
+
+  /** 手动接管：取消"自动停机→冷静门重启"路径（手动停机永不自动重启）。 */
+  cancelAutoRestart() { this._autoStopped = null; }
+
+  /** 动态监督器（60s 节拍）：冷静门自动重启 / 漂移重定，不挂在价格热路径上。 */
+  /** 动态网格模式文案：区分影子/实盘与两分支放行状态（启动告警/监督器心跳共用）。 */
+  _dynModeText() {
+    const dyn = this.config?.dynamic;
+    if (!dyn?.enabled) return '未启用';
+    if (dyn.shadow) return '影子';
+    const parts = [];
+    if (dyn.restartEnabled) parts.push('自动重启');
+    if (dyn.recenterEnabled) parts.push('漂移重定');
+    return `实盘·${parts.join('+') || '无分支放行'}`;
+  }
+
+  _startDynTimer() {
+    if (this._dynTimer) return;
+    this._dynTimer = setInterval(() => { this._dynCheck().catch(() => {}); }, 60_000);
+    this._dynTimer.unref?.();
+    logger.info('bot', `动态监督器已启动 ${this.config.displayName}（${this._dynModeText()}，60s 节拍）`);
+  }
+  _stopDynTimer() { if (this._dynTimer) { clearInterval(this._dynTimer); this._dynTimer = null; } }
+
+  /** 记录一次动态动作（分支A/B；影子模式记 shadow=true 的'本应'）。回填字段留给核账任务。 */
+  _recordDynAction(entry) {
+    if (!Array.isArray(this._dynLog)) this._dynLog = [];
+    this._dynLog.push({ t: Date.now(), pnlAfter: null, rungsAfter: null, realizedAtAction: null, ...entry });
+    if (this._dynLog.length > 200) this._dynLog.splice(0, this._dynLog.length - 200);
+    this._changed();
+  }
+
+  /** 门拦截计数：每门每小时最多累加一次（避免 60s 节拍把持续拦截刷成天文数字）。 */
+  _noteDynGate(gate) {
+    const now = Date.now();
+    if (!this._dynGateBlocked) this._dynGateBlocked = { inventory: 0, calm: 0, cooldown: 0 };
+    if (!this._dynGateLastAt) this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
+    if (now - (this._dynGateLastAt[gate] || 0) < 60 * 60_000) return;
+    this._dynGateLastAt[gate] = now;
+    this._dynGateBlocked[gate] = (this._dynGateBlocked[gate] || 0) + 1;
+    this._changed();
+  }
+
+  /** 动态动作的 before 快照（现价/库存格数/浮盈/累计格利）——核账任务据此回填 3 日/48h 结果。 */
+  _dynBefore(price, pos) {
+    const perGrid = this.config?.sizeBase || 1;
+    return {
+      lower: this.config.lower, upper: this.config.upper, price: round2(price),
+      invGrids: pos ? round2((Number(pos.sizeBase) || 0) / perGrid) : 0,
+      uPnl: pos && Number.isFinite(Number(pos.unrealizedPnl)) ? round2(Number(pos.unrealizedPnl)) : null,
+      completedRungs: this.stats.completedRungs || 0,
+      gridProfit: round2(this.stats.gridProfit || 0),
+    };
+  }
+
+  /**
+   * 动态网格监督器（60s 节拍，串行互斥）：
+   *  - 分支 B（价值主体）：破界/止损自动停机后，冷静门满足才自动重启（区间以现价居中）
+   *  - 分支 A（影子优先）：价格漂移 + 库存平 + 冷静门满足才漂移重定
+   * 所有动作只调用 start()/adjustRange()，无任何新增直接下单路径。
+   */
+  async _dynCheck() {
+    if (!this.config?.dynamic?.enabled) return;
+    if (this._dynInFlight) return;
+    if (this._placementPasses > 0 || this._retryQueue.length || this.recovery) return;
+    this._dynInFlight = true;
+    try {
+      const dyn = this.config.dynamic;
+      const ex = this.ex, cfg = this.config, mId = cfg.marketId;
+      // 健康守卫：交易所数据太久未更新则整轮跳过
+      if (typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0 && Date.now() - ex.lastOkAt > 120_000) return;
+      // 冷静门：|近 calmWindowH 小时涨跌| ≤ calmMaxMovePct%
+      let calm = false, movePct = null;
+      try {
+        const n = Math.min(200, Math.max(2, Math.ceil((dyn.calmWindowH * 3600) / 3600) + 1));
+        const candles = await ex.getCandles?.(mId, 3600, n);
+        if (Array.isArray(candles) && candles.length >= 2) {
+          const first = candles[0]?.close, last = candles.at(-1)?.close;
+          if (first > 0 && last > 0) movePct = Math.abs(last / first - 1) * 100;
+        }
+      } catch { /* 拿不到 K 线视为不平静 */ }
+      calm = movePct != null && movePct <= (dyn.calmMaxMovePct ?? 3);
+      const width = cfg.upper - cfg.lower; // P2-b: config 无 grid 属性，宽度恒为上下边界差
+
+      if (this.running) {
+        // ── 分支 A：漂移重定（默认影子） ──
+        // P2-a: 破界 recover 态（outOfRange=true，回收阶梯挂着）不漂移重定——
+        // 破界统一交由 close→分支B 或 recover 自身流程处理，状态机不被搅浑。
+        if (this.outOfRange) return;
+        const price = this.lastPrice;
+        if (!Number.isFinite(price) || price <= 0) return;
+        const mid = (cfg.lower + cfg.upper) / 2;
+        const drift = Math.abs(price - mid) > width * (dyn.driftFrac ?? 0.33);
+        const pos = this.ex.getPosition?.(mId);
+        const invGate = !pos || Math.abs(Number(pos.sizeBase) || 0) <= (dyn.invGateGrids ?? 2) * (cfg.sizeBase || 0);
+        const cooldownOk = Date.now() - this._lastDynActionAt >= (dyn.recenterCooldownMin ?? 360) * 60_000;
+        if (drift && !invGate) {
+          this._noteDynGate('inventory');
+          // Review14 待办 1：影子期门拦截的负样本——"正确的静默"对第 7 天评审无帮助，
+          // 输出节流的门拦截日志（每小时一条），让影子期产出可评审记录。
+          if (Date.now() - (this._lastShadowGateLogAt || 0) > 60 * 60_000) {
+            this._lastShadowGateLogAt = Date.now();
+            const inv = pos ? Math.abs(Number(pos.sizeBase) || 0) / (cfg.sizeBase || 1) : 0;
+            this._alert(`[动态·影子] 漂移已达标但被库存门拦截（库存 ${round2(inv)} 格 > 门限 ${dyn.invGateGrids ?? 2} 格）：未重定区间（带重仓追涨重定正是回测里的亏损死法）。`);
+          }
+        }
+        if (drift && invGate && !calm) this._noteDynGate('calm');
+        if (drift && invGate && calm && !cooldownOk) this._noteDynGate('cooldown');
+        if (drift && invGate && calm && cooldownOk) {
+          this._lastDynActionAt = Date.now();
+          const lo = alignToStep(price - width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
+          const hi = alignToStep(price + width / 2, cfg.stepPrice || 0.01, this.grid?.spacing);
+          const beforeA = this._dynBefore(price, pos); const afterA = { lower: lo, upper: hi };
+          if (dyn.shadow || !dyn.recenterEnabled) {
+            // 影子全局开 或 分支A开关未启用：只记录"本应重定"样本，不执行
+            const holdTxt = dyn.shadow ? '影子模式' : '漂移重定未启用';
+            this._alert(`[动态·影子] 本应漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)} 偏心 ${round2(Math.abs(price - mid))}，库存 ${pos?.sizeBase ?? 0}）；${holdTxt}，不执行。`);
+            this._recordDynAction({ branch: 'A', reason: 'drift', shadow: true, before: beforeA, after: afterA });
+          } else {
+            logger.info('bot', `[动态] 漂移重定区间至 [${lo}, ${hi}]（现价 ${round2(price)}）`);
+            try {
+              await this.adjustRange({ lower: lo, upper: hi }); this.stats.recenters++;
+              this._recordDynAction({ branch: 'A', reason: 'drift', shadow: false, before: beforeA, after: afterA });
+              this._changed();
+            } catch (e) { this._alert(`[动态] 漂移重定失败：${e?.message || e}`); }
+          }
+        }
+        return;
+      }
+
+      // ── 分支 B：冷静门自动重启（价值主体，默认启用） ──
+      if (dyn.restartEnabled && this._autoStopped) {
+        const as = this._autoStopped;
+        const cooldownMs = (dyn.restartCooldownMin ?? 120) * 60_000;
+        if (Date.now() - as.at < cooldownMs) { this._noteDynGate('cooldown'); return; }
+        if (!calm) {
+          this._noteDynGate('calm');
+          if (Date.now() - this._lastCalmDeniedAt > 30 * 60_000) {
+            this._lastCalmDeniedAt = Date.now();
+            this._alert(`[动态] 自动重启被冷静门拦截（动量 ${movePct != null ? round2(movePct) + '%' : '未知'} > ${dyn.calmMaxMovePct}%），${as.reason} 后暂不回场。`);
+          }
+          return;
+        }
+        const price = this.lastPrice;
+        if (!Number.isFinite(price) || price <= 0) return;
+        // P3-②：分支B 统一读 as.config（停机时点的配置），防止停机态后再改 config 造成宽/对齐不一致
+        const widthB = as.config.upper - as.config.lower;
+        const lo = alignToStep(price - widthB / 2, as.config.stepPrice || 0.01); // buildGrid 会重算 spacing，此处仅按 stepPrice 对齐
+        const hi = alignToStep(price + widthB / 2, as.config.stepPrice || 0.01);
+        const beforeB = this._dynBefore(price, this.ex.getPosition?.(mId)); const afterB = { lower: lo, upper: hi };
+        if (dyn.shadow) {
+          this._alert(`[动态·影子] 本应自动重启网格至 [${lo}, ${hi}]（${as.reason} 后冷静门满足）；影子模式不执行。`);
+          this._recordDynAction({ branch: 'B', reason: 'restart', shadow: true, before: beforeB, after: afterB });
+          return;
+        }
+        logger.info('bot', `[动态] 自动重启网格至 [${lo}, ${hi}]（${as.reason} 后冷静门满足）`);
+        this._lastDynActionAt = Date.now();
+        try {
+          await this.start({ ...as.config, lower: lo, upper: hi, dynamic: dyn });
+          this.stats.autoRestarts++;
+          this._autoStopped = null;
+          this._recordDynAction({ branch: 'B', reason: 'restart', shadow: false, before: beforeB, after: afterB });
+          this._changed();
+        } catch (e) {
+          this._alert(`[动态] 自动重启失败：${e?.message || e}（保留自动停机状态，下轮再试）`);
+        }
+      }
+    } finally { this._dynInFlight = false; }
   }
 
   /** Per-exchange health classification surfaced to the dashboard. */
@@ -891,6 +1966,8 @@ export class GridBot {
     let status = 'ok', reason = '正常运行';
     if (!this.running && !this.config) { status = 'idle'; reason = '未运行'; }
     else if (paused) { status = 'error'; reason = `订单频繁被取消（疑似保证金不足），已暂停补单 ${Math.ceil((this._refillPausedUntil - Date.now())/1000)}s`; }
+    else if (this._operationalIssue) { status = 'error'; reason = this._operationalIssue.title || this._operationalIssue.message || '接管缺失'; }
+    else if (ex.operationalIssue) { status = 'error'; reason = ex.operationalIssue.title || ex.operationalIssue.message || '交易所操作异常'; }
     else if (ex.dataSource === 'synthetic') { status = 'warn'; reason = '合成行情（未连真实交易所）'; }
     else if (okAge != null && okAge > 30000) { status = 'error'; reason = `交易所数据 ${Math.round(okAge / 1000)}s 未更新`; }
     else if (priceStale) { status = 'warn'; reason = '行情滞后（已用持仓推算价兜底）'; }
@@ -902,6 +1979,9 @@ export class GridBot {
       priceStale,
       placeFails: this._placeFails,
       exchangeOpenOrders: this._exchangeOpenOrders,
+      exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
+      // 空快照率（Review14）：>30% 即抖动降级——降级状态必须可见
+      snapshotEmptyRatePct: (typeof ex.snapshotEmptyRatePct === 'function') ? ex.snapshotEmptyRatePct() : null,
     };
   }
 
@@ -910,21 +1990,25 @@ export class GridBot {
     const openByLevel = {};
     for (const o of this.active.values()) openByLevel[o.levelIndex] = o.side;
 
-    const unrealized = pos ? round2(pos.unrealizedPnl) : 0;
+    const unrealizedRaw = pos ? Number(pos.unrealizedPnl) : 0;
+    const unrealized = round2(unrealizedRaw);
     const balance = typeof this.ex.balance === 'number' ? round2(this.ex.balance) : null;
     const equityRaw = typeof this.ex.equity === 'number' ? this.ex.equity
       : (balance != null ? balance + unrealized : null);
     const equity = equityRaw != null ? round2(equityRaw) : null;
 
-    let realized;
+    let realizedRaw;
     if (typeof this.ex.realizedPnl === 'number') {
-      realized = round2(this.ex.realizedPnl - (this._pnlBase ?? 0)); // offset applied by resetStats
+      realizedRaw = this.ex.realizedPnl - (this._pnlBase ?? 0); // offset applied by resetStats
     } else if (equityRaw != null && this.startBalance != null) {
-      realized = round2((equityRaw - this.startBalance) - unrealized);
+      realizedRaw = (equityRaw - this.startBalance) - unrealizedRaw;
     } else {
-      realized = round2(this.stats.gridProfit);
+      realizedRaw = this.stats.gridProfit;
     }
-    const totalPnl = round2(realized + unrealized);
+    const realized = round2(realizedRaw);
+    // Sum the unrounded components so two independent display roundings cannot
+    // move the authoritative total by one cent.
+    const totalPnl = round2(realizedRaw + unrealizedRaw);
     const returnPct = (this.startBalance && this.startBalance > 0)
       ? round2((totalPnl / this.startBalance) * 100)
       : ((equity && equity > 0) ? round2((totalPnl / equity) * 100) : null);
@@ -938,11 +2022,35 @@ export class GridBot {
       outOfRange: this.outOfRange,
       risk: this.risk,
       stats: this.stats,
+      dynamic: {
+        autoStopped: this._autoStopped,
+        lastActionAt: this._lastDynActionAt,
+        recenters: this.stats.recenters || 0,
+        autoRestarts: this.stats.autoRestarts || 0,
+        shadow: !!(this.config?.dynamic?.shadow),
+        enabled: !!(this.config?.dynamic?.enabled),
+        recenterEnabled: !!(this.config?.dynamic?.recenterEnabled),
+        restartEnabled: !!(this.config?.dynamic?.restartEnabled),
+        gateBlocked: this._dynGateBlocked || { inventory: 0, calm: 0, cooldown: 0 },
+        logCount: Array.isArray(this._dynLog) ? this._dynLog.length : 0,
+        log: Array.isArray(this._dynLog) ? this._dynLog.slice(-20) : [],
+      },
       openOrders: this.active.size,
       exchangeOpenOrders: this._exchangeOpenOrders,
+      exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
+      placementProgress: this._placementProgressView(),
       openByLevel,
       health: this._health(),
-      position: pos ? { sizeBase: round6(pos.sizeBase), entryPrice: round2(pos.entryPrice), unrealizedPnl: round2(pos.unrealizedPnl), leverage: pos.leverage ?? null } : null,
+      position: pos ? {
+        sizeBase: round6(pos.sizeBase),
+        entryPrice: roundPrice(pos.entryPrice),
+        unrealizedPnl: round2(pos.unrealizedPnl),
+        leverage: pos.leverage ?? null,
+        liquidationPrice: Number.isFinite(Number(pos.liquidationPrice)) && Number(pos.liquidationPrice) > 0
+          ? roundPrice(Number(pos.liquidationPrice)) : null,
+      } : null,
+      operationalIssue: this._operationalIssue ?? this.ex.operationalIssue ?? null,
+      apiWalletAddress: this.ex.apiWalletAddress ?? null,
       realizedPnl: realized,
       unrealizedPnl: unrealized,
       totalPnl,
@@ -961,5 +2069,20 @@ export class GridBot {
 function labelMode(m) { return m === 'long' ? '做多网格' : m === 'short' ? '做空网格' : '中性网格'; }
 
 function round2(x) { return Math.round(x * 100) / 100; }
+// 回收阶梯首档偏移的解析：'inf'/非有限 → Infinity（不挂阶梯）；有限且 ≥0 → 该值；
+// 其余（含重启后被 JSON 变成 null 的历史快照）→ 默认 2。永远不落到 0。
+function ladderOffsetGrids(v) {
+  if (v === 'inf' || v === 'infinity' || v === 'none' || v === Infinity) return Infinity;
+  const n = Number(v);
+  return (Number.isFinite(n) && n >= 0) ? n : 2;
+}
 function round6(x) { return Math.round(x * 1e6) / 1e6; }
+function round4(x) { return Math.round(x * 1e4) / 1e4; }
+function roundPrice(x) { return Number.isFinite(Number(x)) ? Math.round(Number(x) * 1e8) / 1e8 : null; }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/** 边界对齐：优先按 grid 间距取整，其次按 stepPrice；返回正数档位。 */
+function alignToStep(value, stepPrice, gridSpacing) {
+  const step = (gridSpacing && gridSpacing > 0) ? gridSpacing : (stepPrice > 0 ? stepPrice : 1);
+  return Math.max(step, Math.round(Number(value) / step) * step);
+}
