@@ -103,6 +103,7 @@ export class ArcusExchange extends EventEmitter {
     this.lastError = null;
     this.operationalIssue = null;
     this.clockSkewMs = null;
+    this._lastSigNs = 0n;                      // 上一个签名时间戳，保证 ct 严格递增
 
     this.supportsSafeOpeningRetry = false;     // v1 保守：不开"两次快照去重"重试
     // 停机超过 4 分钟，死手开关已经把这批挂单撤光了。续跑时"在簿 0 单"是
@@ -187,7 +188,14 @@ export class ArcusExchange extends EventEmitter {
 
   /** 签名用的当前时间：叠加启动时测得的时钟偏差，避免本机漂移直接打死所有签名单。 */
   _nowNs() {
-    return nowNs() + BigInt(Math.round(this.clockSkewMs || 0)) * 1_000_000n;
+    // nowNs() 只有毫秒分辨率：同一毫秒内连发的两单会拿到完全相同的 ct，
+    // 服务端按请求时间戳去重（request timestamp already used / 401）直接把后一单拒掉。
+    // 实测连环成交时段一秒内要连发十几单，必然踩中，表现为补腿丢失→阶梯空洞。
+    // 因此这里保证本进程发出的 ct 严格递增（同毫秒内逐个 +1ns）。
+    const base = nowNs() + BigInt(Math.round(this.clockSkewMs || 0)) * 1_000_000n;
+    const ts = base > this._lastSigNs ? base : this._lastSigNs + 1n;
+    this._lastSigNs = ts;
+    return ts;
   }
 
   /** ct 只有 ±5s 容差：时钟漂移会让每一单签名失败，必须在启动时暴露。 */
