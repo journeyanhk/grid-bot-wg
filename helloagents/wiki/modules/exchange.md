@@ -1,7 +1,7 @@
 # exchange 模块（交易所适配器）
 
 ## 目的
-统一三交易所（Decibel/Extended/RISEx）的 live 与 paper 接入，向 bot 提供一致的接口与事件。
+统一七交易所（Decibel/Extended/RISEx/RHC/Entropy/Variational/Arcus）的 live 与 paper 接入，向 bot 提供一致的接口与事件。
 
 ## 模块概述
 - **职责:** 市场/价格/K线、下单（签名或 API）、撤单、持仓/余额、成交检测（轮询 + 正向确认）、重连、paper 模拟撮合
@@ -54,6 +54,18 @@
 ## 已知问题（已规避）
 - Extended/RISEx 不启用开仓单安全重试（supportsSafeOpeningRetry=false，对齐原版仅 Lighter 开启的保守设计）：两者 open-orders 快照存在已知抖动，与"两次快照去重"的安全重试机制冲突
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
+
+## Arcus（ar）要点
+- 写路径 REST-only：WS 下单是异步 ACK 且错误帧不回显 `id`，无法关联失败；行情才走 WS
+- 签名两套：订单类为类型化载荷（tick/quantum 整数、`ct` 纳秒、`g` = goodTilTime(µs)×1000，
+  键序 `ad ai ct g id m op p q r s t v`）；`cancelAllOrders`/`setLeverage` 为
+  `timestamp + action + canonical(body)`（Scheme 2）
+- 全单 ALO：保证 maker（0 ppm）；全 ALO 批量跳过 50ms taker speed bump
+- GTT 每单必填且 ≥ 现在+1 个月，缺失即拒单
+- 死手开关 `scheduleCancel` 必开：Arcus 明确无断线自动撤单，deadline ≤5 分钟，60s 续期
+- 限流双桶：IP 1500 权重/分（`fills`/`openOrders` = 20，`bbo` = 2）；下单/撤单 IP 权重 0，
+  走子账户池 order 20000 / cancel 40000，`cancelAll` 固定扣 100 → 重铺用 batchCancel
+- `/v1/fills`、`/v1/openOrders` 等按 address 公开读，无需鉴权（地址即凭据，注意隐私）
 
 ## 变更历史
 - [202609071613_entropy-hl](../../history/2026-09/202609071613_entropy-hl/) - 第5交易所 Entropy(HL) 接入 + 总览过滤（review19 后修复校准）

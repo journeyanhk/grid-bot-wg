@@ -20,7 +20,8 @@ export function createExchange(cfg = {}) {
     });
   }
   return new ArcusPaperExchange({
-    apiUrl: cfg.apiUrl,
+    apiUrl: cfg.paperApiUrl,
+    paperNetwork: cfg.paperNetwork,
     network: cfg.network,
     startBalance: cfg.startBalance,
   });

@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+## [1.6.17] - 2026-10-22
+
+### 新增（第七所 Arcus 接入，paper + testnet 已验证）
+- `src/exchange/ar/` 五文件适配器：signer（Ed25519 + 类型化载荷）/ market / auth / arcus / paper
+- 写路径全 REST：ALO(post-only) + GTT（≥1 个月，µs；签名内 ns）；批量 15/批
+- 成交真值走 `/v1/fills` 微秒游标增量（对齐 hl 的 userFillsByTime 模式，不做穿越推定）
+- 行情走 WS `bbo`（免鉴权）；断线降级 REST + 重连补订阅
+- 安全：`scheduleCancel` 死手开关 60s 续期（Arcus 无断线撤单）；makerFeePpm≠0 拒启；
+  非 CRYPTO/RTH 市场拒启；`errorType=Transmission` 才允许重发
+- paper 默认吃**主网真实盘口**（`AR_PAPER_NETWORK=mainnet`）——测试网盘口太薄会打出假成交
+
+### 接线
+- `config.js` 增 `ar` 配置块；`server.js` 注册（bot/restore/错误环/AI 服务/日历）；
+  `ai/service.js` 六所硬编码列表补 `va`（历史遗漏）与 `ar`
+
+### 已知未完成
+- 面板 tab 与概览卡片推迟到 v1.1（REST `/api/ar/*` 已可用）
+
 ## [1.6.15] - 2026-10-02
 
 ### 修复（官方回退后的锁死陷阱：残留 ll-token + 死端点 -> 手动 token 也贴不进）

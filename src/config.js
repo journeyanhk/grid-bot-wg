@@ -94,6 +94,34 @@ export function getConfig() {
     proxy: process.env.RISEX_PROXY || globalProxy,
   };
 
+  // ── Arcus ─────────────────────────────────────────────────────────────────
+  // 默认 testnet：主网需显式 AR_NETWORK=mainnet。Arcus 主网交易需邀请白名单，
+  // testnet 网页 Deposit 白送 ~$1,000 USDG，D1-D5 全程不花钱。
+  const arNet = (process.env.AR_NETWORK || 'testnet').toLowerCase();
+  const arDefaults =
+    arNet === 'testnet'
+      ? { api: 'https://api.testnet.arcus.xyz', ws: 'wss://api.testnet.arcus.xyz/v1/ws' }
+      : { api: 'https://api.arcus.xyz', ws: 'wss://api.arcus.xyz/v1/ws' };
+
+  const ar = {
+    mode: (process.env.AR_MODE || 'paper').toLowerCase() === 'live' ? 'live' : 'paper',
+    network: arNet,
+    address: (process.env.AR_ACCOUNT_ADDRESS || '').toLowerCase(),
+    signingKey: process.env.AR_API_SIGNING_KEY || '',
+    accountIndex: Number(process.env.AR_ACCOUNT_INDEX || 0),
+    apiUrl: (process.env.AR_API_URL || arDefaults.api).replace(/\/$/, ''),
+    // paper 默认吃主网真实行情（AR_PAPER_API_URL 可覆盖为测试网）
+    paperApiUrl: (process.env.AR_PAPER_API_URL || '').replace(/\/$/, ''),
+    paperNetwork: process.env.AR_PAPER_NETWORK || 'mainnet',
+    wsUrl: process.env.AR_WS_URL || arDefaults.ws,
+    // maker 0 ppm 时网格才成立；未知按 0 处理，适配器启动时会读真实费率复核。
+    feeRate: Number(process.env.AR_FEE_RATE || 0),
+    deadmanMs: Number(process.env.AR_DEADMAN_MS || 60_000),
+    pollMs: Number(process.env.AR_POLL_MS || 2500),
+    startBalance: Number(process.env.PAPER_BALANCE || 10000),
+    proxy: process.env.AR_PROXY || globalProxy,
+  };
+
   // ── 仪表盘鉴权 ────────────────────────────────────────────────────────────
   // 账号密码模式：DASHBOARD_USER + DASHBOARD_PASS 配置后，所有 /api/*（除
   // /api/login）必须通过登录获取的会话令牌访问，VPS 公网部署推荐使用。
@@ -198,6 +226,7 @@ export function getConfig() {
     de,
     ex,
     rs,
+    ar,
     lr,
     hl,
     va,

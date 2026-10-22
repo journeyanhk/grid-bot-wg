@@ -1,7 +1,7 @@
 {
   "name": "grid-bot-all",
-  "version": "1.6.15",
-  "description": "三交易所整合网格交易机器人：Decibel / Extended / RISEx，统一仪表盘，支持同时运行三个网格策略。",
+  "version": "1.6.17",
+  "description": "多交易所整合网格交易机器人：Decibel / Extended / RISEx / RHC / Entropy / Variational / Arcus，统一仪表盘。",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",

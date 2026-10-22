@@ -12,7 +12,7 @@
 // market's MAKER fee (0 ppm on Arcus today), so paper P&L is not inflated by a
 // missing fee line: set feeRate from the market metadata, not a constant.
 import { EventEmitter } from 'node:events';
-import { AR_MAINNET, AR_TESTNET, parseMarkets } from './market.js';
+import { normalizeBase, parseMarkets } from './market.js';
 
 const FALLBACK_MARKETS = [
   {
@@ -27,9 +27,13 @@ export class ArcusPaperExchange extends EventEmitter {
     super();
     this.mode = 'paper';
     this.network = (opts.network || 'mainnet').toLowerCase() === 'testnet' ? 'testnet' : 'mainnet';
-    // 显式 apiUrl 优先；否则按网络选官方端点，最后回退另一套（只影响行情，不影响资金）。
-    this.candidates = [...new Set([opts.apiUrl, this.network === 'testnet' ? AR_TESTNET : AR_MAINNET,
-      this.network === 'testnet' ? AR_MAINNET : AR_TESTNET].filter(Boolean))];
+    // 行情来源优先级：AR_PAPER_API_URL → 主网官方端点 → 测试网（只影响行情，不影响资金）。
+    // paper 的意义是"用真实盘口验证策略"，所以默认吃主网；测试盘口太薄会打出假成交。
+    const sourceNet = (opts.paperNetwork || 'mainnet').toLowerCase() === 'testnet' ? 'testnet' : 'mainnet';
+    const other = sourceNet === 'testnet' ? 'mainnet' : 'testnet';
+    this.sourceNetwork = sourceNet;
+    this.candidates = [...new Set([normalizeBase(opts.apiUrl, sourceNet),
+      normalizeBase('', sourceNet), normalizeBase('', other)].filter(Boolean))];
     this.apiUrl = this.candidates[0];
     this.startBalance = Number(opts.startBalance) || 10000;
     this.balance = this.startBalance;

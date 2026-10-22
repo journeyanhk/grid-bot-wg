@@ -12,6 +12,7 @@ import { getConfig, ROOT } from './config.js';
 import { createExchange as createDeExchange } from './exchange/de/index.js';
 import { createExchange as createExExchange } from './exchange/ex/index.js';
 import { createExchange as createRsExchange } from './exchange/rs/index.js';
+import { createExchange as createArExchange } from './exchange/ar/index.js';
 import { createExchange as createLrExchange } from './exchange/lr/index.js';
 import { createExchange as createHlExchange } from './exchange/hl/index.js';
 import { createExchange as createVaExchange } from './exchange/va/index.js';
@@ -105,6 +106,7 @@ if (proxyResult.used) {
 const deExchange = createDeExchange(cfg.de);
 const exExchange = createExExchange(cfg.ex);
 const rsExchange = createRsExchange(cfg.rs);
+const arExchange = createArExchange(cfg.ar);
 
 const deBot = new GridBot(deExchange, { onChange: (s) => saveSnapshot('de', s),
   onAlert: (a) => notifier.send({ source: 'de', message: `[Decibel] ${a.message}`, level: a.level, key: a.key ? 'de:' + a.key : undefined }) });
@@ -112,6 +114,8 @@ const exBot = new GridBot(exExchange, { onChange: (s) => saveSnapshot('ex', s),
   onAlert: (a) => notifier.send({ source: 'ex', message: `[Extended] ${a.message}`, level: a.level, key: a.key ? 'ex:' + a.key : undefined }) });
 const rsBot = new GridBot(rsExchange, { onChange: (s) => saveSnapshot('rs', s),
   onAlert: (a) => notifier.send({ source: 'rs', message: `[RISEx] ${a.message}`, level: a.level, key: a.key ? 'rs:' + a.key : undefined }) });
+const arBot = new GridBot(arExchange, { onChange: (s) => saveSnapshot('ar', s),
+  onAlert: (a) => notifier.send({ source: 'ar', message: `[Arcus] ${a.message}`, level: a.level, key: a.key ? 'ar:' + a.key : undefined }) });
 const lrExchange = createLrExchange(cfg.lr);
 const lrBot = new GridBot(lrExchange, { onChange: (s) => saveSnapshot('lr', s),
   onAlert: (a) => notifier.send({ source: 'lr', message: `[RHC] ${a.message}`, level: a.level, key: a.key ? 'lr:' + a.key : undefined }) });
@@ -133,20 +137,21 @@ const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
 deBot.restore(loadSnapshot('de'));
 exBot.restore(loadSnapshot('ex'));
 rsBot.restore(loadSnapshot('rs'));
+arBot.restore(loadSnapshot('ar'));
 lrBot.restore(loadSnapshot('lr'));
 hlBot.restore(loadSnapshot('hl'));
 vaBot.restore(loadSnapshot('va'));
 
 // Belt-and-suspenders: ensure every exchange always has an 'error' listener so a
 // stray emit can never crash the process (the GridBot also attaches one).
-for (const ex of [deExchange, exExchange, rsExchange, lrExchange, hlExchange, vaExchange]) {
+for (const ex of [deExchange, exExchange, rsExchange, arExchange, lrExchange, hlExchange, vaExchange]) {
   ex.on('error', (e) => { logger.error('exchange', e?.message || String(e)); });
 }
 
 // ── AI 服务（哨兵/日报/分析/对话/出区间建议）────────────────────────────────
 const aiService = createAiService({
-  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
-  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  bots: { de: deBot, ex: exBot, rs: rsBot, ar: arBot, lr: lrBot, hl: hlBot, va: vaBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, ar: arExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
   marketGate: () => marketGate, // 晚绑定：三绿看门创建于下方，AI 日报生成时读取
 });
 aiService.start();
@@ -156,7 +161,7 @@ aiService.start();
 const vaAudit = createAuditService({ bot: vaBot, exchange: vaExchange, source: 'va' });
 
 // ── 事件日历调度器：CPI/FOMC/非农 前后 ±window 分钟预警；可选自动暂停入场侧 ──
-const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot };
+const CAL_BOTS = { de: deBot, ex: exBot, rs: rsBot, ar: arBot, lr: lrBot, hl: hlBot, va: vaBot };
 let _calPrevTick = Date.now();
 const _calTimer = setInterval(() => {
   try {
@@ -219,6 +224,7 @@ const _LIVENESS_TARGETS = [
   { prefix: 'de', name: 'Decibel', ex: deExchange, bot: deBot },
   { prefix: 'ex', name: 'Extended', ex: exExchange, bot: exBot },
   { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
+  { prefix: 'ar', name: 'Arcus', ex: arExchange, bot: arBot },
   { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
   { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
 ];
@@ -250,6 +256,7 @@ if (_wdTimer.unref) _wdTimer.unref();
 const deClients = new Set();
 const exClients = new Set();
 const rsClients = new Set();
+const arClients = new Set();
 const lrClients = new Set();
 const hlClients = new Set();
 const vaClients = new Set();
@@ -406,6 +413,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
 const deHandler = makeExchangeHandler('/api/de', deBot, deExchange, cfg.de, deClients, 'Decibel');
 const exHandler = makeExchangeHandler('/api/ex', exBot, exExchange, cfg.ex, exClients, 'Extended');
 const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsClients, 'RISEx');
+const arHandler = makeExchangeHandler('/api/ar', arBot, arExchange, cfg.ar, arClients, 'Arcus');
 const lrHandler = makeExchangeHandler('/api/lr', lrBot, lrExchange, cfg.lr, lrClients, 'RHC Lighter');
 const hlHandler = makeExchangeHandler('/api/hl', hlBot, hlExchange, cfg.hl, hlClients, 'Entropy');
 const vaHandler = makeExchangeHandler('/api/va', vaBot, vaExchange, cfg.va, vaClients, 'Variational');
@@ -527,6 +535,7 @@ const server = http.createServer(async (request, res) => {
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
+        ar: pick(arBot.getState(), cfg.ar.mode),
         lr: pick(lrBot.getState(), cfg.lr.mode),
         hl: pick(hlBot.getState(), cfg.hl.mode),
         va: pick(vaBot.getState(), cfg.va.mode),
@@ -547,6 +556,7 @@ const server = http.createServer(async (request, res) => {
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
         rs: pick(rsBot.getState(), cfg.rs.mode),
+        ar: pick(arBot.getState(), cfg.ar.mode),
         lr: pick(lrBot.getState(), cfg.lr.mode),
         va: pick(vaBot.getState(), cfg.va.mode),
         hl: pick(hlBot.getState(), cfg.hl.mode),
@@ -684,6 +694,9 @@ const server = http.createServer(async (request, res) => {
     }
     if (p.startsWith('/api/rs/')) {
       return await rsHandler(request, res, p.slice('/api/rs'.length), url);
+    }
+    if (p.startsWith('/api/ar/')) {
+      return await arHandler(request, res, p.slice('/api/ar'.length), url);
     }
     if (p.startsWith('/api/lr/')) {
       return await lrHandler(request, res, p.slice('/api/lr'.length), url);
@@ -837,6 +850,7 @@ await Promise.all([
   initExchange(deExchange, 'Decibel', cfg.de),
   initExchange(exExchange, 'Extended', cfg.ex),
   initExchange(rsExchange, 'RISEx', cfg.rs),
+  initExchange(arExchange, 'Arcus', cfg.ar),
   initExchange(lrExchange, 'RHC Lighter', cfg.lr),
   initExchange(hlExchange, 'Entropy', cfg.hl),
   initExchange(vaExchange, 'Variational', cfg.va),
@@ -866,6 +880,7 @@ await Promise.all([
   resumeIfWasRunning(deBot, deExchange, 'de'),
   resumeIfWasRunning(exBot, exExchange, 'ex'),
   resumeIfWasRunning(rsBot, rsExchange, 'rs'),
+  resumeIfWasRunning(arBot, arExchange, 'ar'),
   resumeIfWasRunning(lrBot, lrExchange, 'lr'),
   resumeIfWasRunning(hlBot, hlExchange, 'hl'),
   resumeIfWasRunning(vaBot, vaExchange, 'va'),
@@ -876,8 +891,8 @@ await Promise.all([
 // -> 自动退避重连（1/2/5/15 分，封顶永续）+ 补续跑（≥3 次尝试）+ 响亮告警
 // （卡片红 + notify 每 30 分钟重复）+ 10 分钟兜底撤单（仅撤单、永不动仓位）。
 const resumeGuard = createResumeGuard({
-  bots: { de: deBot, ex: exBot, rs: rsBot, lr: lrBot, hl: hlBot, va: vaBot },
-  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
+  bots: { de: deBot, ex: exBot, rs: rsBot, ar: arBot, lr: lrBot, hl: hlBot, va: vaBot },
+  exchanges: { de: deExchange, ex: exExchange, rs: rsExchange, ar: arExchange, lr: lrExchange, hl: hlExchange, va: vaExchange },
   loadSnapshot, notifier, logger,
 });
 resumeGuard.start();
@@ -889,7 +904,7 @@ let marketGate = null;
 if (String(process.env.MARKET_GATE || '1') !== '0') {
   const normSym = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const fallbackFetcher = async () => {
-    for (const [name, ex] of [['Extended', exExchange], ['RHC', lrExchange], ['Decibel', deExchange], ['RISEx', rsExchange], ['Entropy', hlExchange], ['Variational', vaExchange]]) {
+    for (const [name, ex] of [['Extended', exExchange], ['RHC', lrExchange], ['Decibel', deExchange], ['RISEx', rsExchange], ['Arcus', arExchange], ['Entropy', hlExchange], ['Variational', vaExchange]]) {
       try {
         if (ex?.dataSource == null) continue;
         const markets = await ex.getMarkets();
@@ -931,10 +946,11 @@ await Promise.all([
   detectOrphanPosition(deBot, deExchange),
   detectOrphanPosition(exBot, exExchange),
   detectOrphanPosition(rsBot, rsExchange),
+  detectOrphanPosition(arBot, arExchange),
 ]);
 
 server.listen(cfg.port, cfg.host, () => {
-  logger.info('server', `仪表盘已启动: http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}（${cfg.de.mode}/${cfg.ex.mode}/${cfg.rs.mode}）`);
+  logger.info('server', `仪表盘已启动: http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}（${cfg.de.mode}/${cfg.ex.mode}/${cfg.rs.mode}/${cfg.ar.mode}）`);
   console.log(`\n${'═'.repeat(52)}`);
   console.log(`  三交易所整合网格机器人 已启动`);
   console.log(`  仪表盘: http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`);
@@ -943,6 +959,7 @@ server.listen(cfg.port, cfg.host, () => {
   console.log(`  Decibel  [${cfg.de.mode.toUpperCase()}]  ${cfg.de.network}`);
   console.log(`  Extended [${cfg.ex.mode.toUpperCase()}]  ${cfg.ex.network}`);
   console.log(`  RISEx    [${cfg.rs.mode.toUpperCase()}]  ${cfg.rs.network}`);
+  console.log(`  Arcus    [${cfg.ar.mode.toUpperCase()}]  ${cfg.ar.network}`);
   console.log(`  RHC      [${cfg.lr.mode.toUpperCase()}]  ${cfg.lr.network}`);
   console.log(`  Entropy  [${cfg.hl.mode.toUpperCase()}]  ${cfg.hl.network} (${cfg.hl.dex})`);
   console.log(`  Variational [${cfg.va.mode.toUpperCase()}]  ${cfg.va.network}`);
