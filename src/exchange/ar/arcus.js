@@ -42,17 +42,32 @@ const PRICE_POLL_MS = 2000;                   // WS 掉线时的 bbo 兜底（�
 const MARKETS_TTL_MS = 5 * 60_000;            // /v1/markets（权重 20）
 const DMS_REFRESH_MS = 60_000;                // 死手续期间隔
 const DMS_DEADLINE_MS = 4 * 60_000;           // 死手 deadline（上限 5 分钟）
+const DMS_TRIGGER_QUOTA = 10;                 // 官方配额：自动撤单每日最多触发 10 次
+const DMS_TRIGGER_GRACE_MS = 15_000;          // deadline 过后这么久仍没续上 = 已被触发
+const DMS_QUOTA_WINDOW_MS = 24 * 3600_000;
 const FILLS_OVERLAP_MS = 3000;                // 游标回退窗口，防漏单（配合去重）
 const FILLS_SEEN_MAX = 5000;
+const FILLS_PAGE_LIMIT = 200;                 // 服务端单页上限
+const FILLS_MAX_PAGES = 20;                   // 一次回补最多 4000 笔，防死循环
 const CANCEL_BATCH = 100;
 const PLACE_BATCH = 15;                       // bot.js 也硬压 15
 const WS_ROTATE_MS = 20 * 3600_000;           // 连接寿命 24h，提前轮换
 const CLOCK_TOLERANCE_MS = 4000;   // 服务端 ct 容差 ±5s，留 1s 余量
 const CLOCK_WARN_MS = 1200;         // 超过就告警：抖动会吃掉签名窗口
 
-/** 单次幂等键：orderId + clientId + 时间。 */
+/**
+ * 单次幂等键：orderId + clientId + 原始微秒时间 + 数量/价格。
+ * 时间必须用交易所返回的微秒戳：Arcus 同一订单在同一毫秒内可以出多笔部分成交，
+ * 归一化到毫秒会把它们判成同一笔 —— 后来那笔被静默丢弃，网格就永远少一格。
+ */
 function fillKey(f) {
-  return `${f.orderId}|${f.clientId || ''}|${f.createdAt}|${f.sizeBase}|${f.price}`;
+  return `${f.orderId}|${f.clientId || ''}|${f.rawTs ?? f.createdAt}|${f.sizeBase}|${f.price}`;
+}
+
+/** 从成交行里取原始时间戳（µs；部分字段可能是 ns，交给调用方归一）。 */
+function rawFillTs(row) {
+  const t = Number(row?.createdAt ?? row?.time ?? row?.timestamp ?? 0);
+  return Number.isFinite(t) && t > 0 ? t : 0;
 }
 
 export class ArcusExchange extends EventEmitter {
@@ -88,6 +103,9 @@ export class ArcusExchange extends EventEmitter {
     this.clockSkewMs = null;
 
     this.supportsSafeOpeningRetry = false;     // v1 保守：不开"两次快照去重"重试
+    // 停机超过 4 分钟，死手开关已经把这批挂单撤光了。续跑时"在簿 0 单"是
+    // 常态而非异常，adopt 路径无单可认领，必须改走全新铺梯（见 server 续跑）。
+    this.resumeWithoutOrders = true;
     this.orderBatchSize = PLACE_BATCH;
     this._ready = false;
     this._stopping = false;
@@ -98,6 +116,9 @@ export class ArcusExchange extends EventEmitter {
     this._fillsSeen = new Set();
     this._lastFillPollAt = 0;
     this._marketsAt = 0;
+    this._dmsArms = [];            // 24h 内续期时间戳（观测用，不消耗配额）
+    this._dmsTriggers = [];        // 24h 内"已判定被交易所自动撤单"的时间戳（吃配额）
+    this._dmsQuotaRejectedAt = 0;  // 最近一次因配额被拒的时间
     this._dmsArmedAt = 0;
     this._dmsDeadlineMs = 0;
     this._ws = null;
@@ -144,10 +165,6 @@ export class ArcusExchange extends EventEmitter {
       return;
     }
     assertMakerFree(target);
-  }
-
-  _defaultMarket() {
-    return [...this.markets.values()].find((m) => m.tradable) || null;
   }
 
   _validateConfig() {
@@ -544,9 +561,7 @@ export class ArcusExchange extends EventEmitter {
    */
   async _pollFills() {
     const from = Math.max(0, Math.floor((this._fillsFromMs - FILLS_OVERLAP_MS) * 1000));
-    const query = { address: this.address, accountIndex: String(this.accountIndex), from: String(from), limit: '200' };
-    const j = await this._retry(() => this._http('GET', '/v1/fills', { query, weight: 20 }), { tag: 'fills' });
-    const rows = Array.isArray(j) ? j : (j?.fills || j?.data || []);
+    const rows = await this._fetchFillRows(from);
     if (!rows.length) return;
     let newest = this._fillsFromMs;
     const fresh = [];
@@ -584,11 +599,46 @@ export class ArcusExchange extends EventEmitter {
     }
   }
 
+  /**
+   * 拉 from 之后的全部成交，必要时往回翻页。
+   * `/v1/fills` 单页上限 200 且按时间**降序**返回：停机一晚上再续跑时，积压的可能
+   * 有几百笔，只取第一页会把最老那批永久空过去（游标随即被推到最新，再也回不去）。
+   * 这里用 `to` 不断收窄上界往回翻，直到某页不满 200 条。
+   */
+  async _fetchFillRows(from) {
+    const collected = [];
+    let to = 0;                              // 0 = 不限上界
+    for (let page = 0; page < FILLS_MAX_PAGES; page += 1) {
+      const query = {
+        address: this.address, accountIndex: String(this.accountIndex),
+        from: String(from), limit: String(FILLS_PAGE_LIMIT),
+      };
+      if (to) query.to = String(to);
+      const j = await this._retry(() => this._http('GET', '/v1/fills', { query, weight: 20 }), { tag: 'fills' });
+      const rows = Array.isArray(j) ? j : (j?.fills || j?.data || []);
+      if (!rows.length) break;
+      collected.push(...rows);
+      if (rows.length < FILLS_PAGE_LIMIT) break;
+      const oldest = rows.reduce((min, r) => {
+        const t = rawFillTs(r);
+        return t > 0 && t < min ? t : min;
+      }, Infinity);
+      if (!Number.isFinite(oldest)) break;
+      const nextTo = oldest - 1;             // 闭区间，减 1 避免重复取到同一条
+      if (nextTo <= from) break;             // 已经翻到游标底
+      if (to && nextTo >= to) break;         // 没推进（服务端忽略 to）→ 防死循环
+      to = nextTo;
+    }
+    return collected;
+  }
+
   _mapFill(row) {
     const orderId = row.orderId ?? row.order_id ?? row.id;
     if (!orderId) return null;
     const price = Number(row.price ?? row.fillPrice ?? 0);
-    const size = Number(row.size ?? row.quantity ?? row.qty ?? 0);
+    // 成交行可能用 size（标准）也可能只给 filledSize；remainingSize 在成交后通常是 0，
+    // 绝不能当成交数量用，否则整笔成交会被判成 0 而丢弃。
+    const size = Number(row.size ?? row.filledSize ?? row.quantity ?? row.qty ?? 0);
     if (!(price > 0) || !(size > 0)) return null;
     const rawSide = String(row.side ?? row.orderSide ?? '').toUpperCase();
     const side = rawSide === 'BUY' || rawSide === '0' ? 'buy'
@@ -606,6 +656,8 @@ export class ArcusExchange extends EventEmitter {
       role: String(row.role ?? row.liquidity ?? ''),
       fee: Number(row.fee ?? 0),
       createdAt: normalizeEpochMs(row.createdAt ?? row.time ?? row.timestamp),
+      // 原始时间戳（µs）保留给幂等键：毫秒版会把同毫秒的两笔部分成交判成同一笔。
+      rawTs: rawFillTs(row),
       raw: row,
     };
   }
@@ -800,8 +852,9 @@ export class ArcusExchange extends EventEmitter {
   }
 
   /**
-   * 账户级全撤（权重固定 100，cancel 池）：只给 panic / stop 用。
-   * 若给了 marketId，优先用批量撤避免误伤其它市场。
+   * 账户级全撤：只给 panic / stop 用。
+   * 交易所固定扣 cancel 池 100 权重（本地 weight 记 0，因为它不吃 IP 桶），
+   * 给 marketId 时改走批量撤，避免误伤其它市场也省池子。
    */
   async cancelAllAccount({ marketId } = {}) {
     if (marketId != null) return this.cancelAll(marketId);
@@ -896,8 +949,37 @@ export class ArcusExchange extends EventEmitter {
     if (this._timers.dms) clearInterval(this._timers.dms);
     this._armDms().catch((e) => logger.warn('ar', `死手开关武装失败：${e.message}`));
     this._timers.dms = setInterval(() => {
-      this._armDms().catch((e) => logger.warn('ar', `死手开关续期失败：${e.message}`));
+      this._dmsTick().catch((e) => logger.warn('ar', `死手开关续期失败：${e.message}`));
     }, DMS_REFRESH_MS);
+  }
+
+  /**
+   * 每轮续期前先判断上一轮 deadline 是否已经过去了：过去了说明我们这段时间
+   * 没续上（进程卡死 / 网络断 / GC 停顿），交易所已按约把挂单全部撤掉。
+   * 这件事消耗官方每日 10 次配额，且此刻梯子是裸的 —— 必须计数并升级成
+   * operationalIssue，不能只留在日志里。配额耗尽后重启的进程将失去自动撤单保护。
+   */
+  async _dmsTick() {
+    const now = Date.now();
+    if (this._dmsDeadlineMs && now > this._dmsDeadlineMs + DMS_TRIGGER_GRACE_MS) {
+      this._dmsTriggers.push(this._dmsDeadlineMs);
+      this._pruneDmsWindow();
+      logger.error('ar', `死手开关已触发：deadline 过后仍未续期，全部挂单已被交易所撤销（今日第 ${this._dmsTriggers.length}/${DMS_TRIGGER_QUOTA} 次）`);
+      if (this._dmsTriggers.length >= DMS_TRIGGER_QUOTA) {
+        this.operationalIssue = {
+          title: '死手开关配额耗尽',
+          message: `24 小时内已触发 ${this._dmsTriggers.length} 次自动撤单（上限 ${DMS_TRIGGER_QUOTA}）。配额用尽后进程再崩，挂单将无人兜底 —— 先查明崩溃原因，别急着重启。`,
+        };
+      }
+    }
+    this._dmsDeadlineMs = 0;             // 先清掉，失败时下一轮才能重新识别"过期"
+    await this._armDms();
+  }
+
+  _pruneDmsWindow() {
+    const floor = Date.now() - DMS_QUOTA_WINDOW_MS;
+    this._dmsArms = this._dmsArms.filter((t) => t >= floor);
+    this._dmsTriggers = this._dmsTriggers.filter((t) => t >= floor);
   }
 
   /**
@@ -915,9 +997,22 @@ export class ArcusExchange extends EventEmitter {
     };
     const ts = this._nowNs();
     const headers = this._signScheme2('scheduleCancel', body, ts);
-    await this._http('POST', '/v1/scheduleCancel', { body, headers, weight: 0, timeoutMs: 10_000 });
+    try {
+      await this._http('POST', '/v1/scheduleCancel', { body, headers, weight: 0, timeoutMs: 10_000 });
+    } catch (e) {
+      if (/quota|limit|exceed|daily/i.test(e.message || '')) {
+        this._dmsQuotaRejectedAt = Date.now();
+        this.operationalIssue = {
+          title: '死手开关被拒',
+          message: `交易所拒绝续期（疑似配额用尽）：${e.message}。挂单已无自动撤单保护，请立刻人工介入。`,
+        };
+      }
+      throw e;
+    }
     this._dmsArmedAt = Date.now();
     this._dmsDeadlineMs = deadlineMs;
+    this._dmsArms.push(this._dmsArmedAt);
+    this._pruneDmsWindow();
     return true;
   }
 
@@ -983,6 +1078,16 @@ export class ArcusExchange extends EventEmitter {
       lastFillPollAgeMs: this._lastFillPollAt ? now - this._lastFillPollAt : null,
       clockSkewMs: this.clockSkewMs,
       dmsDeadlineInMs: this._dmsDeadlineMs ? this._dmsDeadlineMs - now : null,
+      // 死手开关的健康面：续期次数（不耗配额）与已触发次数（吃每日 10 次配额）。
+      // 触发次数到顶 = 下一次崩溃就没有自动撤单兜底了，属于运营级告警。
+      dms: {
+        arms24h: this._dmsArms.length,
+        triggers24h: this._dmsTriggers.length,
+        triggerQuota: DMS_TRIGGER_QUOTA,
+        quotaExhausted: this._dmsTriggers.length >= DMS_TRIGGER_QUOTA,
+        lastQuotaRejectionAt: this._dmsQuotaRejectedAt || null,
+        overdueMs: this._dmsDeadlineMs ? Math.max(0, now - this._dmsDeadlineMs) : 0,
+      },
       trackedOrders: this._tracked.size,
       feeRate: this.feeRate,
       operationalIssue: this.operationalIssue,

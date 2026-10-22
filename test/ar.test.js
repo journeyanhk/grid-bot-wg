@@ -2,6 +2,7 @@
 // conversion, market gating, and response parsers.
 // Run with: npm test
 import assert from 'node:assert/strict';
+import { ArcusExchange } from '../src/exchange/ar/arcus.js';
 import {
   apiKeyFromPrivate, cancelPayload, canonicalJson, fromQuantums, fromTicks,
   placePayload, privateKeyFromHex, readKeyFile, roundToUnit, scheme2Message,
@@ -272,6 +273,63 @@ test('parseOpenOrders reads the envelope AND bare rows', () => {
   // 空包与无 orderId 的垃圾行都返回 null，不抛
   assert.equal(parseOpenOrder({ orders: [] }), null);
   assert.equal(parseOpenOrder({}), null);
+});
+
+test('fills 回补：满页时用 to 往回翻，老成交不会被游标跳过', async () => {
+  const ex = Object.create(ArcusExchange.prototype);
+  ex.address = `0x${'a'.repeat(40)}`;
+  ex.accountIndex = 0;
+  const page = (n, start) => Array.from({ length: n }, (_, i) => ({
+    orderId: `o${start + i}`, marketId: 1, side: 'BUY', price: '80000',
+    size: '0.001', fee: '0', createdAt: start + i,
+  }));
+  const calls = [];
+  ex._http = async (m, path, { query }) => {
+    calls.push(query);
+    if (!query.to) return page(200, 5000);          // 最新一页（满）
+    if (Number(query.to) > 4600) return page(200, 4400); // 再往前一页（满）
+    return page(137, 4200);                          // 最后一页不满
+  };
+  ex._retry = async (fn) => fn();
+  const rows = await ex._fetchFillRows(1000);
+  assert.equal(rows.length, 537);
+  assert.equal(calls.length, 3);
+  assert.ok(Number(calls[1].to) < 5000, '第二页必须收窄上界');
+});
+
+test('同一毫秒内的两笔部分成交不会被幂等键吞掉', async () => {
+  const ex = Object.create(ArcusExchange.prototype);
+  Object.assign(ex, {
+    address: `0x${'b'.repeat(40)}`, accountIndex: 0,
+    _fillsSeen: new Set(), _fillsFromMs: 0, _tracked: new Map(), _lastFillPollAt: 0,
+  });
+  const got = [];
+  ex.emit = (ev, f) => { if (ev === 'fill') got.push(f); };
+  const base = 1_760_000_000_000_000;    // µs
+  ex._fetchFillRows = async () => ([
+    { orderId: 'x1', marketId: 1, side: 'BUY', price: '80000', size: '0.001', fee: '0', createdAt: base + 100 },
+    { orderId: 'x1', marketId: 1, side: 'BUY', price: '80000', size: '0.001', fee: '0', createdAt: base + 900 },
+  ]);
+  await ex._pollFills();
+  assert.equal(got.length, 2, '两笔都要落地');
+  await ex._pollFills();                  // 同一批再来一次：去重仍生效
+  assert.equal(got.length, 2);
+});
+
+test('死手开关触发会计数并升级成 operationalIssue', async () => {
+  const ex = Object.create(ArcusExchange.prototype);
+  Object.assign(ex, { _dmsArms: [], _dmsTriggers: [], _dmsQuotaRejectedAt: 0, operationalIssue: null });
+  ex._armDms = async () => true;
+  ex._dmsDeadlineMs = Date.now() - 60_000;   // 上一轮已经过期
+  await ex._dmsTick();
+  assert.equal(ex._dmsTriggers.length, 1);
+  assert.equal(ex._dmsDeadlineMs, 0);
+  for (let i = 0; i < 9; i += 1) {
+    ex._dmsDeadlineMs = Date.now() - 60_000;
+    await ex._dmsTick();
+  }
+  assert.equal(ex._dmsTriggers.length, 10);
+  assert.match(ex.operationalIssue?.title || '', /配额/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -6,6 +6,33 @@
 
 ## [Unreleased]
 
+## [1.6.18] - 2026-10-22
+
+### 修复（Arcus review 报告，11 条全部确认成立）
+
+**P1 续跑语义**
+- `server.js`：`resumeWithoutOrders` 能力的交易所，续跑前先查在簿挂单；为 0 时不再走
+  adopt（无单可认领，会把本地跟踪剪空、剩个空梯子对着仓位），改为「全新铺梯 +
+  存量持仓并入 `_invBase`」，`mode=recovery` 的快照转 `startRecovery`，并发告警
+- `health()` 新增 `dms` 健康面：`arms24h` / `triggers24h` / `triggerQuota=10` /
+  `quotaExhausted` / `lastQuotaRejectionAt` / `overdueMs`；触发次数到顶升级为
+  `operationalIssue`（配额耗尽 = 下次崩溃无自动撤单兜底）
+
+**P2 成交真值**
+- `_pollFills` 改为 `_fetchFillRows`：单页 200 + 降序返回，积压超一页时用 `to`
+  不断收窄上界往回翻（最多 20 页 / 4000 笔），不再把最老那批永久跳过
+- `fillKey` 改用交易所原始微秒戳（`rawTs`）：同毫秒内的两笔部分成交原先会被判成
+  同一笔而静默丢弃，网格就永远少一格
+- `_mapFill` 数量字段补 `filledSize`（`remainingSize` 成交后为 0，不能当成交量）
+
+**P3 清理**
+- 删除重复的 `_defaultMarket()`（旧的无 `marketHint` 兜底，被后定义的覆盖）
+- `cancelAllAccount` 注释改为「交易所固定扣 cancel 池 100 权重，本地计 0 因为它不吃 IP 桶」
+
+### 测试
+- 新增 3 项：满页回补不漏单、同毫秒两笔不合并、死手触发计数与配额升级；共 30 项
+
+
 ## [1.6.17] - 2026-10-22
 
 ### 新增（第七所 Arcus 接入，paper + testnet 已验证）

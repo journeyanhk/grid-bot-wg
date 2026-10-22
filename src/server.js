@@ -870,6 +870,35 @@ async function resumeIfWasRunning(bot, exchange, key) {
   }
   try {
     logger.info('server', `[恢复] 检测到 ${key.toUpperCase()} 上次为运行状态，正在接管续跑...`);
+    // Arcus 这类"停机会自动撤光挂单"的交易所（死手开关 4 分钟）：续跑时在簿 0 单
+    // 是常态。此时 adopt 路径没有单子可以认领，只会把本地跟踪一批批剪光，最后
+    // 剩个空梯子对着仓位 —— 必须改成"全新铺梯 + 接管存量仓位"。
+    if (exchange.resumeWithoutOrders && snap.config?.marketId != null) {
+      let open = null;
+      try {
+        open = await exchange.fetchOpenOrders(snap.config.marketId);
+      } catch { /* 读不到就按原路径走，让看门狗兜底 */ }
+      if (Array.isArray(open) && open.length === 0) {
+        const pos = typeof exchange.getPosition === 'function' ? exchange.getPosition(snap.config.marketId) : null;
+        const sizeBase = Math.abs(Number(pos?.sizeBase) || 0);
+        logger.warn('server', `[恢复] ${key.toUpperCase()} 在簿 0 单（停机超死手 deadline 已全撤），改走全新铺梯；存量仓位 ${sizeBase || 0}`);
+        if (snap.config.mode === 'recovery') {
+          await bot.startRecovery(snap.config);
+        } else {
+          await bot.start(snap.config);
+        }
+        if (sizeBase > 0) {
+          notifier.send({
+            source: key,
+            level: 'warn',
+            message: `[${key.toUpperCase()}] 续跑时挂单已被死手开关撤光，已按最新价重铺；存量持仓 ${sizeBase} 已并入库存基线。`,
+            key: `${key}:resume-fresh`,
+          }).catch(() => {});
+        }
+        logger.info('server', `[恢复] ${key.toUpperCase()} 已按全新梯子续跑（未做挂单认领）。`);
+        return;
+      }
+    }
     await bot.resume(snap);
     logger.info('server', `[恢复] ${key.toUpperCase()} 已续跑，接管挂单并完成对账。`);
   } catch (e) {
