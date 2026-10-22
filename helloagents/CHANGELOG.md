@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+## [1.6.20] - 2026-10-22
+
+### D3 testnet 实盘联调（133 格满梯）抓到的 4 个真缺陷
+
+1. **`/v1/positions` 回的是按 marketId 键的对象**（`{"positions":{"1":{...}}}`），
+   `rowsOf` 只认数组 → 有仓当没仓。后果最严重：`closePosition` 直接 `return true`
+   假成功，bot 的离场/回收梯全部静默跳过。
+2. **字段名 `averageEntryPrice`** 没映射 → `entryPrice` 恒为 null，成本基准丢失；
+   补 `markPx` / `marginUsed` / `leverage` 映射。
+3. **`parseAccount` 的 balance 取错字段** → 恒 null（Arcus 用 `netQuoteBalance`）。
+4. **平仓用 mid±2% 的 IOC**：测试网盘口能宽到 6%（71.2k 挂单 / 81.5k 标记），
+   两轮 IOC 都碰不到对手价，白撤后报"未完成"。改为现读盘口、打对手价、
+   三轮升级滑点（0.2%/1%/3%），并在平仓前强制刷新账户（缓存冷时不再假成功）。
+
+### 另外修的两处
+- **fills 首轮水位**：进程刚起 `_fillsFromMs=0`，会把历史成交全当新成交重放，
+  逐条报"未跟踪订单"并污染 `operationalIssue`。现在首轮只对齐水位（早于进程
+  启动的成交标记已见但不外发），bot 靠持仓对账，不依赖补历史成交。
+- **`_fetchBook`** 抽出（bbo 双边价），供平仓与后续补单复用。
+
+### D3 实测（testnet、accountIndex 1、10x）
+| 项 | 结果 |
+|---|---|
+| 133 单铺满 | 19.0s（9 批），133/133 全部在簿、价格唯一、无重复档 |
+| 全撤 | 3.1s（batchCancel + 两轮确认） |
+| 单轮权重 | order 420 / cap 24217，cancel 417 / cap 44217，无 429 |
+| 成交链路 | 真实成交按 level 落账（level 13/14/15 一一对应），无错档 |
+| 平仓 | 修复后一轮 IOC 成交，`positions` 归零 |
+| 网格"缺档" | 非泄漏：成交后该档由相邻档反向单接管，价格回摆才重新武装 |
+
+
 ## [1.6.19] - 2026-10-22
 
 ### 修复（live 模式恒缺钥：工厂传 `signingKey`、构造函数只认 `keyHex`）

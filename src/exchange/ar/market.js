@@ -192,7 +192,13 @@ function readOrderRow(row) {
 
 function rowsOf(payload, keys) {
   if (Array.isArray(payload)) return payload;
-  for (const k of keys) if (Array.isArray(payload?.[k])) return payload[k];
+  for (const k of keys) {
+    const v = payload?.[k];
+    if (Array.isArray(v)) return v;
+    // Arcus 的 /v1/positions 回的是按 marketId 键的对象（{"positions":{"1":{...}}}），
+    // 只认数组会把有仓当成没仓——平仓、离场判定全都会静默跳过。
+    if (v && typeof v === 'object') return Object.values(v);
+  }
   return [];
 }
 
@@ -223,8 +229,13 @@ export function parsePositions(payload) {
     return {
       marketId: Number(pick(row, ['marketId', 'market_id', 'market']) ?? 0),
       sizeBase: signed,
-      entryPrice: num(pick(row, ['entryPrice', 'entry_price']), null),
+      // Arcus 用 averageEntryPrice；不补这一个别名，entryPrice 永远是 null，
+      // 离场/回收梯就失去了成本基准。
+      entryPrice: num(pick(row, ['averageEntryPrice', 'entryPrice', 'entry_price']), null),
+      markPrice: num(pick(row, ['markPx', 'markPrice']), null),
       unrealizedPnl: num(pick(row, ['unrealizedPnl', 'unrealized_pnl']), null),
+      marginUsed: num(pick(row, ['marginUsed', 'margin_used']), null),
+      leverage: num(pick(row, ['leverage']), null),
       liquidationPrice: num(pick(row, ['liquidationPrice', 'liquidation_price']), null),
       marginMode: pick(row, ['marginMode', 'margin_mode']) ?? null,
       raw: row,
@@ -239,7 +250,7 @@ export function parseAccount(payload) {
     : (payload?.data ?? payload?.account ?? {});
   return {
     equity: num(pick(obj, ['equity', 'accountEquity', 'totalEquity']), null),
-    balance: num(pick(obj, ['balance', 'accountValue', 'collateral']), null),
+    balance: num(pick(obj, ['netQuoteBalance', 'balance', 'accountValue', 'collateral']), null),
     freeCollateral: num(pick(obj, ['freeCollateral', 'availableBalance', 'available']), null),
     marginUsed: num(pick(obj, ['marginUsed', 'totalMarginUsed']), null),
     unrealizedPnl: num(pick(obj, ['unrealizedPnl', 'unrealized_pnl']), null),

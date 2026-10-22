@@ -345,5 +345,27 @@ test('createExchange 把 config 的 signingKey 映射成适配器认的 keyHex�
   assert.equal(ex.network, 'testnet');
 });
 
+test('parsePositions 认 "按 marketId 键的对象" 与 averageEntryPrice', async () => {
+  const { parsePositions, parseAccount } = await import('../src/exchange/ar/market.js');
+  // 真实回包形状（testnet 抓的）：positions 是对象，不是数组
+  const payload = { positions: { 1: {
+    marketId: 1, side: 'SHORT', size: '-0.0058', averageEntryPrice: '72722.2',
+    markPx: '81521', unrealizedPnl: '-51.03', marginUsed: '47.286124', leverage: '10',
+  } }, total: 1 };
+  const rows = parsePositions(payload);
+  assert.equal(rows.length, 1, '对象形态必须能解析出仓位');
+  assert.equal(rows[0].marketId, 1);
+  assert.equal(rows[0].sizeBase, -0.0058);
+  assert.equal(rows[0].entryPrice, 72722.2, 'averageEntryPrice 要映射成 entryPrice');
+  assert.equal(rows[0].markPrice, 81521);
+
+  const acct = parseAccount({
+    accountIndex: 1, netQuoteBalance: '1000', equity: '981.7',
+    freeCollateral: '981.7', netDeposits: '1000', positions: {},
+  });
+  assert.equal(acct.balance, 1000, 'balance 取 netQuoteBalance，否则恒为 null');
+  assert.equal(acct.equity, 981.7);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

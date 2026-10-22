@@ -117,6 +117,10 @@ export class ArcusExchange extends EventEmitter {
     this._fillsFromMs = Date.now() - 5 * 60_000;
     this._fillsSeen = new Set();
     this._lastFillPollAt = 0;
+    // 首次轮询只做"水位对齐"：进程刚起来时 _fillsFromMs 是 0，会把历史成交
+    // 全当成新成交重放，逐条报"未跟踪订单"并污染 operationalIssue。
+    this._fillsPrimed = false;
+    this._startedAt = Date.now();
     this._marketsAt = 0;
     this._dmsArms = [];            // 24h 内续期时间戳（观测用，不消耗配额）
     this._dmsTriggers = [];        // 24h 内"已判定被交易所自动撤单"的时间戳（吃配额）
@@ -418,14 +422,20 @@ export class ArcusExchange extends EventEmitter {
   }
 
   async _fetchBbo(marketId) {
+    const { bid, ask } = await this._fetchBook(marketId);
+    const mid = (bid + ask) / 2;
+    this._setPrice(marketId, mid, { source: 'rest' });
+    return mid;
+  }
+
+  /** 盘口双边价（平仓下单要打对手价，mid 不够用）。 */
+  async _fetchBook(marketId) {
     const m = this._market(marketId);
     const j = await this._http('GET', `/v1/bbo/${encodeURIComponent(m.symbol)}`, { weight: 2, timeoutMs: 8000 });
     const bid = Number(j?.bestBid?.price);
     const ask = Number(j?.bestAsk?.price);
     if (!(bid > 0) || !(ask > 0)) throw new Error(`bbo 解析失败：${JSON.stringify(j).slice(0, 120)}`);
-    const mid = (bid + ask) / 2;
-    this._setPrice(marketId, mid, { source: 'rest' });
-    return mid;
+    return { bid, ask };
   }
 
   _setPrice(marketId, price, { source } = {}) {
@@ -567,15 +577,23 @@ export class ArcusExchange extends EventEmitter {
     if (!rows.length) return;
     let newest = this._fillsFromMs;
     const fresh = [];
+    const priming = !this._fillsPrimed;
     for (const row of rows) {
       const f = this._mapFill(row);
       if (!f) continue;
       const key = fillKey(f);
       if (this._fillsSeen.has(key)) continue;
       this._fillsSeen.add(key);
+      // 首次轮询里早于本进程启动的成交：只记水位、不下发，避免把重启前
+      // 的历史成交当成"未跟踪订单"报警（bot 用持仓对账，不依赖补历史成交）。
+      if (priming && f.createdAt < this._startedAt - 1000) {
+        if (f.createdAt > newest) newest = f.createdAt;
+        continue;
+      }
       fresh.push(f);
       if (f.createdAt > newest) newest = f.createdAt;
     }
+    this._fillsPrimed = true;
     if (this._fillsSeen.size > FILLS_SEEN_MAX) {
       const drop = [...this._fillsSeen].slice(0, this._fillsSeen.size - FILLS_SEEN_MAX + 1000);
       for (const k of drop) this._fillsSeen.delete(k);
@@ -914,13 +932,21 @@ export class ArcusExchange extends EventEmitter {
   /** 市价平仓：IOC 限价（官方要求 MARKET 必须配 IOC，且价差不得超 mark ±10%）。 */
   async closePosition(marketId) {
     const mId = Number(marketId);
-    const pos = await this.getPosition(mId);
+    // 平仓前必须现读账户：缓存可能是冷的（init 那次刷新失败就一直是空的），
+    // 拿 null 直接 return true 会让调用方以为平掉了，实际是把仓位裸着留在那里。
+    await this._refreshAccount();
+    const pos = this._pos.get(mId) || null;
     if (!pos || !pos.sizeBase) return true;
     const m = this._market(mId);
     const size = Math.abs(pos.sizeBase);
     const side = pos.sizeBase > 0 ? 'sell' : 'buy';
-    for (const slip of [0.005, 0.02]) {
-      const ref = this._prices.get(mId) || m.lastPrice || pos.entryPrice;
+    // 参考价必须是盘口对手价：测试网盘口能宽到 6%（71k 挂单 / 81.5k 标记），
+    // 用 mid±2% 的 IOC 根本碰不到对手价，只会白撤两轮然后报"未完成"。
+    let book = null;
+    try { book = await this._fetchBook(mId); } catch { /* 退化到缓存 mid */ }
+    for (const slip of [0.002, 0.01, 0.03]) {
+      const ref = (side === 'sell' ? book?.bid : book?.ask)
+        || this._prices.get(mId) || m.lastPrice || pos.entryPrice;
       const raw = side === 'sell' ? ref * (1 - slip) : ref * (1 + slip);
       const px = roundToUnit(raw, m.stepPrice);
       const qty = roundToUnit(size, m.stepSize);
@@ -939,10 +965,11 @@ export class ArcusExchange extends EventEmitter {
         body, headers: this._headers(payload, ts), timeoutMs: 20_000,
       }).catch((e) => { logger.warn('ar', `平仓下单失败：${e.message}`); });
       await new Promise((r) => setTimeout(r, 1500));
-      const after = await this.getPosition(mId).catch(() => null);
+      await this._refreshAccount().catch(() => {});
+      const after = this._pos.get(mId) || null;
       if (!after || Math.abs(after.sizeBase) < Number(m.stepSize)) return true;
     }
-    throw new Error('Arcus 平仓未完成（两轮 IOC 后仍有持仓），请人工介入。');
+    throw new Error('Arcus 平仓未完成（三轮 IOC 后仍有持仓），请人工介入。');
   }
 
   // ── 死手开关（Arcus 无断线撤单，必须自己兜底）──────────────────────────
