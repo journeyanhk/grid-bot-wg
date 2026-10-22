@@ -892,12 +892,16 @@ async function resumeIfWasRunning(bot, exchange, key) {
           await bot.start(snap.config);
         }
         if (sizeBase > 0) {
-          notifier.send({
-            source: key,
-            level: 'warn',
-            message: `[${key.toUpperCase()}] 续跑时挂单已被死手开关撤光，已按最新价重铺；存量持仓 ${sizeBase} 已并入库存基线。`,
-            key: `${key}:resume-fresh`,
-          }).catch(() => {});
+          // notifier.send 是同步调用、返回 undefined：挂 .catch 会抛
+          // "send(...).catch is not a function"，把整条续跑分支带崩（D4 实测踩到）。
+          try {
+            notifier.send({
+              source: key,
+              level: 'warn',
+              message: `[${key.toUpperCase()}] 续跑时挂单已被死手开关撤光，已按最新价重铺；存量持仓 ${sizeBase} 已并入库存基线。`,
+              key: `${key}:resume-fresh`,
+            });
+          } catch { /* 通知失败不该中断续跑 */ }
         }
         logger.info('server', `[恢复] ${key.toUpperCase()} 已按全新梯子续跑（未做挂单认领）。`);
         return;
