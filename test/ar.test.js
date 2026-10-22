@@ -3,6 +3,7 @@
 // Run with: npm test
 import assert from 'node:assert/strict';
 import { ArcusExchange } from '../src/exchange/ar/arcus.js';
+import { createExchange } from '../src/exchange/ar/index.js';
 import {
   apiKeyFromPrivate, cancelPayload, canonicalJson, fromQuantums, fromTicks,
   placePayload, privateKeyFromHex, readKeyFile, roundToUnit, scheme2Message,
@@ -330,6 +331,18 @@ test('死手开关触发会计数并升级成 operationalIssue', async () => {
   }
   assert.equal(ex._dmsTriggers.length, 10);
   assert.match(ex.operationalIssue?.title || '', /配额/);
+});
+
+test('createExchange 把 config 的 signingKey 映射成适配器认的 keyHex（live 缺钥回归）', () => {
+  const seed = 'd'.repeat(64);
+  const ex = createExchange({
+    mode: 'live', network: 'testnet', address: `0x${'c'.repeat(40)}`,
+    signingKey: seed, accountIndex: 1, marketHint: 'BTC-USD',
+  });
+  assert.equal(ex.keyHex, seed, 'server 传 signingKey，适配器必须认');
+  assert.equal(ex.accountIndex, 1, '子账户索引要透传');
+  assert.equal(ex.mode, 'live');
+  assert.equal(ex.network, 'testnet');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

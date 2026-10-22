@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.6.19] - 2026-10-22
+
+### 修复（live 模式恒缺钥：工厂传 `signingKey`、构造函数只认 `keyHex`）
+- `arcus.js` 构造函数同时接受 `signingKey`/`keyHex` 与 `signingKeyFile`/`keyPath`
+- `config.js` 新增 `AR_API_SIGNING_KEY_FILE`（私钥放文件，不进程环境变量）
+- `ar/index.js` 工厂改为透传 `keyHex`/`keyPath`，缺钥报错文案带上 FILE 提示
+- 新增回归测试：`createExchange` 的 key 映射与 accountIndex 透传（共 31 项）
+
+### 实测
+- testnet 子账户（accountIndex=1）鉴权通过，探针 14/15；`account read` 仍差一项
+  （空账户 equity=0 属预期，断言待放宽）
+- live 启动闸门生效：0 保证金下单被拦为「保证金不足：约需 150.14 USDC」
+
+
 ## [1.6.18] - 2026-10-22
 
 ### 修复（Arcus review 报告，11 条全部确认成立）

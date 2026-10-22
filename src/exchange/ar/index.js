@@ -5,11 +5,12 @@ import { ArcusPaperExchange } from './paper.js';
 export function createExchange(cfg = {}) {
   if (cfg.mode === 'live') {
     if (!cfg.address) throw new Error('LIVE 模式需要 AR_ACCOUNT_ADDRESS（主钱包地址）。');
-    if (!cfg.signingKey) throw new Error('LIVE 模式需要 AR_API_SIGNING_KEY（Ed25519 私钥）。');
+    if (!cfg.signingKey && !cfg.signingKeyFile) throw new Error('LIVE 模式需要 AR_API_SIGNING_KEY（Ed25519 私钥种子，64 位 hex）或 AR_API_SIGNING_KEY_FILE。');
     return new ArcusExchange({
       address: cfg.address,
       accountIndex: cfg.accountIndex ?? 0,
-      signingKey: cfg.signingKey,
+      keyHex: cfg.signingKey,
+      keyPath: cfg.signingKeyFile || '',
       apiUrl: cfg.apiUrl,
       wsUrl: cfg.wsUrl,
       network: cfg.network,

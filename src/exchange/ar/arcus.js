@@ -80,8 +80,10 @@ export class ArcusExchange extends EventEmitter {
     this.chainId = this.network === 'testnet' ? AR_TESTNET_CHAIN_ID : AR_MAINNET_CHAIN_ID;
     this.address = String(opts.address || '').toLowerCase();
     this.accountIndex = Number.isFinite(Number(opts.accountIndex)) ? Number(opts.accountIndex) : 0;
-    this.keyPath = opts.keyPath || '';
-    this.keyHex = opts.keyHex || '';
+    // 两种命名都收：工厂（config 的 AR_API_SIGNING_KEY）传 signingKey，
+    // 探针/测试传 keyHex；早期只认 keyHex，导致 server 的 live 模式永远缺钥。
+    this.keyPath = opts.keyPath || opts.signingKeyFile || '';
+    this.keyHex = opts.keyHex || opts.signingKey || '';
     this.proxy = opts.proxy || '';
     this.marketHint = opts.market || '';       // 可选：默认市场（如 BTC-USD）
 

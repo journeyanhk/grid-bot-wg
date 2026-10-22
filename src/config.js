@@ -108,6 +108,7 @@ export function getConfig() {
     network: arNet,
     address: (process.env.AR_ACCOUNT_ADDRESS || '').toLowerCase(),
     signingKey: process.env.AR_API_SIGNING_KEY || '',
+    signingKeyFile: process.env.AR_API_SIGNING_KEY_FILE || '',
     accountIndex: Number(process.env.AR_ACCOUNT_INDEX || 0),
     apiUrl: (process.env.AR_API_URL || arDefaults.api).replace(/\/$/, ''),
     // paper 默认吃主网真实行情（AR_PAPER_API_URL 可覆盖为测试网）
