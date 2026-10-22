@@ -422,6 +422,24 @@ test('重试空快照守卫：期望有单但快照为空 -> 本轮不重挂（�
   assert.ok(bot.alerts.some((a) => a.message.includes('安全重试暂缓')), '应发出安全重试暂缓告警');
 });
 
+test('批量成交竞态：同一 tick 连吃相邻多档，每档都必须补出对腿（不留空洞）', async () => {
+  const { ex, bot } = await makeBot();
+  // 一笔扫单在同一 tick 打穿相邻 5 档买单：适配器 for..of emit('fill') 同步下发，
+  // 旧实现里每档补腿目标档仍被同批未处理成交占着，会被"一格一单"不变量静默丢弃。
+  for (let lvl = 0; lvl <= 4; lvl += 1) {
+    const o = orderAtLevel(bot, lvl);
+    assert.ok(o && o.side === 'buy', `第 ${lvl} 档应有买单`);
+    ex.fill(idOf(bot, o));
+  }
+  await sleep(20);
+  for (let lvl = 1; lvl <= 5; lvl += 1) {
+    const o = orderAtLevel(bot, lvl);
+    assert.ok(o && o.side === 'sell', `第 ${lvl} 档应补出卖单，实际 ${o ? o.side : '空档'}`);
+  }
+  assert.equal(bot.active.size, 10, '阶梯应恢复到 10 单（5 卖@1-5 + 5 卖@6-10）');
+  assert.equal(bot.stats.buys, 5, '五笔买单成交均计数');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

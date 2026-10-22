@@ -17,6 +17,11 @@ export class GridBot {
     this.config = null;
     this.grid = null;
     this.active = new Map();        // orderId -> {levelIndex, side, price, opening, placedAt}
+    this._replQueue = [];           // 待补挂的对腿（同一批成交先出栈、再统一补挂）
+    this._replFlushScheduled = false;
+    this._ladderGaps = [];          // 最近一次对账发现的阶梯空洞（档位索引）
+    this._lastGapSig = '';          // 空洞签名，避免同一缺口反复告警
+    this._lastGapAlertAt = 0;
     this.fills = [];                // recent fills (capped)
     this.alerts = [];               // recent alerts (capped)
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0 };
@@ -1194,11 +1199,39 @@ export class GridBot {
         if (minSz > 0 && repl.sizeBase < minSz) {
           this._alert(`部分成交 ${fillSize} 低于最小下单量 ${minSz}，跳过补挂对腿；尘埃仓并入持仓，由后续成交或手动处理。`);
         } else {
-          this._place(repl);
+          // 不能在这里立刻 _place：成交是适配器用同步 for..of emit('fill') 批量下发的，
+          // 此时同批后面还没处理的成交单仍留在 active 里，占着补腿目标档位（买@i 补 卖@i+1）。
+          // _place 的"一格一单"不变量会因此静默 return —— 一次连吃 N 档就永久丢 N 个补腿，
+          // 阶梯最活跃区间出现连续空洞且对账不重铺、永不自愈（2026-10-22 实测：1 秒内 50 档
+          // 被扫，50 档补腿全丢，132 档只剩 70 单）。故先入队，等本轮成交全部出栈再统一补挂。
+          this._queueReplacement(repl);
         }
       }
     }
     this._changed();
+  }
+
+  /**
+   * 补腿排队：把补挂推迟到微任务，让同一批成交先把各自的订单从 active 移除，
+   * 避免"一格一单"不变量把相邻档位尚未处理的成交单误判为占位而丢掉补腿。
+   * queueMicrotask 在本轮同步 emit 循环结束后立即执行，不依赖任何定时器。
+   */
+  _queueReplacement(repl) {
+    this._replQueue.push(repl);
+    if (this._replFlushScheduled) return;
+    this._replFlushScheduled = true;
+    queueMicrotask(() => this._flushReplacements());
+  }
+
+  _flushReplacements() {
+    this._replFlushScheduled = false;
+    const queue = this._replQueue.splice(0, this._replQueue.length);
+    if (!queue.length) return;
+    // 排队期间若已破界或停机，补挂交给破界阶梯/重启处理，不再逐档补腿。
+    if (!this.running || this.outOfRange || !this.grid) return;
+    for (const repl of queue) {
+      this._place(repl).catch(() => {});
+    }
   }
 
   _handlePrice(p) {
@@ -1646,6 +1679,31 @@ export class GridBot {
     }
     if (recovery) this._recoveryOccupied = occupied;
 
+    // 阶梯完整性哨兵：对账只清理/接管、从不重铺（重铺会单边累积库存），所以任何一次
+    // 补腿丢失都会留下永久空洞。这里把空洞变成可见状态 + 告警，避免"总数看着还行、
+    // 现价附近整段瘫痪"的静默失效（2026-10-22 实测 132 档剩 70 单，连续 50 档空洞）。
+    if (!recovery && !this.outOfRange && this.running && this.grid && this._placementProgress?.status !== 'running') {
+      const levels = this.grid.levels;
+      const px = this.lastPrice;
+      const holes = [];
+      for (let i = 0; i < levels.length; i += 1) {
+        if (occupied.has(i)) continue;
+        // 现价附近 1 格是铺梯时本就留空的带，不算缺口。
+        if (px != null && Math.abs(levels[i] - px) <= sp * 1.5) continue;
+        holes.push(i);
+      }
+      this._ladderGaps = holes;
+      const sig = holes.length ? `${holes.length}@${holes[0]}-${holes[holes.length - 1]}` : '';
+      if (sig && sig !== this._lastGapSig && now - (this._lastGapAlertAt || 0) > 600_000) {
+        this._lastGapSig = sig;
+        this._lastGapAlertAt = now;
+        this._alert(`⚠️ 阶梯缺口 ${holes.length} 档（索引 ${holes[0]}~${holes[holes.length - 1]}），最活跃区间可能瘫痪；对账不会自动重铺，需人工补挂或重铺。`);
+        this._changed();
+      } else if (!sig) {
+        this._lastGapSig = '';
+      }
+    }
+
     // IMPORTANT: reconciliation no longer re-seeds opening orders. Re-seeding via
     // seedOrders re-opened a SAME-SIDE order on a level that a fill had just
     // (correctly) vacated — its take-profit order lives one rung away — which made
@@ -2036,6 +2094,8 @@ export class GridBot {
         log: Array.isArray(this._dynLog) ? this._dynLog.slice(-20) : [],
       },
       openOrders: this.active.size,
+      ladderGaps: Array.isArray(this._ladderGaps) ? this._ladderGaps.length : 0,
+      ladderGapIdx: Array.isArray(this._ladderGaps) ? this._ladderGaps.slice(0, 40) : [],
       exchangeOpenOrders: this._exchangeOpenOrders,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
       placementProgress: this._placementProgressView(),
