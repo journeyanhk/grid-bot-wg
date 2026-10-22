@@ -1,6 +1,6 @@
 # Variational Omni 接口笔记（逆向）
 
-> 非官方 API；以下均为抓包/探针实测记录。最近更新：2026-10-02。
+> 非官方 API；以下均为抓包/探针实测记录。最近更新：2026-10-10。
 
 ## 认证模型（2026-09 起：双 token）
 
@@ -21,6 +21,9 @@
   假设：refresh 可能要求一枚**格式合法的（可过期）vr-token JWT**（v1 用的是垃圾串 `expired.invalid`；
   抓包成功案例带的是过期但签名合法的 JWT）。v2 探针对照实验验证（真实 vr-token / 内置过期夹具）。
 - **2026-10-02 v2**：待跑（对照矩阵 + 环境 sanity + ll-token 格式检查）。
+- **2026-10-10 官方恢复**：无凭证 `POST /api/auth/refresh` 返回 **401 + HTML「Unable to refresh session」**（此前为 400 JSON），
+  且**无 Cloudflare 挑战**（`cf-mitigated` 空）→ 端点在线、5 分钟机制疑似回归。已恢复 ll-token 双凭证逻辑与面板；
+  最终验证：粘贴同一会话的 vr-token + vr-ll-token，面板显示「自动续期已启用」即通。
 
 ### 探针结论（2026-10-02 v2，PASS）— 机制定稿
 - **Cloudflare 放行** `/api/auth/refresh` ✓（无挑战）

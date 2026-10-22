@@ -56,6 +56,7 @@
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
 ## 变更历史
+- [202610101200_va-refresh-restore](../../history/2026-10/202609301130_va-vr-ll-token/) - VA 官方 5 分钟续期恢复：撤销显式门控、面板双输入恢复、降级兜底保留
 - [202609071613_entropy-hl](../../history/2026-09/202609071613_entropy-hl/) - 第5交易所 Entropy(HL) 接入 + 总览过滤（review19 后修复校准）
 - [202608311641_review5-optimize](../../history/2026-08/202608311641_review5-optimize/) - 零费率覆盖/AIMD 自适应配速/平仓腿优先
 - [202608311620_market-float-fix](../../history/2026-08/202608311620_market-float-fix/) - market.js 浮点缺陷修复（平台无关 stepSize/stepPrice）
