@@ -128,6 +128,23 @@
 ### 已知未完成
 - 面板 tab 与概览卡片推迟到 v1.1（REST `/api/ar/*` 已可用）
 
+## [1.6.16] - 2026-10-10
+
+### 变更（VA 官方 5 分钟续期机制回归 → 恢复 vr-ll-token 逻辑与界面）
+- 端点复核：`POST /api/auth/refresh` 无凭证返回 401 + HTML「Unable to refresh session」（原 400 JSON），
+  无 Cloudflare 挑战 → 端点在线、机制回归
+- 恢复 refresh 启用逻辑：ll-token（env/缓存/面板）即启用 refresh 模式（撤销 1.6.14 的显式门控）；
+  保留 1.6.15 的运行时降级（adopt 续期失败但 token 有效 → 本进程转手动，不锁死）；重新粘贴 ll-token 可再启用
+- 面板恢复双输入框（vr-token + vr-ll-token，同会话成对粘贴）；「应用凭证」提交两枚 token
+- .env.example / docs/omni-api.md 说明恢复；测试㉔改为恢复语义（缓存 ll-token → refresh、disableRefresh 降级）
+
+### 文档（折返跑教训）
+- wiki/exchange 新增「VA 认证设计原则」：三个月三次翻转 → 默认官方明天会再变；黑名单式门控
+  （默认允许 + 运行时拉黑）而非白名单；ll-only 首开立即拒绝；验收生命体征两行日志
+
+### 验证待办
+- VPS 上以新凭证跑一次 `python3 scripts/va_probe.py refresh --run`（预期 PASS）后确认自动续期闭环
+
 ## [1.6.15] - 2026-10-02
 
 ### 修复（官方回退后的锁死陷阱：残留 ll-token + 死端点 -> 手动 token 也贴不进）
