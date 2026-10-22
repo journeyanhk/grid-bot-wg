@@ -16,6 +16,10 @@
 - 面板恢复双输入框（vr-token + vr-ll-token，同会话成对粘贴）；「应用凭证」提交两枚 token
 - .env.example / docs/omni-api.md 说明恢复；测试㉔改为恢复语义（缓存 ll-token → refresh、disableRefresh 降级）
 
+### 文档（折返跑教训）
+- wiki/exchange 新增「VA 认证设计原则」：三个月三次翻转 → 默认官方明天会再变；黑名单式门控
+  （默认允许 + 运行时拉黑）而非白名单；ll-only 首开立即拒绝；验收生命体征两行日志
+
 ### 验证待办
 - VPS 上以新凭证跑一次 `python3 scripts/va_probe.py refresh --run`（预期 PASS）后确认自动续期闭环
 
