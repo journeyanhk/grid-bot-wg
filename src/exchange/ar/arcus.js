@@ -720,12 +720,21 @@ export class ArcusExchange extends EventEmitter {
     }
   }
 
-  async getPosition(marketId) {
-    const mId = Number(marketId);
-    const cached = this._pos.get(mId);
-    if (cached) return cached;
+  /**
+   * 同步读持仓缓存。
+   * bot.js 里 `const pos = this.ex.getPosition?.(marketId)` 是**同步调用**
+   * （止损、破界离场、面板都靠它）：这里若返回 Promise，`pos.sizeBase` 恒为
+   * undefined → 硬止损永远不触发、面板持仓恒空。缓存由 ACCOUNT_POLL_MS(5s)
+   * 的账户轮询维护，时效足够。
+   */
+  getPosition(marketId) {
+    return this._pos.get(Number(marketId)) || null;
+  }
+
+  /** 需要"此刻一定是最新"的场景（平仓、人工核对）用这个。 */
+  async getPositionFresh(marketId) {
     await this._refreshAccount().catch(() => {});
-    return this._pos.get(mId) || null;
+    return this.getPosition(marketId);
   }
 
   // ── 交易写入 ────────────────────────────────────────────────────────────

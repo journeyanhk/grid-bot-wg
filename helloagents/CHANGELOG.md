@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [1.6.24] - 2026-10-22
+
+### 硬止损在 Arcus 上是哑的（P1，D6 前必修）
+
+`bot.js` 读持仓是**同步**契约：`const pos = this.ex.getPosition?.(marketId)`，其余六个
+适配器都返回对象。Arcus 的 `getPosition` 是 `async`，返回 Promise →
+`pos.sizeBase` 恒 undefined → **`_checkMaxLoss` 永远看不到亏损、$60 硬止损是空转**，
+面板持仓也一直显示空。
+
+改法：`getPosition` 改回同步读 `_pos` 缓存（由 5s 的账户轮询维护），
+需要"此刻最新"的场景（平仓、续跑判断）用新增的 `getPositionFresh()`。
+`server.js` 续跑分支优先用 `getPositionFresh`，避免缓存没热时误报 0 仓。
+
+
 ## [1.6.23] - 2026-10-22
 
 ### 让 24h 验收单"能被读到"的两处修正
