@@ -55,7 +55,20 @@
 - Extended/RISEx 不启用开仓单安全重试（supportsSafeOpeningRetry=false，对齐原版仅 Lighter 开启的保守设计）：两者 open-orders 快照存在已知抖动，与"两次快照去重"的安全重试机制冲突
 - risex-client SDK 的 updateLeverage 协议与服务端不匹配（permit vs permit_params，杠杆需 WAD）：适配器已自组装请求绕过，见 setLeverage 实现
 
+## 设计原则（VA 认证 · 2026-10-10 折返跑教训）
+- **VA 认证机制三个月内翻转三次**（SiWE→贴 token；5 分钟续期"下线"→7 天手动；四天后又恢复）。
+  任何针对 VA 认证的代码必须默认「官方明天会再变」：可热切换、可降级、失败不锁死。
+- 本版采用**黑名单式门控**：默认允许 refresh（ll-token 即启用），仅在运行时验证失败时
+  `disableRefresh()` 拉黑本进程（adopt 时 token 有效则降级手动接纳，不锁死入口；重贴凭证即解禁）。
+  不使用白名单（默认关闭、显式开启）——那会在官方恢复后让缓存凭证失效，重演 10-02 折返跑。
+- **ll-only 首开（无 vr-token）立即拒绝**：adopt 当场抛错提示双贴（探针 v2 证实 ll-only refresh=400），
+  不存在"等几分钟才发现没换到 token"；UI 首开必须 vr-token + vr-ll-token 同会话成对粘贴。
+- **验收生命体征（短时效 token 时代）**：重启日志出现「会话续期模式已启用（ll-token 已就绪）」；
+  10 分钟内出现「会话已续期（refresh）…（累计 1 次）」（或 `auth.health().totalRefresh ≥ 1`）。
+  两条缺一即视为 VA 链路未接通。
+
 ## 变更历史
+- [202610101200_va-refresh-restore](../../history/2026-10/202609301130_va-vr-ll-token/) - VA 官方 5 分钟续期恢复：撤销显式门控、面板双输入恢复、降级兜底保留
 - [202609071613_entropy-hl](../../history/2026-09/202609071613_entropy-hl/) - 第5交易所 Entropy(HL) 接入 + 总览过滤（review19 后修复校准）
 - [202608311641_review5-optimize](../../history/2026-08/202608311641_review5-optimize/) - 零费率覆盖/AIMD 自适应配速/平仓腿优先
 - [202608311620_market-float-fix](../../history/2026-08/202608311620_market-float-fix/) - market.js 浮点缺陷修复（平台无关 stepSize/stepPrice）
