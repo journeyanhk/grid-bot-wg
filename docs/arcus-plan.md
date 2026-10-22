@@ -177,3 +177,29 @@ src/exchange/ar/
 
 - testnet 账户需在网页点 **Testnet Deposit**（~$1,000 USDG），否则无法验证成交/持仓/平仓链路。
 - 部署机开 NTP（当前 2s 偏差会吃掉 `ct` 容差的一半）。
+
+## D3 实测结果（2026-10-22 · testnet · accountIndex 1 · 10x · equity 1000 USDG）
+
+| 项 | 结果 |
+|---|---|
+| 133 单铺满（132 格 + 端点） | 19.0s / 9 批；133/133 在簿，价格唯一，无重复档 |
+| 全撤（batchCancel + 两轮确认） | 3.1s，撤净 0 张 |
+| 权重消耗 | order 420/24217、cancel 417/44217，全程无 429 |
+| 成交 → 归档 | 真实成交（role=MAKER）按 level 精确落账，13/14/15 三档一一对应 |
+| 补单 | 成交档由相邻档反向单接管；价格回摆才重新武装该档，属设计而非漏单 |
+| 平仓 | 修复后用对手价 IOC 一轮成交，positions 归零 |
+| 资金 | 1000 → 981.71（testnet 盘口 71k 与 oracle 81.5k 的巨大价差 + 手续费，非策略亏损） |
+
+### D3 抓到的 4 个真缺陷（已修，v1.6.20）
+
+1. `/v1/positions` 是**按 marketId 键的对象**，`rowsOf` 只认数组 → 有仓当没仓；
+   `closePosition` 因此 `return true` 假成功（最危险的一条）。
+2. `averageEntryPrice` 未映射 → `entryPrice` 恒 null。
+3. `parseAccount` 的 balance 取 `balance/accountValue`，Arcus 用 `netQuoteBalance` → 恒 null。
+4. 平仓用 mid±2% 的 IOC：盘口宽 6% 时碰不到对手价，两轮白撤。
+
+### 另一个必须记住的运营事实
+
+死手开关会在地主停机 4 分钟后撤光挂单 → 续跑时"在簿 0 单"是常态，
+已由 `resumeWithoutOrders` 分支接住（v1.6.18）。testnet 每次重启还会重放历史成交，
+已由 fills 首轮水位修复（v1.6.20），否则每重启一次就报一堆"未跟踪订单"。
