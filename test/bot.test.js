@@ -182,6 +182,23 @@ test('成交补单链：买单成交 -> 相邻上一格挂卖单；卖单成交 
   assert.ok(buyBack.opening === true, '中性模式卖单成交后补回的买单是开仓腿');
 });
 
+test('格利精度：小格子逐笔累加不被 round2 舍成 0（回归）', async () => {
+  // 每格毛利 = 格距 10 × 0.0002 = 0.002，逐笔 round2 会把它舍成 0，账面永远 0 利。
+  const { ex, bot } = await makeBot({}, { ...CFG, sizeBase: 0.0002 });
+  for (let r = 0; r < 3; r += 1) {
+    const buy = orderAtLevel(bot, 4);
+    assert.ok(buy && buy.side === 'buy', `第 ${r + 1} 轮应在 140 档有买单`);
+    ex.fill(idOf(bot, buy));
+    await sleep(10);
+    const sell = orderAtLevel(bot, 5);
+    assert.ok(sell && sell.side === 'sell', `第 ${r + 1} 轮应在 150 档有卖单`);
+    ex.fill(idOf(bot, sell));
+    await sleep(10);
+  }
+  assert.equal(bot.stats.completedRungs, 3);
+  assert.equal(bot.stats.gridProfit, 0.01, '3 格 × 0.002 = 0.006，应显示 0.01 而不是恒为 0');
+});
+
 test('出区间风控(close)：价格突破上边界 -> 撤单 + 平仓 + 停止', async () => {
   const { ex, bot } = await makeBot();
   ex.setPrice(1, 210); // 第 1 拍越界（>upper+半格=205）：仅去抖计数，不触发

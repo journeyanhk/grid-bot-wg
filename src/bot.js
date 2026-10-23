@@ -25,6 +25,8 @@ export class GridBot {
     this.fills = [];                // recent fills (capped)
     this.alerts = [];               // recent alerts (capped)
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0 };
+    // 格利原始累加器：单格毛利常低于 0.01，逐笔 round2 会把 0.0033 舍成 0，gridProfit 永远为 0。
+    this._gridProfitRaw = 0;
     this.startBalance = null;
     this.lastPrice = null;
     this.outOfRange = false;
@@ -132,6 +134,7 @@ export class GridBot {
       running: this.running, config: this.config, stats: this.stats,
       recovery: this.recovery, pnlBase: this._pnlBase,
       startBalance: this.startBalance, outOfRange: this.outOfRange, lastPrice: this.lastPrice,
+      gridProfitRaw: this._gridProfitRaw,
       active: [...this.active.entries()],
       placementProgress: this._placementProgress,
       retryQueue: this._retryQueue,
@@ -152,6 +155,7 @@ export class GridBot {
     if (!snap || !snap.config) return;
     this.config = snap.config;
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
+    this._gridProfitRaw = Number(snap.gridProfitRaw ?? this.stats.gridProfit ?? 0) || 0;
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
@@ -189,6 +193,7 @@ export class GridBot {
     if (!Array.isArray(snap.active)) throw new Error('无可恢复的运行中网格快照');
     this.config = snap.config;
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
+    this._gridProfitRaw = Number(snap.gridProfitRaw ?? this.stats.gridProfit ?? 0) || 0;
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
@@ -246,6 +251,7 @@ export class GridBot {
   async _resumeRecovery(snap) {
     this.config = snap.config;
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
+    this._gridProfitRaw = Number(snap.gridProfitRaw ?? this.stats.gridProfit ?? 0) || 0;
     this.startBalance = snap.startBalance ?? null;
     this._pnlBase = snap.pnlBase ?? null;
     this.grid = null; this.risk = null;
@@ -746,6 +752,7 @@ export class GridBot {
     // 动作计数（recenters/autoRestarts）不是盈亏统计，重置时保留
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0,
                    recenters: this.stats.recenters || 0, autoRestarts: this.stats.autoRestarts || 0 };
+    this._gridProfitRaw = 0;
     this.fills = [];
     this._placeFails = 0;
     this._lastFailAt = 0;
@@ -1178,7 +1185,9 @@ export class GridBot {
       // rewrites history (the old code recomputed rungs × CURRENT spacing), and
       // partial fills are credited with what really executed.
       const sp = this.grid?.spacing ?? this.config.spacing ?? 0;
-      this.stats.gridProfit = round2(this.stats.gridProfit + sp * fillSize);
+      // 逐笔累加保留原始精度，展示时才取两位小数（否则小格利全被舍成 0）。
+      this._gridProfitRaw = (Number(this._gridProfitRaw) || 0) + sp * fillSize;
+      this.stats.gridProfit = round2(this._gridProfitRaw);
     }
     logger.info('bot', `成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName, closing });
 
