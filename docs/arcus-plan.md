@@ -225,3 +225,19 @@ src/exchange/ar/
 
 D1 签名/时钟 → D3 解析与平仓语义 → D4 告警链路。每一轮都比上一轮更靠边角，
 按 v1.6.18 复审的判断，这个适配器已经进入"可以准备上钱"的阶段。
+
+## D6 前置清单（评审第 4 轮口径）· 2026-10-23 更新
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 瞬扫复现通过 | ✅ | `scripts/replay-sweep.mjs` 回放 20:00:04Z 的 51 笔真实成交：修复前 51 笔只剩 1 张单（50 档空洞），当前 51 笔补出 51 张对腿、空洞 0。详见 `docs/ar-race-eval.md` |
+| NTP 修好 | ✅ | 容器里 systemd-timesyncd 被 mask（`set-ntp` 报 NTP not supported），改装 chrony：`apt-get install -y chrony` 后 `/usr/sbin/chronyd -f /etc/chrony/chrony.conf`。system time 从 **快 2.49s** 收敛到 **1µs**，适配器实测 `clockSkewMs` 2491 → **24–51ms** |
+| 竞态下沉评估 | ✅ | 已在 bot.js 层（`_handleFill`/`_place`/`_queueReplacement`/`reconcileOpenOrders`），六所共用；v1.6.26 补 `_noteReplConflict` 事发当场记账。结论与代码位置见 `docs/ar-race-eval.md` |
+| 24h 剩余时段零哨兵告警 | 观察中 | 采样器 60s 一条写 `arcus-24h-metrics.jsonl`，巡检每 2 小时核对 `ladderGaps` / `replConflicts` |
+
+### 运维注意（本机特有）
+
+- `systemd-timesyncd` 被 mask、`timedatectl set-ntp true` 不可用；**机器重启后 chronyd 不会自动起**，
+  需要手动 `sudo /usr/sbin/chronyd -f /etc/chrony/chrony.conf`，否则时钟一天漂回数百毫秒。
+- `chronyc` 在 `/usr/bin/chronyc`，`chronyd` 在 `/usr/sbin/chronyd`（`/usr/sbin` 不在普通用户 PATH 里）。
+- 时钟修好之后**必须重启一次 bot**：进程内的 `clockSkewMs` 是启动时测的，不重启会继续按旧偏差补偿签名时间戳。
