@@ -427,5 +427,16 @@ test('空轮成交轮询也要打心跳（否则游标年龄永远是 null）', 
   assert.equal(ex._fillsPrimed, true, '空轮同样算完成首轮对齐');
 });
 
+test('签名时间戳严格递增：同毫秒连发不会撞 ct（ef9349d 回归）', () => {
+  const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network: 'testnet' });
+  const stamps = [ex._nowNs(), ex._nowNs(), ex._nowNs(), ex._nowNs()];
+  for (let i = 1; i < stamps.length; i += 1) {
+    assert.ok(stamps[i] > stamps[i - 1], `第 ${i} 个 ct 必须大于前一个：${stamps[i - 1]} -> ${stamps[i]}`);
+  }
+  // 直接验证 +1ns 分支：把上一枚 ct 推到远未来，下一次必须只前进 1ns
+  ex._lastSigNs = 2000000000000000000n;
+  assert.equal(ex._nowNs(), 2000000000000000001n, '落后于上一枚 ct 时必须 +1ns 而不是回退');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

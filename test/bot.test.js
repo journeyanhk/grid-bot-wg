@@ -457,6 +457,35 @@ test('批量成交竞态：同一 tick 连吃相邻多档，每档都必须补�
   assert.equal(bot.stats.buys, 5, '五笔买单成交均计数');
 });
 
+// ── 补腿冲突记账：微任务窗口内目标档仍被占，必须留证据并进 state ──────────────
+test('补腿冲突计数：目标档仍被占用时记账并暴露到 state', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.grid = { lower: 90, upper: 110, levels: 21, spacing: 1, sizeBase: 0.1, marketId: 1 };
+  bot.active.set('o1', { orderId: 'o1', levelIndex: 5, side: 'buy', price: 95, sizeBase: 0.1 });
+  bot._replQueue.push({ levelIndex: 5, side: 'sell', price: 96, sizeBase: 0.1 });
+  bot._flushReplacements();
+  await sleep(20);
+  assert.equal(bot._replConflicts, 1, '同一档位被占应记一次冲突');
+  assert.equal(bot.getState().replConflicts, 1, 'state 要暴露计数供巡检读取');
+  assert.equal(bot.getState().lastReplConflict.levelIndex, 5, '最后一次冲突要带档位');
+});
+
+// ── 无冲突时不应误报 ─────────────────────────────────────────────────────────
+test('补腿冲突计数：目标档空闲时不记账', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.grid = { lower: 90, upper: 110, levels: 21, spacing: 1, sizeBase: 0.1, marketId: 1 };
+  bot._replQueue.push({ levelIndex: 7, side: 'sell', price: 97, sizeBase: 0.1 });
+  bot._flushReplacements();
+  await sleep(20);
+  assert.equal(bot._replConflicts, 0, '空闲档位不该记账');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

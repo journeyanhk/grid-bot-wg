@@ -19,6 +19,9 @@ export class GridBot {
     this.active = new Map();        // orderId -> {levelIndex, side, price, opening, placedAt}
     this._replQueue = [];           // 待补挂的对腿（同一批成交先出栈、再统一补挂）
     this._replFlushScheduled = false;
+    this._replConflicts = 0;        // 补挂时目标档仍被判占用的次数（"一格一单"被违反的证据）
+    this._lastReplConflict = null;
+    this._replConflictAlertAt = 0;
     this._ladderGaps = [];          // 最近一次对账发现的阶梯空洞（档位索引）
     this._lastGapSig = '';          // 空洞签名，避免同一缺口反复告警
     this._lastGapAlertAt = 0;
@@ -1225,6 +1228,21 @@ export class GridBot {
    * 避免"一格一单"不变量把相邻档位尚未处理的成交单误判为占位而丢掉补腿。
    * queueMicrotask 在本轮同步 emit 循环结束后立即执行，不依赖任何定时器。
    */
+  /**
+   * 补腿冲突记账：目标档在补充时仍被占用，说明"一格一单"不变量把一张补腿挡掉了。
+   * 计数进 state（replConflicts），并按 10 分钟节流升级成一次告警——哨兵是事后对账，
+   * 这里是事发当场；两次都要，缺一个就会重演"总数正常、中间整段空洞、日志无声"。
+   */
+  _noteReplConflict(repl) {
+    this._replConflicts += 1;
+    this._lastReplConflict = { levelIndex: repl?.levelIndex ?? null, side: repl?.side ?? null, at: Date.now() };
+    const now = Date.now();
+    if (now - this._replConflictAlertAt > 10 * 60 * 1000) {
+      this._replConflictAlertAt = now;
+      this._alert(`⚠️ 补腿冲突：档位 ${repl?.levelIndex} 在补充时仍被占用（累计 ${this._replConflicts} 次），该档可能失守，对账会复核。`);
+    }
+  }
+
   _queueReplacement(repl) {
     this._replQueue.push(repl);
     if (this._replFlushScheduled) return;
@@ -1239,6 +1257,11 @@ export class GridBot {
     // 排队期间若已破界或停机，补挂交给破界阶梯/重启处理，不再逐档补腿。
     if (!this.running || this.outOfRange || !this.grid) return;
     for (const repl of queue) {
+      // 微任务执行时同批成交已经全部出栈，此时目标档还被占 = 真的冲突（不是竞态假象）。
+      // 该补腿仍交给 _place（它有自己的不变量判断），但必须留下证据：主网出这事
+      // 不是 8.5 USDC 的学费，而是最活跃区间整段瘫痪且日志零 ERROR。
+      const occupied = [...this.active.values()].some((a) => a.levelIndex === repl.levelIndex);
+      if (occupied) this._noteReplConflict(repl);
       this._place(repl).catch(() => {});
     }
   }
@@ -2104,6 +2127,8 @@ export class GridBot {
       },
       openOrders: this.active.size,
       ladderGaps: Array.isArray(this._ladderGaps) ? this._ladderGaps.length : 0,
+      replConflicts: this._replConflicts || 0,
+      lastReplConflict: this._lastReplConflict || null,
       ladderGapIdx: Array.isArray(this._ladderGaps) ? this._ladderGaps.slice(0, 40) : [],
       exchangeOpenOrders: this._exchangeOpenOrders,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
