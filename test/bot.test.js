@@ -563,6 +563,28 @@ test('看门狗：行情推送会刷新活动时间戳', async () => {
   assert.ok(bot._lastActivityAt > 1, '行情到达必须刷新心跳');
 });
 
+// ── 全撤确认后的自动重铺（5 分钟节流）──────────────────────────────────────
+test('挂单全撤确认后自动重铺一次，且 5 分钟内不重复', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', lower: 90, upper: 110, gridCount: 20, sizeBase: 0.1 };
+  bot.grid = { lower: 90, upper: 110, levels: Array.from({ length: 21 }, (_, i) => 90 + i), spacing: 1, sizeBase: 0.1, marketId: 1 };
+  let rebuilds = 0;
+  bot.refillGrid = async () => { rebuilds += 1; };
+  for (let i = 0; i < 5; i += 1) bot.active.set(`o${i}`, { orderId: `o${i}`, levelIndex: i, side: 'buy', price: 90 + i, sizeBase: 0.1 });
+  ex.orders.clear();
+  for (let i = 0; i < 3; i += 1) await bot.reconcileOpenOrders();
+  await sleep(20);
+  assert.equal(rebuilds, 1, '确认全撤后应自动重铺一次');
+  // 再造一次全撤：节流窗口内不应再次重铺
+  for (let i = 0; i < 5; i += 1) bot.active.set(`p${i}`, { orderId: `p${i}`, levelIndex: i, side: 'buy', price: 90 + i, sizeBase: 0.1 });
+  for (let i = 0; i < 3; i += 1) await bot.reconcileOpenOrders();
+  await sleep(20);
+  assert.equal(rebuilds, 1, '5 分钟节流内不重复重铺');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

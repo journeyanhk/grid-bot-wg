@@ -1373,6 +1373,23 @@ export class GridBot {
   }
 
   /**
+   * 全撤确认后自动重铺一次。对账本身刻意不自动补开仓单（历史上自动补种曾在单方向
+   * 持续开仓时放大风险），但"死手/停机把梯子全撤了、本地台账也清空"是另一种情形：
+   * 此时不重铺就是零挂单裸等，2026-10-24 12:47 实测就卡在这里（界内、有持仓、
+   * 交易所 0 单，且没有任何自愈路径，只有人工 refill）。
+   * 因此加一条受限的重铺：仅界内、非回收模式、5 分钟最多一次。
+   */
+  _autoReseedAfterVanish() {
+    if (!this.running || this.outOfRange || this.recovery) return;
+    const now = Date.now();
+    if (now - (this._lastVanishRebuildAt || 0) < 5 * 60_000) return;
+    this._lastVanishRebuildAt = now;
+    Promise.resolve()
+      .then(() => this.refillGrid())
+      .catch((e) => this._alert(`⚠️ 全撤后自动重铺失败：${e?.message || e}`));
+  }
+
+  /**
    * 只减仓回收阶梯：价格冲出区间后，在「现价 ↔ 被冲破的边界」之间挂一批 reduce-only
    * 单。价格每回调一档就分批了结被套住的库存。reduce-only 保证「只减不加」（永远不会
    * 把套牢的仓位越加越大）；本策略不自动止损 —— 趋势继续单边延续会一直扛着。
@@ -1701,6 +1718,7 @@ export class GridBot {
       this._lastVanishAlertAt = 0;
       this._alert(`⚠️ 挂单全撤已确认（连续 ${MASS_VANISH_CONFIRM_ROUNDS} 轮 0 单，本地曾跟踪 ${tracked} 单）：已清空本地台账并按真实空盘重建。`);
       this._changed();
+      this._autoReseedAfterVanish();
     }
     if (!massVanish) {
       for (const [oid, info] of [...this.active]) {
