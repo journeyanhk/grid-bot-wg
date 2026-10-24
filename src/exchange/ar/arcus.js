@@ -47,6 +47,16 @@ const DMS_TRIGGER_GRACE_MS = 15_000;          // deadline 过后这么久仍没�
 const DMS_QUOTA_WINDOW_MS = 24 * 3600_000;
 const FILLS_OVERLAP_MS = 3000;                // 游标回退窗口，防漏单（配合去重）
 const FILLS_SEEN_MAX = 5000;
+// 未跟踪成交里低于这个名义额（USDC）的一律当测试网碎单，只记 info 不报警。
+export function isDustFill(fill, dustUsd = UNTRACKED_DUST_USD) {
+  const notional = Math.abs(Number(fill?.sizeBase) || 0) * (Number(fill?.price) || 0);
+  return notional < dustUsd;
+}
+
+const UNTRACKED_DUST_USD = 1;
+// 未跟踪成交告警的自愈窗口：这么久没有新的未跟踪成交就自动清除，避免 health 永久红。
+const UNTRACKED_TTL_MS = 30 * 60_000;
+
 const FILLS_PAGE_LIMIT = 200;                 // 服务端单页上限
 const FILLS_MAX_PAGES = 20;                   // 一次回补最多 4000 笔，防死循环
 const CANCEL_BATCH = 100;
@@ -627,11 +637,21 @@ export class ArcusExchange extends EventEmitter {
         this._tracked.delete(String(f.orderId));
       } else {
         f.levelIndex = null;
+        // 测试网会打出 1e-8 量级的碎单成交（远小于最小下单量 0.0001），它们既不可能
+        // 来自策略（单笔都 ≥ minOrderSize），也不影响任何格位。按名义额设阈值：
+        // 低于 1 USDC 的直接降级成 info，不把 health 钉死在 error 上。
+        const notional = Math.abs(Number(f.sizeBase) || 0) * (Number(f.price) || 0);
+        if (isDustFill(f)) {
+          logger.info('ar', `忽略碎单成交（名义 ${notional.toFixed(6)} USDC）：${f.orderId} ${f.side} ${f.sizeBase} @ ${f.price}`);
+          this.emit('fill', f);
+          continue;
+        }
         logger.warn('ar', `未跟踪订单的成交（可能来自网页手动下单）：${f.orderId} ${f.side} ${f.sizeBase} @ ${f.price}`);
         this.operationalIssue = {
           title: 'Arcus 出现未跟踪成交',
           message: `订单 ${f.orderId} 在本地无记录，可能是网页/其它客户端手动下单。请核对该笔是否应计入网格。`,
         };
+        this._untrackedAt = Date.now();
       }
       this.emit('fill', f);
     }
@@ -1128,6 +1148,12 @@ export class ArcusExchange extends EventEmitter {
   /** 健康快照（供 /api 面板与 AI 哨兵）。 */
   health() {
     const now = Date.now();
+    // 未跟踪成交告警自愈：碎单/历史噪声不该让 health 永远红（旧版一旦置上就再也不清）。
+    if (this.operationalIssue?.title === 'Arcus 出现未跟踪成交'
+      && this._untrackedAt && now - this._untrackedAt > UNTRACKED_TTL_MS) {
+      logger.info('ar', '未跟踪成交告警已静默超过 30 分钟，自动清除');
+      this.operationalIssue = null;
+    }
     return {
       mode: this.mode,
       network: this.network,

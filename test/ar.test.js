@@ -2,7 +2,7 @@
 // conversion, market gating, and response parsers.
 // Run with: npm test
 import assert from 'node:assert/strict';
-import { ArcusExchange } from '../src/exchange/ar/arcus.js';
+import { ArcusExchange, isDustFill } from '../src/exchange/ar/arcus.js';
 import { createExchange } from '../src/exchange/ar/index.js';
 import {
   apiKeyFromPrivate, cancelPayload, canonicalJson, fromQuantums, fromTicks,
@@ -436,6 +436,13 @@ test('签名时间戳严格递增：同毫秒连发不会撞 ct（ef9349d 回归
   // 直接验证 +1ns 分支：把上一枚 ct 推到远未来，下一次必须只前进 1ns
   ex._lastSigNs = 2000000000000000000n;
   assert.equal(ex._nowNs(), 2000000000000000001n, '落后于上一枚 ct 时必须 +1ns 而不是回退');
+});
+
+
+test('isDustFill: 测试网碎单按名义额过滤，正常成交不误杀', () => {
+  assert.equal(isDustFill({ sizeBase: 3e-8, price: 82000 }), true, '3e-8 BTC ≈ 0.0025 USDC 属碎单');
+  assert.equal(isDustFill({ sizeBase: 0.0002, price: 82000 }), false, '0.0002 BTC ≈ 16.4 USDC 是正常单');
+  assert.equal(isDustFill({ sizeBase: 0.00001, price: 82000 }), true, '0.82 USDC 仍低于阈值');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
