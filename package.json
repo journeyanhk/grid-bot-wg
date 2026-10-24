@@ -1,6 +1,6 @@
 {
   "name": "grid-bot-all",
-  "version": "1.6.31",
+  "version": "1.6.32",
   "description": "多交易所整合网格交易机器人：Decibel / Extended / RISEx / RHC / Entropy / Variational / Arcus，统一仪表盘。",
   "type": "module",
   "scripts": {

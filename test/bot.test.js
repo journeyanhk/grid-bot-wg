@@ -121,7 +121,8 @@ class MockExchange extends EventEmitter {
   }
 }
 
-const CFG = { marketId: 1, mode: 'neutral', lower: 100, upper: 200, gridCount: 10, sizeBase: 1, leverage: 3, outOfRangeAction: 'close' };
+// outDwellMs: 0 —— 测试里关掉「破界驻留时间」闸门，保持原有逐拍语义（生产默认 8000ms）
+const CFG = { marketId: 1, mode: 'neutral', lower: 100, upper: 200, gridCount: 10, sizeBase: 1, leverage: 3, outOfRangeAction: 'close', outDwellMs: 0 };
 
 async function makeBot(exOpts = {}, cfg = CFG) {
   const ex = new MockExchange(exOpts);
@@ -583,6 +584,24 @@ test('挂单全撤确认后自动重铺一次，且 5 分钟内不重复', async
   for (let i = 0; i < 3; i += 1) await bot.reconcileOpenOrders();
   await sleep(20);
   assert.equal(rebuilds, 1, '5 分钟节流内不重复重铺');
+});
+
+test('异常价格帧：破界需驻留 outDwellMs 才认，跳出去又跳回来不触发', async () => {
+  const { ex, bot } = await makeBot();
+  bot.config.outDwellMs = 200;
+  // 1 拍越界 → 不触发（仍需 2 拍）
+  ex.setPrice(1, 210); await sleep(10);
+  ex.setPrice(1, 210); await sleep(10); // 2 拍越界，但驻留不足 200ms
+  assert.equal(bot.outOfRange, false, '驻留不足不触发');
+  // 1 秒内回到区间：闸门必须把这次抖动整个吞掉
+  ex.setPrice(1, 150); await sleep(10);
+  assert.equal(bot.outOfRange, false, '跳出去又跳回来不应切换模式');
+  assert.equal(bot._outTicks, 0, '回区间后越界拍数复位');
+  // 持续越界超过驻留时间 → 正常触发
+  ex.setPrice(1, 210); ex.setPrice(1, 210);
+  await sleep(250);
+  ex.setPrice(1, 210); await sleep(50);
+  assert.equal(bot.outOfRange, true, '驻留足够久应触发');
 });
 
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────

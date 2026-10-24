@@ -38,6 +38,7 @@ export class GridBot {
     this.lastPrice = null;
     this.outOfRange = false;
     this._outTicks = 0;             // recover 迟滞：连续越过外侧半格的价格拍数（进破界需 ≥2 拍）
+    this._outSince = 0;             // 本轮「连续越界」起始时间戳（破界驻留时间闸门用）
     this.risk = null;
     this._stopping = false;         // re-entrancy guard for auto-stop
     this._coidSeq = 0;              // monotonic client-order-id counter
@@ -455,6 +456,8 @@ export class GridBot {
       // recover 破界迟滞：进/出破界都以「边界 ± recoverHystFrac 格」为缓冲带，配合连续 2 拍确认，
       // 避免价格贴边抖动反复切换模式（默认半格）。0 = 仅保留 2 拍去抖、无空间缓冲。
       recoverHystFrac: (Number.isFinite(cfg.recoverHystFrac) && Number(cfg.recoverHystFrac) >= 0) ? Number(cfg.recoverHystFrac) : 0.5,
+      // 破界驻留时间：连续越界不满该时长不切换模式，过滤单帧坏价（0 = 关闭闸门）
+      outDwellMs: (Number.isFinite(Number(cfg.outDwellMs)) && Number(cfg.outDwellMs) >= 0) ? Number(cfg.outDwellMs) : 8000,
       // recover 回收阶梯首档偏移：从「边界 ± N 格」起挂 reduce-only 减仓单（默认 2 格，
       // 给刚破界的抖动留缓冲，避免一破界就减仓）。显式传 Infinity/'inf'/'none' = 不挂阶梯
       // （破界后纯持有，只靠 recoverMaxLossUsd 硬退出）。回测结论出来前不默认 ∞。
@@ -1289,7 +1292,12 @@ export class GridBot {
     const beyond = p.price < this.config.lower - h || p.price > this.config.upper + h;
     const inside = p.price > this.config.lower + h && p.price < this.config.upper - h;
     this._outTicks = beyond ? this._outTicks + 1 : 0;
-    const out = this.outOfRange ? !inside : this._outTicks >= 2;
+    // 破界驻留时间闸门（2026-10-24 21:03:56 实测）：同一秒内先报 82865.9（越上界）再报 81633.75（回区间），
+    // 回收阶梯被瞬时拉起又撤销、网格单却没补回。连续越界必须驻留 outDwellMs（默认 8s）才算数。
+    if (beyond) { if (!this._outSince) this._outSince = Date.now(); } else { this._outSince = 0; }
+    const dwellMs = Number.isFinite(Number(this.config.outDwellMs)) ? Number(this.config.outDwellMs) : 8000;
+    const dwelled = !dwellMs || !this._outSince || (Date.now() - this._outSince) >= dwellMs;
+    const out = this.outOfRange ? !inside : (this._outTicks >= 2 && dwelled);
     const action = this.config.outOfRangeAction || 'close';
     if (out && !this.outOfRange) {
       this.outOfRange = true;
