@@ -170,6 +170,9 @@ test('自动停机记录：破界 stop 前 _noteAutoStop(reason=breakout)', asyn
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10 });
   await bot.start({ ...CFG, outOfRangeAction: 'close', dynamic: { enabled: true, shadow: false } });
   bot.lastPrice = 150;
+  // 本用例只验证 _noteAutoStop 的记录内容；v1.6.32 起越界还要驻留 outDwellMs(默认 8s)
+  // 才算数，两拍同毫秒的模拟帧过不了这道门，这里显式关掉驻留门。
+  bot.config.outDwellMs = 0;
   bot._handlePrice({ marketId: 1, price: 210 }); // 第 1 拍越界（>upper+半格 205）：去抖计数
   bot._handlePrice({ marketId: 1, price: 210 }); // 第 2 拍：触发破界 close
   await sleep(120);
