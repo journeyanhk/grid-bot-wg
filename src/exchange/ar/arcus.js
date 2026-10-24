@@ -39,6 +39,7 @@ const GOOD_TIL_MS = 35 * 24 * 3600 * 1000;   // ≥1 个月，留 5 天余量
 const FILL_POLL_MS = 1000;                    // /v1/fills（权重 20）
 const ACCOUNT_POLL_MS = 5000;                 // /v1/account + /v1/positions（权重 2+2）
 const PRICE_POLL_MS = 2000;                   // WS 掉线时的 bbo 兜底（权重 2）
+const WS_SILENCE_MS = 30_000;                 // WS 30 秒没有任何帧 = 半开连接，必须强断重连
 const MARKETS_TTL_MS = 5 * 60_000;            // /v1/markets（权重 20）
 const DMS_REFRESH_MS = 30_000;                // 死手续期间隔（30s：4 分钟 deadline 内留 8 次机会）
 const DMS_DEADLINE_MS = 4 * 60_000;           // 死手 deadline（上限 5 分钟）
@@ -478,6 +479,22 @@ export class ArcusExchange extends EventEmitter {
   }
 
   async _pollPrices() {
+    // 2026-10-25 21:05 实测：WS 半开（socket 还 open、但一个帧都不再进来）时，原来这里
+    // 只看 _wsReady 就直接 return，REST 兜底永远不跑，价格冻结 1141 秒、死手把 264 单
+    // 全撤，进程却"看起来正常"（HTTP 200、对账照跑）。改成按"最近收帧时间"判活：
+    // 30 秒静默就认定半开，强制断开重连并立刻走 REST 兜底。
+    const silentMs = this._lastWsMsgAt ? Date.now() - this._lastWsMsgAt : 0;
+    if (this._wsReady && silentMs > WS_SILENCE_MS) {
+      logger.warn('ar', `WS ${Math.round(silentMs / 1000)}s 未收到任何帧（半开连接），强制重连并切 REST 兜底`);
+      this._wsSilenceReconnects = (this._wsSilenceReconnects || 0) + 1;
+      try { this._ws?.close(); } catch { /* ignore */ }
+      this._wsReady = false;
+      this._ws = null;
+      this._wsSubscribed.clear();
+      if (this._wsTimer) { clearTimeout(this._wsTimer); this._wsTimer = null; }
+      this._wsRetryMs = 1000;
+      this._connectWs();
+    }
     if (this._wsReady) return;                  // WS 正常时不再花 REST 权重
     for (const mId of [...this._watch]) {
       const touched = this._watchTouch.get(mId) || 0;
@@ -502,6 +519,7 @@ export class ArcusExchange extends EventEmitter {
     this._wsOpenedAt = Date.now();
     ws.addEventListener('open', () => {
       this._wsReady = true;
+    this._lastWsMsgAt = Date.now();
       this._wsRetryMs = 1000;
       this._wsDegraded = null;
       this._wsSubscribed.clear();
@@ -562,6 +580,7 @@ export class ArcusExchange extends EventEmitter {
   }
 
   _onWsMessage(data) {
+    this._lastWsMsgAt = Date.now();             // 任何一帧都算活着（含 error/degraded），用于半开判定
     let msg;
     try { msg = JSON.parse(typeof data === 'string' ? data : data.toString()); } catch { return; }
     if (msg?.type === 'error') {
