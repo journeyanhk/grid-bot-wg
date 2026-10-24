@@ -10,6 +10,9 @@ import { logger } from './log.js';
 const RECONCILE_MS = 30000;   // periodic open-order reconciliation cadence
 const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 
+// 挂单"全撤"确认门：连续多少轮对账都拿到 0 单才认定是真的没了（对账约 30 秒一轮）。
+const MASS_VANISH_CONFIRM_ROUNDS = 3;
+
 export class GridBot {
   constructor(exchange, opts = {}) {
     this.ex = exchange;
@@ -1649,11 +1652,27 @@ export class GridBot {
     // such a snapshot, and in general require an order to be missing from TWO
     // consecutive reconciles before pruning it.
     const massVanish = real.length === 0 && this.active.size >= 3;
-    if (massVanish && now - (this._lastVanishAlertAt || 0) > 60000) {
+    this._vanishStreak = massVanish ? (this._vanishStreak || 0) + 1 : 0;
+    // 确认门：接口抖动是瞬时的，连续 N 轮仍然 0 单就是真没了（死手全撤 / 停机超时全撤）。
+    // 旧实现只有"跳过清理"、没有出口——2026-10-24 实测：20:18 死手把 264 单全撤后，
+    // 本地台账永远清不掉，格位全显示"已占用"→不再下单，回收阶梯也认为"已经挂好"→不再补，
+    // 13.5 小时零挂单零成交，持仓裸奔，日志只每 60 秒刷一条"疑似接口异常快照"。
+    const vanishConfirmed = massVanish && this._vanishStreak >= MASS_VANISH_CONFIRM_ROUNDS;
+    if (massVanish && !vanishConfirmed && now - (this._lastVanishAlertAt || 0) > 60000) {
       this._lastVanishAlertAt = now;
       this._alert(`⚠️ 挂单对账：交易所返回 0 单但本地跟踪 ${this.active.size} 单，疑似接口异常快照，本轮不清理（等待下轮复核）。`);
     }
     let pruned = 0, repaired = 0;
+    if (vanishConfirmed) {
+      const tracked = this.active.size;
+      // 先尽力撤一次（万一是幽灵单），再清本地台账：之后的补挂/回收阶梯都按真实空盘重建。
+      try { await this.ex.cancelAll?.(this.config.marketId); } catch { /* 尽力而为 */ }
+      this.active.clear();
+      this._vanishStreak = 0;
+      this._lastVanishAlertAt = 0;
+      this._alert(`⚠️ 挂单全撤已确认（连续 ${MASS_VANISH_CONFIRM_ROUNDS} 轮 0 单，本地曾跟踪 ${tracked} 单）：已清空本地台账并按真实空盘重建。`);
+      this._changed();
+    }
     if (!massVanish) {
       for (const [oid, info] of [...this.active]) {
         if (realIds.has(oid)) {
@@ -2128,6 +2147,7 @@ export class GridBot {
       openOrders: this.active.size,
       ladderGaps: Array.isArray(this._ladderGaps) ? this._ladderGaps.length : 0,
       replConflicts: this._replConflicts || 0,
+      vanishStreak: this._vanishStreak || 0,
       lastReplConflict: this._lastReplConflict || null,
       ladderGapIdx: Array.isArray(this._ladderGaps) ? this._ladderGaps.slice(0, 40) : [],
       exchangeOpenOrders: this._exchangeOpenOrders,

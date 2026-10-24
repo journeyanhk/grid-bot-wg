@@ -486,6 +486,40 @@ test('补腿冲突计数：目标档空闲时不记账', async () => {
   assert.equal(bot._replConflicts, 0, '空闲档位不该记账');
 });
 
+// ── 全撤确认门：连续 3 轮 0 单才清台账，2 轮不动（防接口抖动）──────────────
+test('挂单全撤：连续两轮 0 单只告警、不清台账（接口抖动保护仍在）', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', lower: 90, upper: 110, gridCount: 20, sizeBase: 0.1 };
+  bot.grid = { lower: 90, upper: 110, levels: Array.from({ length: 21 }, (_, i) => 90 + i), spacing: 1, sizeBase: 0.1, marketId: 1 };
+  for (let i = 0; i < 5; i += 1) bot.active.set(`o${i}`, { orderId: `o${i}`, levelIndex: i, side: 'buy', price: 90 + i, sizeBase: 0.1 });
+  ex.orders.clear();
+  await bot.reconcileOpenOrders();
+  await bot.reconcileOpenOrders();
+  assert.equal(bot.active.size, 5, '两轮 0 单不该清台账（可能是快照抖动）');
+  assert.equal(bot._vanishStreak, 2, '连续轮次要被记住');
+});
+
+test('挂单全撤：连续三轮 0 单确认为真，清空台账并重建', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  const alerts = [];
+  bot._alert = (m) => alerts.push(m);
+  bot.running = true;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', lower: 90, upper: 110, gridCount: 20, sizeBase: 0.1 };
+  bot.grid = { lower: 90, upper: 110, levels: Array.from({ length: 21 }, (_, i) => 90 + i), spacing: 1, sizeBase: 0.1, marketId: 1 };
+  for (let i = 0; i < 5; i += 1) bot.active.set(`o${i}`, { orderId: `o${i}`, levelIndex: i, side: 'buy', price: 90 + i, sizeBase: 0.1 });
+  ex.orders.clear();
+  await bot.reconcileOpenOrders();
+  await bot.reconcileOpenOrders();
+  await bot.reconcileOpenOrders();
+  assert.equal(bot.active.size, 0, '第三轮必须清空本地台账');
+  assert.equal(bot._vanishStreak, 0, '确认后计数归零');
+  assert.ok(alerts.some((m) => m.includes('全撤已确认')), '必须留下确认告警');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {
