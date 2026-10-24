@@ -118,6 +118,8 @@ export function getConfig() {
     // maker 0 ppm 时网格才成立；未知按 0 处理，适配器启动时会读真实费率复核。
     feeRate: Number(process.env.AR_FEE_RATE || 0),
     deadmanMs: Number(process.env.AR_DEADMAN_MS || 60_000),
+    // 全局止损线（USDC，按盘口价重算）：持仓亏到这条线强制平仓停止；0 = 不启用。
+    stopLossUsd: Number(process.env.AR_STOP_LOSS_USD ?? 50),
     pollMs: Number(process.env.AR_POLL_MS || 2500),
     startBalance: Number(process.env.PAPER_BALANCE || 10000),
     proxy: process.env.AR_PROXY || globalProxy,

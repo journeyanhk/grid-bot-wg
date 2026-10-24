@@ -22,6 +22,7 @@ export class GridBot {
     this.active = new Map();        // orderId -> {levelIndex, side, price, opening, placedAt}
     this._replQueue = [];           // 待补挂的对腿（同一批成交先出栈、再统一补挂）
     this._replFlushScheduled = false;
+    this._lastActivityAt = Date.now();  // 看门狗用：任何真实活动（行情/成交/对账/状态变更）都刷新
     this._replConflicts = 0;        // 补挂时目标档仍被判占用的次数（"一格一单"被违反的证据）
     this._lastReplConflict = null;
     this._replConflictAlertAt = 0;
@@ -448,6 +449,9 @@ export class GridBot {
       // 破界出口纪律：recover 模式下若未实现亏损达到该上限（USDC），强制撤单+市价平仓+停止
       // （recover 本身不止损，此值给单边行情一条硬退出线；0/缺省 = 不启用）
       recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
+      // 全局止损线（USDC，按盘口价口径）：普通网格持仓亏到这条线也强制平仓停止。
+      // 对中性网格等于给"库存被套"设上限；0/缺省 = 不启用（保持旧行为）。
+      stopLossUsd: Number(cfg.stopLossUsd) > 0 ? Number(cfg.stopLossUsd) : null,
       // recover 破界迟滞：进/出破界都以「边界 ± recoverHystFrac 格」为缓冲带，配合连续 2 拍确认，
       // 避免价格贴边抖动反复切换模式（默认半格）。0 = 仅保留 2 拍去抖、无空间缓冲。
       recoverHystFrac: (Number.isFinite(cfg.recoverHystFrac) && Number(cfg.recoverHystFrac) >= 0) ? Number(cfg.recoverHystFrac) : 0.5,
@@ -1168,6 +1172,7 @@ export class GridBot {
   }
 
   _handleFill(f) {
+    this._touch();
     if (!this.running || f.marketId !== this.config.marketId) return;
     const id = String(f.orderId);
     const act = this.active.get(id);
@@ -1270,6 +1275,7 @@ export class GridBot {
   }
 
   _handlePrice(p) {
+    this._touch();
     if (p.marketId !== this.config.marketId) return;
     this.lastPrice = p.price;
     // 破界出口纪律：recover 模式若亏损触及上限，强制硬止损（见 _checkMaxLoss）
@@ -1324,20 +1330,42 @@ export class GridBot {
    * 撤单 + 市价平仓 + 停止。recover 本身不止损，此方法给单边行情一条硬退出线，
    * 避免"只会只减不加、趋势单边就无限扛"的敞口失控。
    */
+  /** 看门狗心跳：任何真实活动都要刷新，卡死时由 server.js 的 watchdog 触发退出重启。 */
+  _touch() { this._lastActivityAt = Date.now(); }
+
+  /**
+   * 用**盘口价**重算未实现盈亏，而不是交易所的 mark。
+   * Arcus 的 markPx 跟主网指数走，测试网里能比盘口高 7%+：拿它判止损会凭空多亏一百多，
+   * 让风控在错误的方向上开火（该止损时反而不敢动）。真实口径只认 lastPrice。
+   */
+  _quoteUnrealized(pos) {
+    const p = Number(pos?.sizeBase);
+    const entry = Number(pos?.entryPrice ?? pos?.averageEntryPrice);
+    const last = Number(this.lastPrice);
+    // lastPrice 未初始化时是 0：当作“还没有行情”，退回交易所口径，别用 0 算出一个假盈利。
+    if (!Number.isFinite(p) || !Number.isFinite(entry) || !Number.isFinite(last) || !p || last <= 0) return null;
+    // 空头 p<0：价格跌为盈。upnl = (last - entry) * p 对多空都成立。
+    return { upnl: (last - entry) * p, price: last, entry, sizeBase: p };
+  }
+
   _checkMaxLoss() {
     if (!this.running || !this.config) return;
-    // 独立回收模式（this.recovery=true）也应受硬止损约束——它持有被套库存，
-    // 是最需要止损线的场景；普通网格破界进入 recover 时 outOfRangeAction==='recover'。
-    if (this.config.outOfRangeAction !== 'recover' && !this.recovery) return;
-    const maxLoss = this.config.recoverMaxLossUsd;
-    if (!(maxLoss > 0)) return;
-    if (!this.outOfRange && !this.recovery) return;
     const pos = this.ex.getPosition?.(this.config.marketId);
-    if (!pos) return;
-    const upnl = Number(pos.unrealizedPnl);
+    if (!pos || !pos.sizeBase) return;
+    // 口径：优先用盘口价重算。交易所的 mark 在 Arcus 测试网能比盘口高 7%+，
+    // 直接拿它止损会让风控凭空认定已亏一百多，反而不敢按真实亏损动作。
+    const q = this._quoteUnrealized(pos);
+    const upnl = q ? q.upnl : Number(pos.unrealizedPnl);
     if (!Number.isFinite(upnl)) return;
+    const inRecover = this.outOfRange || this.recovery;
+    // 破界/回收中用 recoverMaxLossUsd（没配则退回全局 stopLossUsd）；普通网格用全局止损线。
+    const maxLoss = inRecover
+      ? (this.config.recoverMaxLossUsd ?? this.config.stopLossUsd)
+      : this.config.stopLossUsd;
+    if (!(maxLoss > 0)) return;
     if (upnl <= -maxLoss && !this._stopping) {
-      this._alert(`⚠️ recover 中未实现亏损 ${round2(upnl)} USDC 已达止损上限 ${round2(maxLoss)}，触发硬止损：撤单 + 市价平仓 + 停止。`);
+      const how = q ? `（按盘口价 ${round2(q.price)} 重算，交易所 mark 口径 ${round2(Number(pos.unrealizedPnl) || 0)}）` : '';
+      this._alert(`⚠️ 未实现亏损 ${round2(upnl)} USDC 已达止损线 ${round2(maxLoss)}${inRecover ? '（破界/回收中）' : ''}${how}，触发硬止损：撤单 + 平仓 + 停止。`);
       this._noteAutoStop('maxloss'); // 冷静门重启的价值主体：止损后只在市场平静时回场
       this._stopping = true;
       this.stop({ closePosition: true }).catch(() => {}).finally(() => { this._stopping = false; });
@@ -1618,6 +1646,7 @@ export class GridBot {
    * even when our in-memory tracking has drifted.
    */
   async reconcileOpenOrders() {
+    this._touch();
     if (!this.running || !this.config) return;
     if (typeof this.ex.fetchOpenOrders !== 'function') return;
     // Keep the adapter's price watch warm so a long-running market is never

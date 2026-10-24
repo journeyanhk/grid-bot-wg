@@ -885,6 +885,13 @@ async function resumeIfWasRunning(bot, exchange, key) {
     // Arcus 这类"停机会自动撤光挂单"的交易所（死手开关 4 分钟）：续跑时在簿 0 单
     // 是常态。此时 adopt 路径没有单子可以认领，只会把本地跟踪一批批剪光，最后
     // 剩个空梯子对着仓位 —— 必须改成"全新铺梯 + 接管存量仓位"。
+    // 运维级风控（止损线）以当前配置文件为准，不能被旧快照里的空值覆盖：
+    // 快照是上次启动时的配置，改了 .env 之后重启必须生效。
+    const liveCfg = cfg[key];
+    if (liveCfg && snap.config) {
+      if (liveCfg.stopLossUsd != null) snap.config.stopLossUsd = liveCfg.stopLossUsd;
+      if (liveCfg.recoverMaxLossUsd != null) snap.config.recoverMaxLossUsd = liveCfg.recoverMaxLossUsd;
+    }
     if (exchange.resumeWithoutOrders && snap.config?.marketId != null) {
       let open = null;
       try {
@@ -1000,6 +1007,26 @@ await Promise.all([
   detectOrphanPosition(rsBot, rsExchange),
   detectOrphanPosition(arBot, arExchange),
 ]);
+
+// ── 看门狗：进程活着但循环卡死时主动退出，交给 supervisor 重启 ──────────────
+// 2026-10-23 19:57 实测：进程静默 21 分钟，超过死手 deadline（240s），交易所把 264 单
+// 全撤了；进程本身还在（pgrep 有），日志零输出，重启逻辑完全轮不到。这里用"最后一次
+// 真实活动"的时间戳兜底：行情/成交/对账任一刷新都算活着，超过阈值就 exit(1)。
+const WATCHDOG_STALE_MS = Number(process.env.WATCHDOG_STALE_MS || 90_000);
+const watchdog = setInterval(() => {
+  const now = Date.now();
+  for (const [key, bot] of Object.entries({ de: deBot, ex: exBot, rs: rsBot, ar: arBot, lr: lrBot, hl: hlBot, va: vaBot })) {
+    if (!bot?.running) continue;
+    const last = Number(bot._lastActivityAt) || 0;
+    if (!last) continue;
+    const stale = now - last;
+    if (stale > WATCHDOG_STALE_MS) {
+      logger.error('watchdog', `${key} 活动停滞 ${Math.round(stale / 1000)}s（阈值 ${Math.round(WATCHDOG_STALE_MS / 1000)}s），主动退出等待 supervisor 重启`);
+      process.exit(1);
+    }
+  }
+}, 15_000);
+watchdog.unref?.();
 
 server.listen(cfg.port, cfg.host, () => {
   logger.info('server', `仪表盘已启动: http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}（${cfg.de.mode}/${cfg.ex.mode}/${cfg.rs.mode}/${cfg.ar.mode}）`);

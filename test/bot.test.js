@@ -520,6 +520,49 @@ test('挂单全撤：连续三轮 0 单确认为真，清空台账并重建', as
   assert.ok(alerts.some((m) => m.includes('全撤已确认')), '必须留下确认告警');
 });
 
+// ── 止损口径：按盘口价重算，不听交易所 mark ──────────────────────────────────
+test('止损：mark 口径假报盈利时，盘口口径亏到线照砍', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  const alerts = [];
+  bot._alert = (m) => alerts.push(m);
+  bot.running = true;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', stopLossUsd: 50 };
+  bot.lastPrice = 200;
+  ex.getPosition = () => ({ sizeBase: -0.6, entryPrice: 100, unrealizedPnl: 5 });
+  let stopped = false;
+  bot.stop = async () => { stopped = true; };
+  bot._checkMaxLoss();
+  await sleep(10);
+  assert.ok(stopped, '盘口价 (200−100)×(−0.6) = −60 已破 50 的线，必须砍');
+  assert.ok(alerts.some((m) => m.includes('止损线')), '要留下止损告警');
+});
+
+test('止损：盘口口径未到线时不动', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', stopLossUsd: 50 };
+  bot.lastPrice = 110;
+  ex.getPosition = () => ({ sizeBase: -0.6, entryPrice: 100, unrealizedPnl: -500 });
+  let stopped = false;
+  bot.stop = async () => { stopped = true; };
+  bot._checkMaxLoss();
+  await sleep(10);
+  assert.ok(!stopped, '盘口口径只有 −6，不该触发（mark 的 −500 是失真）');
+});
+
+// ── 看门狗心跳 ───────────────────────────────────────────────────────────────
+test('看门狗：行情推送会刷新活动时间戳', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot.config = { ...bot.config, marketId: 1 };
+  bot._lastActivityAt = 1;
+  bot._handlePrice({ marketId: 1, price: 100 });
+  assert.ok(bot._lastActivityAt > 1, '行情到达必须刷新心跳');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {
