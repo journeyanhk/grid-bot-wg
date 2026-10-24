@@ -40,7 +40,7 @@ const FILL_POLL_MS = 1000;                    // /v1/fills（权重 20）
 const ACCOUNT_POLL_MS = 5000;                 // /v1/account + /v1/positions（权重 2+2）
 const PRICE_POLL_MS = 2000;                   // WS 掉线时的 bbo 兜底（权重 2）
 const MARKETS_TTL_MS = 5 * 60_000;            // /v1/markets（权重 20）
-const DMS_REFRESH_MS = 60_000;                // 死手续期间隔
+const DMS_REFRESH_MS = 30_000;                // 死手续期间隔（30s：4 分钟 deadline 内留 8 次机会）
 const DMS_DEADLINE_MS = 4 * 60_000;           // 死手 deadline（上限 5 分钟）
 const DMS_TRIGGER_QUOTA = 10;                 // 官方配额：自动撤单每日最多触发 10 次
 const DMS_TRIGGER_GRACE_MS = 15_000;          // deadline 过后这么久仍没续上 = 已被触发
@@ -1053,7 +1053,28 @@ export class ArcusExchange extends EventEmitter {
     // 不能先清零再续期：续期失败时交易所侧的旧 deadline 还在走表，本地归零就
     // 永远识别不到那次真触发（配额少算一类）。成功时 _armDms 自己覆盖，失败时
     // 保留旧值让下一轮 tick 补判。
-    await this._armDms();
+    //
+    // 2026-10-24 12:47 实测：网络劣化时单次续期可能被底层重试拖住好几分钟，
+    // 期间没有任何"续期失败"日志，deadline 静默过期、交易所把 132 单全撤。
+    // 这里给续期加 20 秒硬上限，卡住就进 catch，让下一轮 tick 重新发起。
+    try {
+      await Promise.race([
+        this._armDms(),
+        new Promise((_, rej) => {
+          const t = setTimeout(() => rej(new Error('死手续期超时（20s）')), 20_000);
+          t.unref?.();
+        }),
+      ]);
+      this._dmsFailStreak = 0;
+    } catch (e) {
+      this._dmsFailStreak = (this._dmsFailStreak || 0) + 1;
+      const left = this._dmsDeadlineMs ? this._dmsDeadlineMs - Date.now() : null;
+      // 连续失败且剩余不足 60 秒 = 马上要被交易所撤单，必须升级成告警（不能只写日志）。
+      if (this._dmsFailStreak >= 2 && left != null && left < 60_000) {
+        logger.error('ar', `死手续期连续失败 ${this._dmsFailStreak} 次，剩余 ${Math.round(left / 1000)}s，超时将被交易所撤光挂单：${e.message}`);
+      }
+      throw e;
+    }
   }
 
   _pruneDmsWindow() {
