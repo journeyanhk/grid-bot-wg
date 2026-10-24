@@ -338,7 +338,14 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
     }
 
     if (subPath === '/start' && req.method === 'POST') {
-      try { return send(res, 200, await bot.start(await readBody(req))); }
+      try {
+        const body = await readBody(req);
+        // 运维级风控以服务端配置为准，请求体关不掉：止损线是最后一道闸，
+        // 不能因为某个调用方（面板/脚本）没带这个字段就静默失效。
+        if (exCfg?.stopLossUsd != null) body.stopLossUsd = exCfg.stopLossUsd;
+        if (exCfg?.recoverMaxLossUsd != null) body.recoverMaxLossUsd = exCfg.recoverMaxLossUsd;
+        return send(res, 200, await bot.start(body));
+      }
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
