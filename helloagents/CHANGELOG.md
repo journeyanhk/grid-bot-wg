@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+## [1.6.37] - 2026-10-25
+
+### 死手续期留正向证据（dmsRenewAgeMs / dmsRenews / 每 5 分钟一条 ok）
+
+21:48 又触发一次死手，但整个 6 小时窗口里一条「续期失败」都没有 —— 没有正向证据，
+就无法区分「续期根本没跑」和「续期成功了交易所照样撤单」，两种修法完全相反。
+
+- 续期成功后累加 `_dmsRenews`，每 5 分钟打一条 `死手续期 ok`（含 deadline 余量）
+- `health()` 新增 `dmsRenewAgeMs` / `dmsRenews` / `dmsFailStreak`
+
+
 ## [1.6.36] - 2026-10-25
 
 ### 死手续期加固：20s 节拍 + 4m50s deadline + 失败 3s 快重试

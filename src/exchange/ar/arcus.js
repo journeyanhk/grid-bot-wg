@@ -1086,7 +1086,14 @@ export class ArcusExchange extends EventEmitter {
       ]);
       this._dmsFailStreak = 0;
       this._dmsLastOkAt = Date.now();
+      this._dmsRenews = (this._dmsRenews || 0) + 1;
       this._dmsQuickRetries = 0;
+      // 2026-10-25 21:48 又触发一次死手，但窗口内一条「续期失败」都没有 —— 没有正向
+      // 证据就没法判断是「续期没跑」还是「续期成功但交易所仍撤」。每 5 分钟留一条 ok。
+      if (!this._dmsOkLoggedAt || Date.now() - this._dmsOkLoggedAt > 5 * 60_000) {
+        this._dmsOkLoggedAt = Date.now();
+        logger.info('ar', `死手续期 ok：已续 ${this._dmsRenews} 次，deadline +${Math.round((this._dmsDeadlineMs - Date.now()) / 1000)}s`);
+      }
     } catch (e) {
       this._dmsFailStreak = (this._dmsFailStreak || 0) + 1;
       const left = this._dmsDeadlineMs ? this._dmsDeadlineMs - Date.now() : null;
@@ -1217,6 +1224,9 @@ export class ArcusExchange extends EventEmitter {
       lastFillPollAgeMs: this._lastFillPollAt ? now - this._lastFillPollAt : null,
       clockSkewMs: this.clockSkewMs,
       dmsDeadlineInMs: this._dmsDeadlineMs ? this._dmsDeadlineMs - now : null,
+      dmsRenewAgeMs: this._dmsLastOkAt ? now - this._dmsLastOkAt : null,
+      dmsRenews: this._dmsRenews || 0,
+      dmsFailStreak: this._dmsFailStreak || 0,
       // 死手开关的健康面：续期次数（不耗配额）与已触发次数（吃每日 10 次配额）。
       // 触发次数到顶 = 下一次崩溃就没有自动撤单兜底了，属于运营级告警。
       dms: {
