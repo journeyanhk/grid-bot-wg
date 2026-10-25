@@ -421,6 +421,10 @@ export class GridBot {
   /** @param cfg {marketId, mode, lower, upper, gridCount, sizeBase, leverage, outOfRangeAction} */
   async start(cfg) {
     if (this.running || this._starting) throw new Error('机器人已在运行或正在启动，请勿重复点击。');
+    // 2026-10-25 04:00 实测：停机 4.5 小时后重新 /start，running 立刻变 true 但第一笔行情
+    // 还没到，`_lastActivityAt` 仍停在停机那一刻（16083s 前），server 端看门狗当轮就判
+    // 「活动停滞」把进程 kill 掉——正好砍在铺单中途。开机即重置活动水位。
+    this._touch();
     this._starting = true;
     try { return await this._start(cfg); }
     finally { this._starting = false; }

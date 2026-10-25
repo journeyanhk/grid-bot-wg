@@ -604,6 +604,17 @@ test('异常价格帧：破界需驻留 outDwellMs 才认，跳出去又跳回�
   assert.equal(bot.outOfRange, true, '驻留足够久应触发');
 });
 
+// 停机很久后重新 start：活动水位必须立刻重置，否则看门狗当轮判定停滞并杀进程
+test('start 会重置活动水位（防停机后重启被误杀）', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._lastActivityAt = Date.now() - 16_000_000;   // 停机 4.5 小时
+  await bot.start({ ...CFG });
+  assert.ok(Date.now() - bot._lastActivityAt < 2_000, 'start 后 _lastActivityAt 应是刚刚');
+  await bot.stop({ closePosition: false });
+  bot._stopDynTimer?.();
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {
