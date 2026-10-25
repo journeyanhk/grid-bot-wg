@@ -5,6 +5,7 @@
 //   /api/rs/*  → RISEx 交易所
 //   /api/overview → 三交易所总览（余额+盈亏）
 import http from 'node:http';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -550,6 +551,7 @@ const server = http.createServer(async (request, res) => {
 
     if (p === '/api/overview') {
       return send(res, 200, {
+        eventLoopMaxMs,
         marketGate: marketGate ? marketGate.snapshot() : null,
         de: pick(deBot.getState(), cfg.de.mode),
         ex: pick(exBot.getState(), cfg.ex.mode),
@@ -1019,6 +1021,22 @@ await Promise.all([
 // 2026-10-23 19:57 实测：进程静默 21 分钟，超过死手 deadline（240s），交易所把 264 单
 // 全撤了；进程本身还在（pgrep 有），日志零输出，重启逻辑完全轮不到。这里用"最后一次
 // 真实活动"的时间戳兜底：行情/成交/对账任一刷新都算活着，超过阈值就 exit(1)。
+// 事件循环滞后探针：连续两次「活动停滞」都是 20 分钟量级，但无法区分是「进程被阻塞」
+// 还是「网络/行情路径卡住」。这里每 15 秒采一次 event loop 最大滞后，超过 5 秒就打
+// WARN 并挂到 /api/overview 的 eventLoopMaxMs 上，下次再卡就有证据可查。
+const EVENT_LOOP_WARN_MS = Number(process.env.EVENT_LOOP_WARN_MS || 5000);
+const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+loopDelay.enable();
+let eventLoopMaxMs = 0;
+setInterval(() => {
+  const maxMs = Math.round(loopDelay.max / 1e6);
+  loopDelay.reset();
+  eventLoopMaxMs = maxMs;
+  if (maxMs > EVENT_LOOP_WARN_MS) {
+    logger.warn('server', `事件循环阻塞 ${maxMs}ms（阈值 ${EVENT_LOOP_WARN_MS}ms，15s 采样窗内最大）`);
+  }
+}, 15_000).unref?.();
+
 const WATCHDOG_STALE_MS = Number(process.env.WATCHDOG_STALE_MS || 90_000);
 const watchdog = setInterval(() => {
   const now = Date.now();
