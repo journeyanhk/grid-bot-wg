@@ -41,8 +41,8 @@ const ACCOUNT_POLL_MS = 5000;                 // /v1/account + /v1/positions（�
 const PRICE_POLL_MS = 2000;                   // WS 掉线时的 bbo 兜底（权重 2）
 const WS_SILENCE_MS = 30_000;                 // WS 30 秒没有任何帧 = 半开连接，必须强断重连
 const MARKETS_TTL_MS = 5 * 60_000;            // /v1/markets（权重 20）
-const DMS_REFRESH_MS = 30_000;                // 死手续期间隔（30s：4 分钟 deadline 内留 8 次机会）
-const DMS_DEADLINE_MS = 4 * 60_000;           // 死手 deadline（上限 5 分钟）
+const DMS_REFRESH_MS = 20_000;                // 死手续期间隔（20s：4 分 50 秒 deadline 内留 14 次机会）
+const DMS_DEADLINE_MS = 4 * 60_000 + 50_000;  // 死手 deadline（官方上限 5 分钟，取 4m50s 留余量）
 const DMS_TRIGGER_QUOTA = 10;                 // 官方配额：自动撤单每日最多触发 10 次
 const DMS_TRIGGER_GRACE_MS = 15_000;          // deadline 过后这么久仍没续上 = 已被触发
 const DMS_QUOTA_WINDOW_MS = 24 * 3600_000;
@@ -1085,12 +1085,25 @@ export class ArcusExchange extends EventEmitter {
         }),
       ]);
       this._dmsFailStreak = 0;
+      this._dmsLastOkAt = Date.now();
+      this._dmsQuickRetries = 0;
     } catch (e) {
       this._dmsFailStreak = (this._dmsFailStreak || 0) + 1;
       const left = this._dmsDeadlineMs ? this._dmsDeadlineMs - Date.now() : null;
       // 连续失败且剩余不足 60 秒 = 马上要被交易所撤单，必须升级成告警（不能只写日志）。
       if (this._dmsFailStreak >= 2 && left != null && left < 60_000) {
         logger.error('ar', `死手续期连续失败 ${this._dmsFailStreak} 次，剩余 ${Math.round(left / 1000)}s，超时将被交易所撤光挂单：${e.message}`);
+      }
+      // 2026-10-25 13:33 实测：单次失败后要等满 20~30 秒才重试，网络抖动叠加上超时就把
+      // 4 分钟 deadline 磨光，交易所把挂单全撤。失败即快速重试（3 秒），最多连追 5 次。
+      this._dmsQuickRetries = (this._dmsQuickRetries || 0) + 1;
+      if (this._dmsQuickRetries <= 5 && !this._stopping) {
+        if (this._dmsRetryTimer) clearTimeout(this._dmsRetryTimer);
+        this._dmsRetryTimer = setTimeout(() => {
+          this._dmsRetryTimer = null;
+          this._dmsTick().catch(() => {});
+        }, 3_000);
+        this._dmsRetryTimer.unref?.();
       }
       throw e;
     }
