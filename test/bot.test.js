@@ -615,6 +615,28 @@ test('start 会重置活动水位（防停机后重启被误杀）', async () =>
   bot._stopDynTimer?.();
 });
 
+// 2026-10-26 实测：sizeBase == minOrderSize 时，任何部分成交都低于最小下单量，
+// 旧逻辑直接跳过补腿 → 现价附近 3 小时攒出 10 档永久空洞。改为按最小量补挂。
+test('部分成交低于最小下单量：仍按最小量补挂对腿（不留空洞）', async () => {
+  const mkt = { marketId: 1, name: 'BTC-USD', displayName: 'BTC-USD', symbol: 'BTC',
+    stepSize: 0.00001, stepPrice: 1, maxLeverage: 50, minOrderSize: 0.0001, lastPrice: 150 };
+  const cfg = { ...CFG, sizeBase: 0.0001 };
+  const { bot } = await makeBot({ markets: [mkt] }, cfg);
+  const target = [...bot.active.values()].find((a) => String(a.side).toLowerCase() === 'buy');
+  assert.ok(target, '存在买单档位');
+  const lvl = target.levelIndex;
+  // 只成交 85%（0.000085 < minOrderSize 0.0001）
+  bot.ex.emit('fill', {
+    orderId: 'dust-1', marketId: 1, side: target.side, price: target.price,
+    sizeBase: 0.000085, levelIndex: lvl,
+  });
+  await new Promise((r) => setImmediate(r));
+  const repl = orderAtLevel(bot, lvl + 1);
+  assert.ok(repl, '对腿必须挂出来，不能留空洞');
+  assert.equal(repl.sizeBase, 0.0001, '按最小下单量补挂');
+  assert.ok(bot._dustPromoted > 0, '漂移已记账');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

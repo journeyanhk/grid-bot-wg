@@ -1224,8 +1224,19 @@ export class GridBot {
         // 重试循环。此时跳过补挂，尘埃仓并入持仓由后续成交或手动处理。
         const minSz = this.config.minOrderSize || 0;
         if (minSz > 0 && repl.sizeBase < minSz) {
-          this._alert(`部分成交 ${fillSize} 低于最小下单量 ${minSz}，跳过补挂对腿；尘埃仓并入持仓，由后续成交或手动处理。`);
-        } else {
+          // 2026-10-26 实测：sizeBase 恰好等于最小下单量（Arcus 0.0001）时，任何部分成交
+          // 都低于 minOrderSize，补腿被永久跳过 —— 3 小时在现价附近攒出 10 档空洞，且对账
+          // 不重铺、永不自愈。改为按最小下单量补挂：多出的差额成为极小库存漂移（每档
+          // ≤ minOrderSize），远优于整档永久死亡。
+          const deficit = Math.max(0, Number((minSz - repl.sizeBase).toFixed(10)));
+          this._dustPromoted = (Number(this._dustPromoted) || 0) + deficit;
+          repl.sizeBase = minSz;
+          this._alert(
+            `部分成交 ${fillSize} 低于最小下单量 ${minSz}，已按最小量补挂对腿（累计漂移 ${this._dustPromoted.toFixed(6)}）`,
+            { key: 'dust-promote', level: 'info' },
+          );
+        }
+        {
           // 不能在这里立刻 _place：成交是适配器用同步 for..of emit('fill') 批量下发的，
           // 此时同批后面还没处理的成交单仍留在 active 里，占着补腿目标档位（买@i 补 卖@i+1）。
           // _place 的"一格一单"不变量会因此静默 return —— 一次连吃 N 档就永久丢 N 个补腿，
