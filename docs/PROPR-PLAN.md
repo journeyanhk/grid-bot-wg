@@ -3,6 +3,10 @@
 > 2026-10-26 ｜ 基线 `main@6ef0286` ｜ 目标账户：Propr **live** 环境 5,000 USDC 1-Step
 > **M0 只读探针已完成**（free-trial 账户），实测结论见 §3.4；文档与实测冲突处以 §3.4 为准
 > M1 的设计决议（对 Review 的采纳/驳回）见 [M1-DECISIONS.md](propr/M1-DECISIONS.md)
+>
+> **当前状态（2026-10-26 收尾）**：1-Step 策略验证未通过（4.75 年 walk-forward：验证段通过 10.5%，日切强平实验 5.0%，均低于 30% 门槛）。
+> **结论：不启动真实写测试、不启动 Challenge、不购买 2-Step。** Propr 降级为「真实 HL 执行 + 5k 模拟本金」的沙盒，适配器与风控门保留为工程资产。
+> 依据：[research/trend/REPORT.md](../research/trend/REPORT.md) 与 [DAYCUT-REPORT.md](../research/trend/DAYCUT-REPORT.md)。
 > 官方文档快照：[`docs/propr/`](propr/)（api.md / websocket.md / 规则原文 / OpenAPI）
 > 结论先行：**接入可行，成本不高；但「网格通过挑战」在数学上不成立。工程接入与过关打法必须分成两条线。**
 
@@ -195,7 +199,7 @@ WS   wss://api.propr.xyz/ws   （X-API-Key 头；order.* / position.* / account.
 
 一句话：**网格不是"不够快"，是"赔率结构反了"。** 要过关，网格只能当"验证链路 + 极慢积累"的沙盒，不能当主武器。
 
-> **B 线 v2（4.75 年 walk-forward）结论**：趋势策略在验证段的通过率只有 10.5–22.5%、爆仓率 28–39%，未达到「>30% 且 <10%」的门槛。因此 **M2 真实写测试与 Challenge 实盘均不启动**。详见 `research/trend/REPORT.md`。
+> **B 线 v2（4.75 年 walk-forward）结论**：趋势策略在验证段的通过率只有 10.5–22.5%、爆仓率 28–39%，未达到「>30% 且 <10%」的门槛。**日切强平结构实验也证伪**（1-Step：A 10.0% → B 5.0%）。因此 **M2 真实写测试与 Challenge 实盘均不启动**。详见 `research/trend/REPORT.md` 与 `research/trend/DAYCUT-REPORT.md`。
 
 ---
 

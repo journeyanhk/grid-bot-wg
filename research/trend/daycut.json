@@ -1,0 +1,632 @@
+[
+ {
+  "from": 1672099200000,
+  "params": [
+   0.005,
+   2.5,
+   2.0,
+   4
+  ],
+  "btc60": 0.6545,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 208.9,
+   "med_fees": 9.5
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 299.3,
+   "med_fees": 34.5
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 50.0,
+   "breach_pct": 0.0,
+   "med_days": 12.7,
+   "med_dd": 142.7,
+   "med_fees": 7.6
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 0.0,
+   "med_days": 15.4,
+   "med_dd": 283.8,
+   "med_fees": 30.8
+  }
+ },
+ {
+  "from": 1679875200000,
+  "params": [
+   0.005,
+   2.0,
+   3.0,
+   4
+  ],
+  "btc60": 0.0914,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 25.0,
+   "med_days": null,
+   "med_dd": 330.0,
+   "med_fees": 15.0
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 342.2,
+   "med_fees": 42.0
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 364.7,
+   "med_fees": 16.0
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 50.0,
+   "med_days": null,
+   "med_dd": 389.8,
+   "med_fees": 50.3
+  }
+ },
+ {
+  "from": 1687651200000,
+  "params": [
+   0.005,
+   2.0,
+   2.0,
+   4
+  ],
+  "btc60": -0.1288,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 75.0,
+   "med_days": null,
+   "med_dd": 244.9,
+   "med_fees": 19.7
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 75.0,
+   "med_days": null,
+   "med_dd": 291.7,
+   "med_fees": 73.8
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 75.0,
+   "breach_pct": 0.0,
+   "med_days": 43.9,
+   "med_dd": 154.3,
+   "med_fees": 18.3
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 317.7,
+   "med_fees": 87.1
+  }
+ },
+ {
+  "from": 1695427200000,
+  "params": [
+   0.005,
+   3.0,
+   2.0,
+   1
+  ],
+  "btc60": 0.6512,
+  "A": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 50.0,
+   "med_days": 32.7,
+   "med_dd": 238.0,
+   "med_fees": 23.2
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 432.2,
+   "med_fees": 101.1
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 100.0,
+   "breach_pct": 0.0,
+   "med_days": 15.8,
+   "med_dd": 178.8,
+   "med_fees": 15.8
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 50.0,
+   "med_days": 8.8,
+   "med_dd": 379.2,
+   "med_fees": 79.8
+  }
+ },
+ {
+  "from": 1703203200000,
+  "params": [
+   0.005,
+   2.0,
+   3.0,
+   4
+  ],
+  "btc60": 0.5422,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 25.0,
+   "med_days": null,
+   "med_dd": 209.4,
+   "med_fees": 8.3
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 25.0,
+   "med_days": 43.9,
+   "med_dd": 173.7,
+   "med_fees": 38.8
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 50.0,
+   "breach_pct": 25.0,
+   "med_days": 41.9,
+   "med_dd": 181.1,
+   "med_fees": 7.4
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 75.0,
+   "breach_pct": 0.0,
+   "med_days": 47.1,
+   "med_dd": 163.9,
+   "med_fees": 39.2
+  }
+ },
+ {
+  "from": 1710979200000,
+  "params": [
+   0.01,
+   2.0,
+   2.0,
+   4
+  ],
+  "btc60": -0.0407,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 279.8,
+   "med_fees": 4.7
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 229.1,
+   "med_fees": 6.9
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 408.3,
+   "med_fees": 12.0
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 424.2,
+   "med_fees": 22.9
+  }
+ },
+ {
+  "from": 1718755200000,
+  "params": [
+   0.01,
+   2.5,
+   3.0,
+   4
+  ],
+  "btc60": -0.1157,
+  "A": {
+   "n": 4,
+   "pass_pct": 50.0,
+   "breach_pct": 0.0,
+   "med_days": 42.2,
+   "med_dd": 362.0,
+   "med_fees": 9.6
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 75.0,
+   "med_days": null,
+   "med_dd": 481.6,
+   "med_fees": 51.2
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 100.0,
+   "breach_pct": 0.0,
+   "med_days": 17.7,
+   "med_dd": 150.7,
+   "med_fees": 4.8
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 75.0,
+   "med_days": 5.9,
+   "med_dd": 400.8,
+   "med_fees": 35.3
+  }
+ },
+ {
+  "from": 1726531200000,
+  "params": [
+   0.01,
+   2.5,
+   2.0,
+   1
+  ],
+  "btc60": 0.812,
+  "A": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 75.0,
+   "med_days": 25.8,
+   "med_dd": 225.5,
+   "med_fees": 15.7
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 75.0,
+   "med_days": 35.8,
+   "med_dd": 254.7,
+   "med_fees": 29.4
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 100.0,
+   "breach_pct": 0.0,
+   "med_days": 19.1,
+   "med_dd": 242.4,
+   "med_fees": 27.3
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 75.0,
+   "breach_pct": 25.0,
+   "med_days": 24.8,
+   "med_dd": 265.8,
+   "med_fees": 43.5
+  }
+ },
+ {
+  "from": 1734307200000,
+  "params": [
+   0.005,
+   2.5,
+   2.0,
+   4
+  ],
+  "btc60": -0.1938,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 166.7,
+   "med_fees": 6.4
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 171.7,
+   "med_fees": 33.6
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 166.7,
+   "med_fees": 6.4
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 171.7,
+   "med_fees": 33.6
+  }
+ },
+ {
+  "from": 1742083200000,
+  "params": [
+   0.005,
+   2.5,
+   2.0,
+   4
+  ],
+  "btc60": 0.2545,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 151.0,
+   "med_fees": 7.0
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 139.1,
+   "med_fees": 35.8
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 0.0,
+   "med_days": 36.7,
+   "med_dd": 123.2,
+   "med_fees": 6.9
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 139.1,
+   "med_fees": 35.8
+  }
+ },
+ {
+  "from": 1749859200000,
+  "params": [
+   0.01,
+   2.0,
+   3.0,
+   1
+  ],
+  "btc60": 0.0921,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 375.4,
+   "med_fees": 37.9
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 483.1,
+   "med_fees": 63.4
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 50.0,
+   "breach_pct": 50.0,
+   "med_days": 14.9,
+   "med_dd": 315.9,
+   "med_fees": 34.7
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 75.0,
+   "med_days": 10.3,
+   "med_dd": 403.5,
+   "med_fees": 40.7
+  }
+ },
+ {
+  "from": 1757635200000,
+  "params": [
+   0.005,
+   2.0,
+   2.0,
+   4
+  ],
+  "btc60": -0.2086,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 75.0,
+   "med_days": null,
+   "med_dd": 243.6,
+   "med_fees": 16.4
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 75.0,
+   "med_days": null,
+   "med_dd": 286.4,
+   "med_fees": 37.3
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 275.7,
+   "med_fees": 19.5
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 313.6,
+   "med_fees": 52.5
+  }
+ },
+ {
+  "from": 1765411200000,
+  "params": [
+   0.005,
+   3.0,
+   3.0,
+   1
+  ],
+  "btc60": -0.239,
+  "A": {
+   "n": 4,
+   "pass_pct": 50.0,
+   "breach_pct": 50.0,
+   "med_days": 30.8,
+   "med_dd": 217.6,
+   "med_fees": 21.8
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 50.0,
+   "med_days": 36.9,
+   "med_dd": 318.0,
+   "med_fees": 45.3
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 75.0,
+   "breach_pct": 0.0,
+   "med_days": 21.0,
+   "med_dd": 235.3,
+   "med_fees": 35.6
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 50.0,
+   "breach_pct": 25.0,
+   "med_days": 23.7,
+   "med_dd": 223.5,
+   "med_fees": 41.8
+  }
+ },
+ {
+  "from": 1773187200000,
+  "params": [
+   0.005,
+   2.0,
+   2.0,
+   4
+  ],
+  "btc60": -0.1056,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 117.2,
+   "med_fees": 11.8
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 226.3,
+   "med_fees": 56.5
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 25.0,
+   "breach_pct": 0.0,
+   "med_days": 54.2,
+   "med_dd": 117.2,
+   "med_fees": 11.8
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 226.3,
+   "med_fees": 56.5
+  }
+ },
+ {
+  "from": 1780963200000,
+  "params": [
+   0.005,
+   2.0,
+   2.0,
+   4
+  ],
+  "btc60": 0.2706,
+  "A": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 50.0,
+   "med_days": null,
+   "med_dd": 335.6,
+   "med_fees": 20.3
+  },
+  "B": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 361.3,
+   "med_fees": 49.2
+  },
+  "C": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 0.0,
+   "med_days": null,
+   "med_dd": 374.2,
+   "med_fees": 23.1
+  },
+  "D": {
+   "n": 4,
+   "pass_pct": 0.0,
+   "breach_pct": 100.0,
+   "med_days": null,
+   "med_dd": 403.7,
+   "med_fees": 57.9
+  }
+ }
+]
