@@ -2,6 +2,7 @@
 
 > 2026-10-26 ｜ 基线 `main@6ef0286` ｜ 目标账户：Propr **live** 环境 5,000 USDC 1-Step
 > **M0 只读探针已完成**（free-trial 账户），实测结论见 §3.4；文档与实测冲突处以 §3.4 为准
+> M1 的设计决议（对 Review 的采纳/驳回）见 [M1-DECISIONS.md](propr/M1-DECISIONS.md)
 > 官方文档快照：[`docs/propr/`](propr/)（api.md / websocket.md / 规则原文 / OpenAPI）
 > 结论先行：**接入可行，成本不高；但「网格通过挑战」在数学上不成立。工程接入与过关打法必须分成两条线。**
 
@@ -93,7 +94,7 @@ WS   wss://api.propr.xyz/ws   （X-API-Key 头；order.* / position.* / account.
 
 | # | 事实 | 后果 |
 |---|---|---|
-| 1 | `positionSide` 有 long / short 两套；**卖单不带 `reduceOnly` 是开新空仓，不是平多** | 中性网格会同时持多空 → 双倍保证金、两个强平价、双向被套。**必须只跑单向网格** |
+| 1 | `positionSide` 有 long / short 两套；**卖单不带 `reduceOnly` 是开新空仓，不是平多**（官方文档明写；M0 未验证两个非零仓位并存） | 中性网格会同时持多空 → 双倍保证金、两个强平价、双向被套。**必须只跑单向网格** |
 | 2 | 同一请求只允许 1 个入场单（`13066 MULTIPLE_ENTRY_ORDERS`） | `placeLimitOrders` 必须串行 fan-out；要处理"部分成功" |
 | 3 | `GET /orders` **不能按 intentId 过滤** | 超时后无法"查单确认"，只能同 intentId 重发探活 |
 | 4 | 相同资产同方向的多个订单会**合并成一个 position**，`positionId` 不变 | 不能靠 position 区分"我的单"；必须内部记账 |
@@ -108,7 +109,7 @@ WS   wss://api.propr.xyz/ws   （X-API-Key 头；order.* / position.* / account.
 
 | 附件判断 | 实际 | 影响 |
 |---|---|---|
-| "Propr 是 net 单向净仓" | **错**。双边独立持仓，卖单不带 reduceOnly 即开空 | 中性网格会双边持仓。**采纳附件提的 `positionEffect` 重构是过度设计**：只跑 long/short，现成的 `isReduceOnly()` 已经正确，核心代码一行不改 |
+| "Propr 是 net 单向净仓" | **与官方文档不符**：文档明写"卖单不带 reduceOnly 会开新空仓"。M0 实测只看到 3 张 long 买单 + 3 张 short 卖单并存，未见两个非零仓位并存（需写测确认） | 无论哪种模型，单向网格都是安全解。**附件提的 `positionEffect` 重构是过度设计**：只跑 long/short，现成的 `isReduceOnly()` 已经正确，核心代码一行不改 |
 | "有 `getBalance()/getEquity()/getAccountState()`" | 文档 14 个端点里没有；只有未文档化的 `GET /accounts/{id}` 与 WS `account.updated` | 风控必须自己记总账 + 定期校准；取不到就 fail-closed |
 | "批量 `placeOrders(orders)`" | 一次只能一个入场单 | 串行 fan-out；批量语义要自己承担 |
 | "按 `intentId` 查询确认" | `GET /orders` 无 intentId 过滤 | 只能同 id 重发；`13084` 的真实语义要实测 |
