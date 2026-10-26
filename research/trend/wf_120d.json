@@ -1,0 +1,241 @@
+{
+ "fee_mode": "maker_in_taker_out",
+ "grid": "small",
+ "folds": [
+  {
+   "test_from": 1672099200000,
+   "test_to": 1687651200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 237.6,
+    "med_trades": 39,
+    "med_fees": 11.7,
+    "worst_day": 84.6
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 28.6,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 287.3,
+    "med_trades": 34,
+    "med_fees": 16.7,
+    "worst_day": 110.8
+   }
+  },
+  {
+   "test_from": 1687651200000,
+   "test_to": 1703203200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 66.7,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 51.7,
+    "med_dd": 173.4,
+    "med_trades": 35,
+    "med_fees": 26.4,
+    "worst_day": 99.5
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 100.0,
+    "daily_pct": 100.0,
+    "med_days": null,
+    "med_dd": 245.2,
+    "med_trades": 13,
+    "med_fees": 12.9,
+    "worst_day": 169.5
+   }
+  },
+  {
+   "test_from": 1703203200000,
+   "test_to": 1718755200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.5,
+    "tp_r": 3.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 33.3,
+    "daily_pct": 33.3,
+    "med_days": null,
+    "med_dd": 313.8,
+    "med_trades": 28,
+    "med_fees": 14.7,
+    "worst_day": 101.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 405.7,
+    "med_trades": 34,
+    "med_fees": 14.1,
+    "worst_day": 111.1
+   }
+  },
+  {
+   "test_from": 1718755200000,
+   "test_to": 1734307200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 3.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 1
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 33.3,
+    "daily_pct": 0.0,
+    "med_days": 13.0,
+    "med_dd": 274.1,
+    "med_trades": 34,
+    "med_fees": 39.1,
+    "worst_day": 85.5
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 100.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 104.6,
+    "med_dd": 367.3,
+    "med_trades": 86,
+    "med_fees": 62.7,
+    "worst_day": 113.2
+   }
+  },
+  {
+   "test_from": 1734307200000,
+   "test_to": 1749859200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 66.7,
+    "breach_pct": 33.3,
+    "daily_pct": 33.3,
+    "med_days": 45.2,
+    "med_dd": 191.3,
+    "med_trades": 12,
+    "med_fees": 10.1,
+    "worst_day": 137.6
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 14.3,
+    "breach_pct": 14.3,
+    "daily_pct": 0.0,
+    "med_days": 107.1,
+    "med_dd": 332.7,
+    "med_trades": 34,
+    "med_fees": 27.5,
+    "worst_day": 99.8
+   }
+  },
+  {
+   "test_from": 1749859200000,
+   "test_to": 1765411200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 35.3,
+    "med_dd": 327.8,
+    "med_trades": 33,
+    "med_fees": 25.1,
+    "worst_day": 95.4
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 14.3,
+    "breach_pct": 85.7,
+    "daily_pct": 85.7,
+    "med_days": 93.2,
+    "med_dd": 432.0,
+    "med_trades": 30,
+    "med_fees": 36.8,
+    "worst_day": 300.4
+   }
+  },
+  {
+   "test_from": 1765411200000,
+   "test_to": 1780963200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 101.2,
+    "med_dd": 327.8,
+    "med_trades": 30,
+    "med_fees": 31.2,
+    "worst_day": 118.8
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 28.6,
+    "breach_pct": 28.6,
+    "daily_pct": 28.6,
+    "med_days": 32.0,
+    "med_dd": 188.3,
+    "med_trades": 14,
+    "med_fees": 15.5,
+    "worst_day": 93.6
+   }
+  }
+ ],
+ "summary": {
+  "pass_pct": 22.5,
+  "breach_pct": 36.7
+ }
+}

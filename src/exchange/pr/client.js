@@ -24,6 +24,13 @@ export const GET_ROUTES = Object.freeze({
 
 const NO_AUTH = new Set(['health', 'healthServices']);
 
+/** 写路由白名单。只有 sim-write / challenge 模式会放开（allowWrites）。 */
+export const WRITE_ROUTES = Object.freeze({
+  createOrder: (id) => `/accounts/${id}/orders`,
+  cancelOrder: (id, orderId) => `/accounts/${id}/orders/${orderId}/cancel`,
+  marginConfig: (id, configId) => `/accounts/${id}/margin-config/${configId}`,
+});
+
 // ULID：26 字符，时间有序，适合做 intentId（幂等键）
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 export function ulid(now = Date.now()) {
@@ -53,6 +60,7 @@ export class ProprClient {
     this.fetchImpl = opts.fetchImpl || globalThis.fetch;
     this.maxPages = Number(opts.maxPages) || 20;
     this.pageLimit = Number(opts.pageLimit) || 100;
+    this.allowWrites = !!opts.allowWrites;   // 默认 false：M1 只读语义不变
     this.writeAttemptCount = 0;
     this.lastLatencyMs = null;
     this.requestCount = 0;
@@ -131,15 +139,46 @@ export class ProprClient {
   getMarginConfig(id, asset) { return this.get('marginConfig', [id, asset]); }
   getLeverageLimits() { return this.get('leverageLimits'); }
 
-  // ── 写操作：M1 一律不可达，但保留计数与明确的失败面 ────────────────────
+  // ── 写操作：只有 allowWrites 才可达；否则计数 + 抛 ProprReadOnlyError ──────
   _refuseWrite(what) {
     this.writeAttemptCount++;
     throw new ProprReadOnlyError(what);
   }
-  placeLimitOrder() { return this._refuseWrite('下单'); }
-  placeLimitOrders() { return this._refuseWrite('批量下单'); }
-  cancelOrder() { return this._refuseWrite('撤单'); }
-  cancelAll() { return this._refuseWrite('批量撤单'); }
-  closePosition() { return this._refuseWrite('平仓'); }
+
+  // 安全网：client 本身不提供业务写方法，误用一律拒绝（真实写路径在 ProprWriter）
+  placeLimitOrder() { return this._refuseWrite('下单（请用 ProprWriter）'); }
+  placeLimitOrders() { return this._refuseWrite('批量下单（请用 ProprWriter）'); }
+  cancelOrder() { return this._refuseWrite('撤单（请用 ProprWriter）'); }
+  cancelAll() { return this._refuseWrite('批量撤单（请用 ProprWriter）'); }
+  closePosition() { return this._refuseWrite('平仓（请用 ProprWriter）'); }
   setLeverage() { return this._refuseWrite('修改杠杆'); }
+
+  async post(route, args = [], body = null) {
+    const build = WRITE_ROUTES[route];
+    if (typeof build !== 'function') throw new Error(`Propr 写路由未登记: ${route}`);
+    if (!this.allowWrites) this._refuseWrite(route);
+    this.writeAttemptCount++;
+    const path = build(...args);
+    const url = this._url(path, {});
+    let res;
+    try {
+      res = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-API-Key': this.apiKey },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (e) {
+      const err = new ProprApiError(0, null, `网络错误: ${e.message}`, { endpoint: path, method: 'POST', retryable: true, mayExist: true });
+      err.cause = e;
+      throw err;
+    }
+    const text = await res.text();
+    let parsed = null;
+    if (text) { try { parsed = JSON.parse(text); } catch { parsed = { message: text.slice(0, 300) }; } }
+    if (!res.ok) {
+      throw new ProprApiError(res.status, parsed?.code ?? null, parsed?.message || `HTTP ${res.status}`, { endpoint: path, method: 'POST' });
+    }
+    return parsed;
+  }
 }

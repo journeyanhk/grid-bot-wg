@@ -195,6 +195,8 @@ WS   wss://api.propr.xyz/ws   （X-API-Key 头；order.* / position.* / account.
 
 一句话：**网格不是"不够快"，是"赔率结构反了"。** 要过关，网格只能当"验证链路 + 极慢积累"的沙盒，不能当主武器。
 
+> **B 线 v2（4.75 年 walk-forward）结论**：趋势策略在验证段的通过率只有 10.5–22.5%、爆仓率 28–39%，未达到「>30% 且 <10%」的门槛。因此 **M2 真实写测试与 Challenge 实盘均不启动**。详见 `research/trend/REPORT.md`。
+
 ---
 
 ## 5. 架构方案（工程接入）
@@ -331,7 +333,7 @@ class ProprExchange extends EventEmitter {
 |---|---|---|---|
 | M0 ✅ | 只读探针（free 账户）：13 个端点 + WS，落 `docs/propr/PROBE.md` | 0.5 | **已完成**：费率 1.5/4.5bp、`marginBalance`=权益、规则可从 `/challenges.phases` 读、accountId 前缀可选；`13084` 与 PUT 杠杆仍需写测 |
 | M1 ✅ | 适配器读路径 + paper + fixture 单测 + shadow CLI | 1.5 | **已完成**：`src/exchange/pr/{client,errors,mapper,market,paper,shadow,batch,index}.js`、`scripts/pr-shadow.mjs`、5 个测试文件全绿；实盘 shadow 2 轮 `writeAttemptCount=0` |
-| M2 | 写路径（下单/撤单/平仓/幂等） | 1.0 | mock 服务端覆盖部分成功、超时、13084、无仓可减 |
+| M2 ✅（mock） | 写路径 + 风险写门 | 1.0 | **已完成**：`write.js` / `risk.js` + mock 测试 8 个场景；**真实写测试按 B 的结论不启动**（见 research/trend/REPORT.md） |
 | M3 | 风控门 + 持久化 + 日切 + 重启 | 1.0 | 单测覆盖：日切、权益过期、breach 检测、重启重锚 |
 | M4 | server/dashboard 接线 | 0.5 | 面板能启停、能看到风控状态 |
 | M5 | shadow 24–48h（live 只读） | 1（日历） | 与官方面板逐项对齐，误差 < $0.5 |

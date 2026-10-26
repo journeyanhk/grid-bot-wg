@@ -1,0 +1,505 @@
+{
+ "fee_mode": "maker_in_taker_out",
+ "grid": "small",
+ "folds": [
+  {
+   "test_from": 1672099200000,
+   "test_to": 1679875200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 263.8,
+    "med_trades": 25,
+    "med_fees": 6.9,
+    "worst_day": 73.0
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 211.8,
+    "med_trades": 19,
+    "med_fees": 9.5,
+    "worst_day": 117.5
+   }
+  },
+  {
+   "test_from": 1679875200000,
+   "test_to": 1687651200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 3.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 55.0,
+    "med_dd": 257.7,
+    "med_trades": 20,
+    "med_fees": 10.7,
+    "worst_day": 91.3
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 28.6,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 344.0,
+    "med_trades": 26,
+    "med_fees": 14.8,
+    "worst_day": 70.7
+   }
+  },
+  {
+   "test_from": 1687651200000,
+   "test_to": 1695427200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 168.6,
+    "med_trades": 21,
+    "med_fees": 8.2,
+    "worst_day": 101.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 71.4,
+    "daily_pct": 71.4,
+    "med_days": null,
+    "med_dd": 245.0,
+    "med_trades": 26,
+    "med_fees": 21.5,
+    "worst_day": 169.4
+   }
+  },
+  {
+   "test_from": 1695427200000,
+   "test_to": 1703203200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 3.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 1
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 32.6,
+    "med_dd": 247.4,
+    "med_trades": 58,
+    "med_fees": 51.8,
+    "worst_day": 116.7
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 28.6,
+    "breach_pct": 42.9,
+    "daily_pct": 42.9,
+    "med_days": 28.9,
+    "med_dd": 286.0,
+    "med_trades": 20,
+    "med_fees": 22.0,
+    "worst_day": 102.8
+   }
+  },
+  {
+   "test_from": 1703203200000,
+   "test_to": 1710979200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 3.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 33.3,
+    "daily_pct": 33.3,
+    "med_days": 18.8,
+    "med_dd": 159.9,
+    "med_trades": 6,
+    "med_fees": 4.3,
+    "worst_day": 83.3
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 14.3,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 155.2,
+    "med_trades": 15,
+    "med_fees": 8.9,
+    "worst_day": 97.1
+   }
+  },
+  {
+   "test_from": 1710979200000,
+   "test_to": 1718755200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 66.7,
+    "breach_pct": 33.3,
+    "daily_pct": 33.3,
+    "med_days": 11.3,
+    "med_dd": 297.5,
+    "med_trades": 6,
+    "med_fees": 9.3,
+    "worst_day": 79.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 100.0,
+    "daily_pct": 100.0,
+    "med_days": null,
+    "med_dd": 249.3,
+    "med_trades": 3,
+    "med_fees": 3.2,
+    "worst_day": 164.1
+   }
+  },
+  {
+   "test_from": 1718755200000,
+   "test_to": 1726531200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.5,
+    "tp_r": 3.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 66.7,
+    "breach_pct": 33.3,
+    "daily_pct": 33.3,
+    "med_days": 21.4,
+    "med_dd": 238.0,
+    "med_trades": 7,
+    "med_fees": 7.4,
+    "worst_day": 133.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 42.9,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 42.1,
+    "med_dd": 499.9,
+    "med_trades": 13,
+    "med_fees": 10.0,
+    "worst_day": 116.1
+   }
+  },
+  {
+   "test_from": 1726531200000,
+   "test_to": 1734307200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 1
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 66.7,
+    "breach_pct": 33.3,
+    "daily_pct": 33.3,
+    "med_days": 13.2,
+    "med_dd": 280.1,
+    "med_trades": 14,
+    "med_fees": 21.7,
+    "worst_day": 148.1
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 28.6,
+    "breach_pct": 71.4,
+    "daily_pct": 71.4,
+    "med_days": 27.5,
+    "med_dd": 226.0,
+    "med_trades": 11,
+    "med_fees": 16.9,
+    "worst_day": 166.9
+   }
+  },
+  {
+   "test_from": 1734307200000,
+   "test_to": 1742083200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 182.9,
+    "med_trades": 18,
+    "med_fees": 7.9,
+    "worst_day": 67.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 166.4,
+    "med_trades": 18,
+    "med_fees": 6.7,
+    "worst_day": 47.9
+   }
+  },
+  {
+   "test_from": 1742083200000,
+   "test_to": 1749859200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.5,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 224.0,
+    "med_trades": 17,
+    "med_fees": 5.7,
+    "worst_day": 65.5
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 124.6,
+    "med_trades": 14,
+    "med_fees": 6.4,
+    "worst_day": 48.8
+   }
+  },
+  {
+   "test_from": 1749859200000,
+   "test_to": 1757635200000,
+   "params": {
+    "risk": 0.01,
+    "stop_atr": 2.0,
+    "tp_r": 3.0,
+    "atr": 14,
+    "tf_h": 1
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 100.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 16.7,
+    "med_dd": 223.1,
+    "med_trades": 20,
+    "med_fees": 29.6,
+    "worst_day": 141.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 14.3,
+    "breach_pct": 85.7,
+    "daily_pct": 85.7,
+    "med_days": 5.3,
+    "med_dd": 292.3,
+    "med_trades": 13,
+    "med_fees": 19.5,
+    "worst_day": 153.4
+   }
+  },
+  {
+   "test_from": 1757635200000,
+   "test_to": 1765411200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 207.0,
+    "med_trades": 27,
+    "med_fees": 16.2,
+    "worst_day": 82.3
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 85.7,
+    "daily_pct": 85.7,
+    "med_days": null,
+    "med_dd": 242.1,
+    "med_trades": 17,
+    "med_fees": 15.3,
+    "worst_day": 162.1
+   }
+  },
+  {
+   "test_from": 1765411200000,
+   "test_to": 1773187200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 3.0,
+    "tp_r": 3.0,
+    "atr": 14,
+    "tf_h": 1
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 33.3,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": 58.9,
+    "med_dd": 232.1,
+    "med_trades": 48,
+    "med_fees": 43.4,
+    "worst_day": 91.2
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 42.9,
+    "breach_pct": 42.9,
+    "daily_pct": 0.0,
+    "med_days": 31.7,
+    "med_dd": 221.0,
+    "med_trades": 20,
+    "med_fees": 21.9,
+    "worst_day": 116.9
+   }
+  },
+  {
+   "test_from": 1773187200000,
+   "test_to": 1780963200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 134.2,
+    "med_trades": 28,
+    "med_fees": 25.1,
+    "worst_day": 96.9
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 118.7,
+    "med_trades": 21,
+    "med_fees": 12.6,
+    "worst_day": 69.7
+   }
+  },
+  {
+   "test_from": 1780963200000,
+   "test_to": 1788739200000,
+   "params": {
+    "risk": 0.005,
+    "stop_atr": 2.0,
+    "tp_r": 2.0,
+    "atr": 14,
+    "tf_h": 4
+   },
+   "train": {
+    "n": 3,
+    "pass_pct": 0.0,
+    "breach_pct": 0.0,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 284.8,
+    "med_trades": 26,
+    "med_fees": 16.9,
+    "worst_day": 82.0
+   },
+   "test": {
+    "n": 7,
+    "pass_pct": 0.0,
+    "breach_pct": 42.9,
+    "daily_pct": 0.0,
+    "med_days": null,
+    "med_dd": 338.8,
+    "med_trades": 23,
+    "med_fees": 21.5,
+    "worst_day": 110.6
+   }
+  }
+ ],
+ "summary": {
+  "pass_pct": 10.5,
+  "breach_pct": 39.1
+ }
+}
