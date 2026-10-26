@@ -14,10 +14,13 @@ const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 const MASS_VANISH_CONFIRM_ROUNDS = 3;
 // 阶梯"塌陷"（非全撤）：死手/交易所批量撤销后仍残留少数挂单时 massVanish 不会触发，
 // 旧逻辑只做 prune，没有重铺出口，网格会长期空转（2026-10-26 实测空了 4.5 小时）。
-// 连续 N 轮缺口占比 ≥50% 才视为塌陷并重建，抖动期内不动手。
+// 连续 N 轮缺口占比 ≥25% 才视为塌陷并重建，抖动期内不动手。
+// 25%（而非 50%）的原因：2026-10-26 15:22 一笔市价扫单把 idx 34~60 共 27 张卖单
+// 一次吃掉，缺口 27/61 = 44% < 50%，旧阈值永不触发，上半段阶梯空了 37 分钟只能人工
+// refill。单边扫单造成的缺格天然只占一半左右，所以阈值必须低于 50%。
 const LADDER_COLLAPSE_ROUNDS = 4;
-const LADDER_COLLAPSE_RATIO = 0.5;
-const LADDER_COLLAPSE_MIN_HOLES = 10;
+const LADDER_COLLAPSE_RATIO = 0.25;
+const LADDER_COLLAPSE_MIN_HOLES = 8;
 
 export class GridBot {
   constructor(exchange, opts = {}) {

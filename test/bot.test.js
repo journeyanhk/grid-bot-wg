@@ -638,6 +638,30 @@ test('死手全撤后残留少数单（非 0 单）：连续多轮大面积缺�
   assert.equal(rebuilds, 1, '连续 4 轮大面积缺格应自动重铺一次');
 });
 
+// 2026-10-26 15:22 实测：一笔市价扫单吃掉 idx 34~60 共 27 张卖单（缺口 27/61 = 44%），
+// 旧的 50% 阈值永不触发，上半段阶梯空了 37 分钟。单边扫单天然只空一半，阈值必须低于 50%。
+test('单边扫单吞掉 44% 档位：连续四轮也应自动重铺', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.lastPrice = 120;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', lower: 90, upper: 150, gridCount: 60, sizeBase: 0.0001 };
+  bot.grid = { lower: 90, upper: 150, levels: Array.from({ length: 61 }, (_, i) => 90 + i), spacing: 1, sizeBase: 0.0001, marketId: 1 };
+  let rebuilds = 0;
+  bot.refillGrid = async () => { rebuilds += 1; };
+  for (let i = 0; i <= 33; i += 1) {
+    bot.active.set(`s${i}`, { orderId: `s${i}`, levelIndex: i, side: i < 30 ? 'buy' : 'sell', price: 90 + i, sizeBase: 0.0001 });
+    ex.orders.set(`s${i}`, { marketId: 1, side: i < 30 ? 'buy' : 'sell', price: 90 + i, sizeBase: 0.0001, levelIndex: i, orderId: `s${i}` });
+  }
+  for (let i = 0; i < 3; i += 1) await bot.reconcileOpenOrders();
+  await sleep(20);
+  assert.equal(rebuilds, 0, '前 3 轮还在确认期');
+  await bot.reconcileOpenOrders();
+  await sleep(20);
+  assert.equal(rebuilds, 1, '27/61 = 44% 缺口也要重铺');
+});
+
 test('部分成交低于最小下单量：仍按最小量补挂对腿（不留空洞）', async () => {
   const mkt = { marketId: 1, name: 'BTC-USD', displayName: 'BTC-USD', symbol: 'BTC',
     stepSize: 0.00001, stepPrice: 1, maxLeverage: 50, minOrderSize: 0.0001, lastPrice: 150 };
