@@ -1912,6 +1912,7 @@ export class GridBot {
     if (Date.now() - (this._lastDriftAlertAt || 0) < 60 * 60_000) return;
     this._lastDriftAlertAt = Date.now();
     this._lastDriftGrids = driftGrids;
+    this._changed(); // 让漂移基线落盘：_alert 本身不触发持久化，不落盘则每次重启都会重播一条同样的告警
     this._alert(`⚠️ [${this.config.displayName}] 库存与成交流水不符：实际持仓 ${round4(actual)} 币（基线 ${round4(base)}），成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
   }
 
