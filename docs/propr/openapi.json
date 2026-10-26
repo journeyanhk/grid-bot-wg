@@ -1,0 +1,664 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Propr Trading API",
+    "description": "Propr trading API for Hyperliquid perpetual futures. All monetary values are strings with decimal precision.",
+    "version": "1.0.0",
+    "contact": {
+      "url": "https://app.propr.xyz"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.propr.xyz/v1",
+      "description": "Production"
+    },
+    {
+      "url": "https://api.beta.propr.xyz/v1",
+      "description": "Beta / Sandbox"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Health check",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "enum": ["OK"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/services": {
+      "get": {
+        "operationId": "getHealthServices",
+        "summary": "Service dependency health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "core": { "type": "string", "enum": ["OK", "ERROR"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/access/refresh": {
+      "post": {
+        "operationId": "refreshAccessToken",
+        "summary": "Exchange refresh token for a new 30-minute access token",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["refreshToken"],
+                "properties": {
+                  "refreshToken": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accessToken": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/users/me": {
+      "get": {
+        "operationId": "getCurrentUser",
+        "summary": "Get current user profile",
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": { "type": "string" },
+                    "email": { "type": "string" },
+                    "firstName": { "type": "string", "nullable": true },
+                    "lastName": { "type": "string", "nullable": true },
+                    "createdAt": { "type": "string", "format": "date-time" },
+                    "updatedAt": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/challenges": {
+      "get": {
+        "operationId": "listChallenges",
+        "summary": "List available challenges",
+        "security": [],
+        "parameters": [
+          { "name": "challengeId", "in": "query", "schema": { "type": "string" } },
+          { "name": "productId", "in": "query", "schema": { "type": "string" } },
+          { "name": "currency", "in": "query", "schema": { "type": "string", "enum": ["USDC", "USD", "EUR"] } },
+          { "name": "exchange", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Challenge list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/challenge-attempts": {
+      "get": {
+        "operationId": "listChallengeAttempts",
+        "summary": "List your challenge attempts (contains accountId)",
+        "parameters": [
+          { "name": "attemptId", "in": "query", "schema": { "type": "string" } },
+          { "name": "challengeId", "in": "query", "schema": { "type": "string" } },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["active", "passed", "failed"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Attempt list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedResponse"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/challenge-attempts/{attemptId}": {
+      "get": {
+        "operationId": "getChallengeAttempt",
+        "summary": "Get specific challenge attempt details",
+        "parameters": [
+          { "name": "attemptId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Attempt details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/accounts/{accountId}/orders": {
+      "get": {
+        "operationId": "listOrders",
+        "summary": "List orders on account",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "orderId", "in": "query", "schema": { "type": "string" } },
+          { "name": "tradeId", "in": "query", "schema": { "type": "string" } },
+          { "name": "positionId", "in": "query", "schema": { "type": "string" } },
+          { "name": "base", "in": "query", "schema": { "type": "string" } },
+          { "name": "quote", "in": "query", "schema": { "type": "string" } },
+          { "name": "side", "in": "query", "schema": { "type": "string", "enum": ["buy", "sell"] } },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["pending", "open", "partially_filled", "filled", "cancelled", "expired", "rejected"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PaginatedResponse" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Order" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "operationId": "createOrders",
+        "summary": "Create one or more orders (returns 201)",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["orders"],
+                "properties": {
+                  "orders": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/OrderRequest" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Orders created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Order" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/accounts/{accountId}/orders/{orderId}/cancel": {
+      "post": {
+        "operationId": "cancelOrder",
+        "summary": "Cancel an order (returns 201 on success, 400 if already done)",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "201": {
+            "description": "Order cancelled successfully (NOTE: 201, not 200)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Order" }
+              }
+            }
+          },
+          "400": {
+            "description": "Order already filled, cancelled, or expired (code 13053 — safe to ignore)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/accounts/{accountId}/positions": {
+      "get": {
+        "operationId": "listPositions",
+        "summary": "List positions (filter quantity != 0 for active)",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "positionId", "in": "query", "schema": { "type": "string" } },
+          { "name": "asset", "in": "query", "schema": { "type": "string" } },
+          { "name": "base", "in": "query", "schema": { "type": "string" } },
+          { "name": "quote", "in": "query", "schema": { "type": "string" } },
+          { "name": "positionSide", "in": "query", "schema": { "type": "string", "enum": ["long", "short"] } },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["open", "closed", "liquidated"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Position list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PaginatedResponse" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Position" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/accounts/{accountId}/trades": {
+      "get": {
+        "operationId": "listTrades",
+        "summary": "List trade executions",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tradeId", "in": "query", "schema": { "type": "string" } },
+          { "name": "positionId", "in": "query", "schema": { "type": "string" } },
+          { "name": "orderId", "in": "query", "schema": { "type": "string" } },
+          { "name": "base", "in": "query", "schema": { "type": "string" } },
+          { "name": "quote", "in": "query", "schema": { "type": "string" } },
+          { "name": "side", "in": "query", "schema": { "type": "string", "enum": ["buy", "sell"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trade list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PaginatedResponse" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Trade" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/accounts/{accountId}/margin-config/{asset}": {
+      "get": {
+        "operationId": "getMarginConfig",
+        "summary": "Get margin configuration for an asset (use base symbol e.g. BTC)",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "asset", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Base symbol e.g. BTC, ETH, SOL" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Margin config",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MarginConfig" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/accounts/{accountId}/margin-config/{configId}": {
+      "put": {
+        "operationId": "updateMarginConfig",
+        "summary": "Update margin configuration (leverage, margin mode)",
+        "parameters": [
+          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "configId", "in": "path", "required": true, "schema": { "type": "string" }, "description": "URN from GET margin-config response" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["exchange", "asset", "marginMode", "leverage"],
+                "properties": {
+                  "exchange": { "type": "string", "enum": ["hyperliquid"] },
+                  "asset": { "type": "string", "description": "Base symbol e.g. BTC" },
+                  "marginMode": { "type": "string", "enum": ["cross", "isolated"] },
+                  "leverage": { "type": "integer", "description": "Leverage multiplier" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated config",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MarginConfig" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Access token from POST /auth/access/refresh (30 min lifetime)"
+      }
+    },
+    "schemas": {
+      "PaginatedResponse": {
+        "type": "object",
+        "properties": {
+          "data": { "type": "array", "items": { "type": "object" } },
+          "total": { "type": "integer" },
+          "offset": { "type": "integer" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "integer", "description": "Error code (e.g. 13053 for already-done cancel)" },
+          "message": { "type": "string" }
+        }
+      },
+      "OrderRequest": {
+        "type": "object",
+        "required": ["accountId", "intentId", "exchange", "type", "side", "positionSide", "productType", "timeInForce", "asset", "base", "quote", "quantity"],
+        "properties": {
+          "accountId": { "type": "string", "description": "URN format: urn:prp-account:xxx" },
+          "intentId": { "type": "string", "description": "ULID — unique per order, idempotency key" },
+          "exchange": { "type": "string", "enum": ["hyperliquid"] },
+          "type": { "type": "string", "enum": ["market", "limit", "stop_market", "stop_limit", "take_profit_market", "take_profit_limit"] },
+          "side": { "type": "string", "enum": ["buy", "sell"] },
+          "positionSide": { "type": "string", "enum": ["long", "short"] },
+          "productType": { "type": "string", "enum": ["perp", "spot"] },
+          "timeInForce": { "type": "string", "enum": ["GTC", "IOC", "FOK", "GTX"], "description": "Use IOC for market orders" },
+          "asset": { "type": "string", "description": "Asset ticker, e.g. BTC (use xyz: prefix for stocks/commodities)" },
+          "base": { "type": "string", "description": "e.g. BTC" },
+          "quote": { "type": "string", "description": "e.g. USDC" },
+          "quantity": { "type": "string", "description": "Decimal string — never use floats" },
+          "price": { "type": "string", "nullable": true, "description": "Required for limit types. BTC tick: $0.50" },
+          "triggerPrice": { "type": "string", "nullable": true, "description": "Required for stop/take_profit types" },
+          "reduceOnly": { "type": "boolean", "default": false, "description": "MUST be true when closing/reducing a position" },
+          "closePosition": { "type": "boolean", "default": false, "description": "Use with reduceOnly: true to close entire position" }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "orderId": { "type": "string", "description": "URN: urn:prp-order:xxx" },
+          "intentId": { "type": "string", "description": "ULID idempotency key" },
+          "orderGroupId": { "type": "string", "nullable": true },
+          "exchangeOrderId": { "type": "string", "nullable": true },
+          "userId": { "type": "string" },
+          "accountId": { "type": "string" },
+          "positionId": { "type": "string", "nullable": true },
+          "exchange": { "type": "string", "enum": ["hyperliquid"] },
+          "productType": { "type": "string", "enum": ["perp", "spot"] },
+          "type": { "type": "string", "enum": ["market", "limit", "stop_market", "stop_limit", "take_profit_market", "take_profit_limit"] },
+          "side": { "type": "string", "enum": ["buy", "sell"] },
+          "positionSide": { "type": "string", "enum": ["long", "short"] },
+          "timeInForce": { "type": "string", "enum": ["GTC", "IOC", "FOK", "GTX"] },
+          "status": { "type": "string", "enum": ["pending", "open", "partially_filled", "filled", "cancelled", "expired", "rejected"] },
+          "asset": { "type": "string" },
+          "base": { "type": "string" },
+          "quote": { "type": "string" },
+          "quantity": { "type": "string", "description": "Decimal string" },
+          "price": { "type": "string", "description": "Decimal string" },
+          "triggerPrice": { "type": "string", "nullable": true },
+          "reduceOnly": { "type": "boolean" },
+          "closePosition": { "type": "boolean" },
+          "cumulativeQuantity": { "type": "string", "description": "Total filled quantity" },
+          "cumulativeQuote": { "type": "string", "description": "Total filled quote amount" },
+          "averageFillPrice": { "type": "string", "nullable": true },
+          "cumulativeTradingFees": { "type": "string" },
+          "tradingFeeRate": { "type": "string", "description": "e.g. 0.00075" },
+          "expiresAt": { "type": "string", "format": "date-time", "nullable": true },
+          "filledAt": { "type": "string", "format": "date-time", "nullable": true },
+          "cancelledAt": { "type": "string", "format": "date-time", "nullable": true },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Position": {
+        "type": "object",
+        "properties": {
+          "positionId": { "type": "string", "description": "URN: urn:prp-position:xxx" },
+          "userId": { "type": "string" },
+          "accountId": { "type": "string" },
+          "exchange": { "type": "string", "enum": ["hyperliquid"] },
+          "productType": { "type": "string", "enum": ["perp", "spot"] },
+          "status": { "type": "string", "enum": ["open", "closed", "liquidated"] },
+          "asset": { "type": "string" },
+          "base": { "type": "string" },
+          "quote": { "type": "string" },
+          "positionSide": { "type": "string", "enum": ["long", "short"] },
+          "leverage": { "type": "string" },
+          "marginMode": { "type": "string", "enum": ["cross", "isolated"] },
+          "quantity": { "type": "string", "description": "Decimal — filter != 0 for active positions" },
+          "entryPrice": { "type": "string" },
+          "breakEvenPrice": { "type": "string", "description": "Includes fee cost — differs from entryPrice" },
+          "markPrice": { "type": "string", "description": "May be stale via REST — use WebSocket for live" },
+          "liquidationPrice": { "type": "string" },
+          "unrealizedPnl": { "type": "string" },
+          "realizedPnl": { "type": "string" },
+          "marginUsed": { "type": "string" },
+          "notionalValue": { "type": "string" },
+          "cumulativeFunding": { "type": "string" },
+          "cumulativeTradingFees": { "type": "string" },
+          "tradingFeeRate": { "type": "string" },
+          "returnOnEquity": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "closedAt": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "Trade": {
+        "type": "object",
+        "properties": {
+          "tradeId": { "type": "string", "description": "URN: urn:prp-trade:xxx" },
+          "userId": { "type": "string" },
+          "accountId": { "type": "string" },
+          "orderId": { "type": "string" },
+          "positionId": { "type": "string" },
+          "exchangeTradeId": { "type": "string", "nullable": true },
+          "transactionHash": { "type": "string", "nullable": true },
+          "exchange": { "type": "string", "enum": ["hyperliquid"] },
+          "productType": { "type": "string", "enum": ["perp", "spot"] },
+          "type": { "type": "string", "enum": ["open", "increase", "reduce", "close", "flip", "liquidation"] },
+          "liquidityType": { "type": "string", "enum": ["maker", "taker"] },
+          "asset": { "type": "string" },
+          "base": { "type": "string" },
+          "quote": { "type": "string" },
+          "side": { "type": "string", "enum": ["buy", "sell"] },
+          "positionSide": { "type": "string", "enum": ["long", "short"] },
+          "quantity": { "type": "string" },
+          "price": { "type": "string" },
+          "quoteQuantity": { "type": "string" },
+          "fee": { "type": "string" },
+          "feeAsset": { "type": "string", "enum": ["USDC"] },
+          "feeRate": { "type": "string" },
+          "leverage": { "type": "string" },
+          "marginMode": { "type": "string", "enum": ["cross", "isolated"] },
+          "realizedPnl": { "type": "string" },
+          "positionSizeBefore": { "type": "string" },
+          "slippage": { "type": "string" },
+          "markPriceAtOrder": { "type": "string" },
+          "isLiquidation": { "type": "boolean" },
+          "executedAt": { "type": "string", "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "MarginConfig": {
+        "type": "object",
+        "properties": {
+          "configId": { "type": "string", "description": "URN: urn:prp-margin-config:xxx — required for PUT update" },
+          "accountId": { "type": "string" },
+          "exchange": { "type": "string", "enum": ["hyperliquid"] },
+          "asset": { "type": "string", "description": "Base symbol e.g. BTC" },
+          "marginMode": { "type": "string", "enum": ["cross", "isolated"] },
+          "leverage": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Validation error or business rule violation",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Invalid or expired access token",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      }
+    }
+  }
+}

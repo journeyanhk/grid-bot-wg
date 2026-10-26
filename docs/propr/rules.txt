@@ -1,0 +1,1171 @@
+Trading Rules and Evaluation | Propr
+v1.0
+Official Rulebook
+Complete rules governing all Propr Classic 1-Step, Turbo 1-Step, and Classic 2-Step Evaluation and Funded accounts. By purchasing an evaluation, you agree to these rules in full.
+Contents
+General
+01
+Overview
+02
+Account Sizes & Fees
+03
+How It Works
+04
+Definitions
+Risk Management
+05
+Equity Limits
+06
+Max Daily Loss
+07
+Max Drawdown
+08
+Breach Rules
+09
+Profit Target
+Trading Rules
+10
+Funded Account Rules
+11
+Payouts
+12
+Leverage
+13
+Tradeable Markets
+14
+Not Restricted
+Compliance
+15
+Prohibited Conduct
+16
+Identity Verification
+17
+Account Limits
+18
+On-Chain Transparency
+19
+Trade Execution
+Reference
+20
+Fees & Costs
+21
+Risk Acknowledgment
+22
+Quick Reference
+23
+Support & Contact
+24
+Changelog
+01
+Overview
+Propr is an on-chain prop firm built on Hyperliquid. We fund skilled traders with capital to trade crypto perpetual futures, without requiring any personal deposit beyond the evaluation fee.
+Pass a trading evaluation. Get funded. Keep up to 80% of your profits. All execution is transparent and verifiable on-chain.
+This rulebook governs all Propr Classic 1-Step, Turbo 1-Step, and Classic 2-Step Evaluation accounts and Funded accounts. By purchasing an evaluation, you agree to these rules in full.
+Your two equity limits
+Every account has two limits that stay live at all times: a maximum daily loss and a maximum drawdown. Both are checked against your equity, which counts open positions and floating P&L. If your equity hits or drops below either limit, the account is breached: open positions are closed and the account is forfeited. You never owe trading losses, a breach only ends the account, and you can start a new evaluation to trade again. Your dashboard shows both limits live.
+Maximum daily loss:
+recalculated every day at 00:00 UTC from your balance, 3% below it for 1-Step accounts and 5% for 2-Step. That figure is your equity limit for the next 24 hours.
+Maximum drawdown:
+a floor below your account value. On 1-Step accounts it is a fixed percentage below your starting balance and never moves. On 2-Step accounts it trails your high-water mark, never rising above your starting balance, and returns to its starting level after a payout.
+02
+Account Sizes & Evaluation Fees
+Propr offers three evaluation types across five account sizes.
+Classic 1-Step
+Account Size
+Fee
+Profit Target
+Max Daily Loss
+Max Drawdown
+$5,000
+$60
+$500 (10%)
+3%
+6% (static)
+$10,000
+$110
+$1,000 (10%)
+3%
+6% (static)
+$25,000
+$275
+$2,500 (10%)
+3%
+6% (static)
+$50,000
+$495
+$5,000 (10%)
+3%
+6% (static)
+$100,000
+$999
+$10,000 (10%)
+3%
+6% (static)
+$200,000
+$1,998
+$20,000 (10%)
+3%
+6% (static)
+Turbo 1-Step
+Account Size
+Fee
+Profit Target
+Max Daily Loss
+Max Drawdown
+$5,000
+$25
+$450 (9%)
+3%
+3% (static)
+$10,000
+$50
+$900 (9%)
+3%
+3% (static)
+$25,000
+$125
+$2,250 (9%)
+3%
+3% (static)
+$50,000
+$245
+$4,500 (9%)
+3%
+3% (static)
+$100,000
+$450
+$9,000 (9%)
+3%
+3% (static)
+$200,000
+$899
+$18,000 (9%)
+3%
+3% (static)
+Pro 1-Step
+Account Size
+Fee
+Profit Target
+Max Daily Loss
+Max Drawdown
+$5,000
+$45
+$600 (12%)
+3%
+5% (static)
+$10,000
+$85
+$1,200 (12%)
+3%
+5% (static)
+$25,000
+$185
+$3,000 (12%)
+3%
+5% (static)
+$50,000
+$355
+$6,000 (12%)
+3%
+5% (static)
+$100,000
+$699
+$12,000 (12%)
+3%
+5% (static)
+$200,000
+$1,399
+$24,000 (12%)
+3%
+5% (static)
+Classic 2-Step
+Account Size
+Fee
+Step 1 Target
+Step 2 Target
+Max Daily Loss
+Max Drawdown
+$5,000
+$50
+$250 (5%)
+$500 (10%)
+5%
+8% (trailing)
+$10,000
+$100
+$500 (5%)
+$1,000 (10%)
+5%
+8% (trailing)
+$25,000
+$250
+$1,250 (5%)
+$2,500 (10%)
+5%
+8% (trailing)
+$50,000
+$450
+$2,500 (5%)
+$5,000 (10%)
+5%
+8% (trailing)
+$100,000
+$749
+$5,000 (5%)
+$10,000 (10%)
+5%
+8% (trailing)
+$200,000
+$1,499
+$10,000 (5%)
+$20,000 (10%)
+5%
+8% (trailing)
+All evaluation fees are non-refundable once the account is activated, regardless of outcome.
+03
+How It Works
+STEP
+1
+Purchase
+STEP
+2
+Trade
+STEP
+3
+Pass
+STEP
+4
+Get Funded
+Step
+1
+:
+Purchase
+Choose your evaluation type (1-Step or 2-Step), your account size, and pay the evaluation fee.
+Step
+2
+:
+Trade
+Reach the profit target while staying within the drawdown limits. No time limit, no minimum trading days.
+Step
+3
+:
+Pass
+Hit the profit target without breaching any equity limit. Your evaluation is automatically passed.
+Step
+4
+:
+Get Funded
+Receive a funded account with no profit target. Trade freely and request on-demand payouts.
+Classic 1-Step:
+Reach the 10% profit target while staying within the drawdown limits (3% daily loss, 6% max drawdown). There is no time limit and no minimum number of trading days. You can pass in one trade.
+Turbo 1-Step:
+Reach the 9% profit target while staying within tighter drawdown limits (3% daily loss, 3% max drawdown). Lower fee, tighter rules, faster path to funding. No time limit, no minimum trading days.
+Pro 1-Step:
+Reach the 12% profit target while staying within intermediate drawdown limits (3% daily loss, 5% max drawdown). Higher target, moderate rules, balanced path to funding. No time limit, no minimum trading days.
+Classic 2-Step:
+Reach the Step 1 profit target (5%) to advance to Step 2. Then reach the Step 2 profit target (10%) to pass. The same drawdown rules apply throughout both steps. There is no time limit on either step.
+04
+Definitions
+Balance
+The total account value based on closed (realized) P&L only. Does not include open positions.
+Equity
+The real-time account value including both closed P&L and the floating (unrealized) P&L of all open positions. Equity = Balance + Unrealized P&L.
+Equity Limit
+A predefined equity level. If your account equity reaches or falls to this level, a breach is triggered.
+Breach
+The automatic closure of all open positions and permanent termination of the account. A breached account cannot be recovered, reset, or appealed.
+Profit Target
+The account growth required to pass the evaluation, expressed as a percentage of the starting balance.
+High Water Mark (HWM)
+The highest equity ever recorded on the account, including floating P&L on open positions. Used to calculate the trailing drawdown on 2-Step accounts.
+05
+Equity Limits
+Every Propr account has two equity limits active at all times, in both the evaluation and funded stages:
+1. Maximum Daily Loss
+The most equity you can lose in a single day, set as a percentage of your start-of-day balance and recalculated each day.
+2. Maximum Drawdown
+An overall equity limit based on account type (static or trailing).
+Important
+If your equity reaches or falls below either equity limit at any point, the account is immediately and permanently breached. Both limits are equity-based, meaning they account for open/floating positions, not just closed trades.
+06
+Maximum Daily Loss
+The maximum daily loss caps how much your equity can drop within a single day. The dollar limit is that percentage of your
+start-of-day balance
+, recalculated every day. It shrinks as you draw down and grows as you bank realized profit.
+1-Step accounts:
+3% of start-of-day balance
+2-Step accounts:
+5% of start-of-day balance
+Reset time:
+00:00 UTC daily
+Each day the limit is that percentage of your start-of-day balance, so the allowance scales with the account:
+Daily Loss Limit = Daily Loss % × Start-of-day Balance
+Each day at 00:00 UTC the system snapshots your balance. Your equity floor for the next 24 hours is your start-of-day balance minus that day's daily loss limit:
+Equity Floor = Start-of-day Balance − Daily Loss Limit
+Example
+Open the day at a $100,000 balance with a 5% daily loss and your limit is $100,000 × 5% =
+$5,000
+, so your floor is $95,000. Draw your balance down to $90,000 and the next day's limit is $90,000 × 5% =
+$4,500
+(floor $85,500); bank profit to a $105,000 balance and it rises to $105,000 × 5% =
+$5,250
+. Touching the floor at any point triggers a breach.
+Daily Loss Monitor
+Start-of-day Balance (00:00 UTC)
+$
+100,000
+Daily Loss %
+5
+%
+Daily Loss Limit
+$
+5,000
+EQUITY FLOOR TODAY
+$
+100,000
+− $
+5,000
+= $
+95,000
+Daily loss used
+40
+%
+Safe
+Breach @ $
+95,000
+The dollar limit scales with your start-of-day balance: it shrinks as you draw down and grows as you bank realized profit.
+The day-start reference point resets every day at 00:00 UTC using your latest balance snapshot.
+The floor and breach use
+equity
+, which includes floating P&L, while the limit and reference are your start-of-day balance.
+Even a momentary touch of the equity floor triggers a breach. There is no grace period.
+07
+Maximum Drawdown
+The maximum drawdown sets an absolute floor for the account: the lowest your equity can ever go. The calculation differs between 1-Step and 2-Step accounts.
+Classic 1-Step Accounts (Static Drawdown)
+For Classic 1-Step accounts, the maximum drawdown is static:
+Max Drawdown Equity Limit = Starting Balance × (1 - 0.06)
+This limit is set once at account creation and never changes, regardless of how high the account grows.
+Account Size
+Max Drawdown Equity Limit
+$5,000
+$4,700
+$10,000
+$9,400
+$25,000
+$23,500
+$50,000
+$47,000
+$100,000
+$94,000
+$200,000
+$188,000
+Turbo 1-Step Accounts (Static Drawdown)
+For Turbo 1-Step accounts, the maximum drawdown is tighter:
+Max Drawdown Equity Limit = Starting Balance × (1 - 0.03)
+This limit is set once at account creation and never changes, regardless of how high the account grows.
+Account Size
+Max Drawdown Equity Limit
+$5,000
+$4,850
+$10,000
+$9,700
+$25,000
+$24,250
+$50,000
+$48,500
+$100,000
+$97,000
+$200,000
+$194,000
+Pro 1-Step Accounts (Static Drawdown)
+For Pro 1-Step accounts, the maximum drawdown is:
+Max Drawdown Equity Limit = Starting Balance × (1 - 0.05)
+This limit is set once at account creation and never changes, regardless of how high the account grows.
+Account Size
+Max Drawdown Equity Limit
+$5,000
+$4,750
+$10,000
+$9,500
+$25,000
+$23,750
+$50,000
+$47,500
+$100,000
+$95,000
+$200,000
+$190,000
+Example
+You have a $50,000 1-Step account. The max drawdown equity limit is $47,000. You trade profitably and grow the account to $60,000. Your max drawdown limit is still $47,000. It does not trail upward. If your equity drops to $47,000 at any point, even intraday on an open position, the account is breached.
+2-Step Accounts (Trailing Drawdown)
+For Classic 2-Step accounts, the maximum drawdown trails your highest equity (High Water Mark). The HWM rises to each new equity peak, including floating P&L on an open position, and never trails back down.
+Max Drawdown Equity Limit = High Water Mark - (8% × Starting Balance)
+The trailing stops once the equity limit reaches the starting balance. It will not trail past that point. A payout sweeps all profit above the starting balance and resets the High Water Mark to the starting balance, exactly as it is set when the account opens.
+Account Size
+Drawdown Amount
+Equity Limit at Start
+$5,000
+$400
+$4,600
+$10,000
+$800
+$9,200
+$25,000
+$2,000
+$23,000
+$50,000
+$4,000
+$46,000
+$100,000
+$8,000
+$92,000
+$200,000
+$16,000
+$184,000
+Example
+You have a $100,000 2-Step account:
+Starting HWM = $100,000. Equity limit = $100,000 - $8,000 =
+$92,000
+Your equity reaches a $105,000 peak (open or closed profit both count). New HWM = $105,000, equity limit = $105,000 - $8,000 =
+$97,000
+Your equity peaks at $108,000. New HWM = $108,000, equity limit = $108,000 - $8,000 =
+$100,000
+(capped at the starting balance)
+Your equity peaks higher at $115,000. Equity limit stays at
+$100,000
+(it never trails past the starting balance)
+Your equity falls back to $103,000. The HWM holds at its $115,000 peak and the limit holds at
+$100,000
+(it never trails back down)
+You request a payout: all profit above the $100,000 starting balance is swept out and your balance and HWM reset to $100,000, so the limit resets to
+$92,000
+, a fresh start.
+1-Step · Static Drawdown
+LIMIT $47,000
+Start $50,000
+$58,000
+Limit stays at $47,000 no matter how high equity grows.
+2-Step · Trailing Drawdown
+Start $50,000
+LIMIT (trails)
+$57,000
+Limit trails the HWM upward but stops at starting balance.
+1-Step drawdown is
+static
+and permanent. It never moves.
+2-Step drawdown
+trails upward
+with your highest equity, never trails back down, and stops trailing once it reaches the starting balance.
+HWM tracking and breach are both equity-based: a new equity peak (including floating gains) raises your limit up to the starting balance, and a floating loss can breach you.
+Even a momentary touch triggers a breach.
+08
+Breach Rules
+A breach occurs when the Propr risk engine detects that an account's equity has reached or fallen below either equity limit (maximum daily loss or maximum drawdown).
+What Happens on Breach
+1
+All open positions are immediately closed.
+2
+The account is permanently disabled.
+3
+No further trading is possible on that account.
+4
+No payouts are available from a breached account.
+Important
+Breaches are permanent. There are no resets, appeals, or exceptions.
+There is no distinction between "soft" and "hard" breaches. Any breach is final.
+You do not need to close a trade for a breach to occur. If your floating P&L causes equity to touch an equity limit, the breach is triggered automatically.
+You are never liable for losses on the account beyond your evaluation fee. A breach simply means the account is closed.
+To try again, purchase a new evaluation at any time.
+09
+Profit Target
+To pass the evaluation and receive a funded account, you must grow the account by the profit target amount. The profit target applies only to the evaluation stage. Funded accounts have no profit target.
+Classic 1-Step Targets
+Account Size
+Profit Target
+Grow Account To
+$5,000
+$500
+$5,500
+$10,000
+$1,000
+$11,000
+$25,000
+$2,500
+$27,500
+$50,000
+$5,000
+$55,000
+$100,000
+$10,000
+$110,000
+$200,000
+$20,000
+$220,000
+Turbo 1-Step Targets
+Account Size
+Profit Target
+Grow Account To
+$5,000
+$450
+$5,450
+$10,000
+$900
+$10,900
+$25,000
+$2,250
+$27,250
+$50,000
+$4,500
+$54,500
+$100,000
+$9,000
+$109,000
+$200,000
+$18,000
+$218,000
+Pro 1-Step Targets
+Account Size
+Profit Target
+Grow Account To
+$5,000
+$600
+$5,600
+$10,000
+$1,200
+$11,200
+$25,000
+$3,000
+$28,000
+$50,000
+$6,000
+$56,000
+$100,000
+$12,000
+$112,000
+$200,000
+$24,000
+$224,000
+Classic 2-Step Targets
+Account Size
+Step 1 Target
+Grow To
+Step 2 Target
+Grow To
+$5,000
+$250
+$5,250
+$500
+$5,500
+$10,000
+$500
+$10,500
+$1,000
+$11,000
+$25,000
+$1,250
+$26,250
+$2,500
+$27,500
+$50,000
+$2,500
+$52,500
+$5,000
+$55,000
+$100,000
+$5,000
+$105,000
+$10,000
+$110,000
+$200,000
+$10,000
+$210,000
+$20,000
+$220,000
+The profit target is based on
+equity
+, which includes floating P&L, so an open position in profit counts toward it.
+Once your equity reaches or exceeds the target, the step/evaluation is automatically passed.
+There is
+no time limit
+to reach the profit target on either step.
+There is
+no minimum number of trading days
+. You can pass in a single trade.
+For 2-Step accounts, passing Step 1 automatically advances you to Step 2. Your account balance carries over.
+10
+Funded Account Rules
+Upon passing the evaluation, you receive a funded account with the same starting balance.
+Rules That Carry Over
+✓
+Maximum daily loss (3% for 1-Step, 5% for 2-Step, of your start-of-day balance)
+✓
+Maximum drawdown (6% static for 1-Step, 8% trailing for 2-Step)
+✓
+Equity-based enforcement on both limits
+✓
+Breach rules (permanent, no resets)
+What Changes
+No Profit Target
+You trade freely and withdraw profits when you choose.
+Payouts Available
+You are eligible to request withdrawals of your profits.
+11
+Payouts
+Profit Split
+You keep
+80%
+of all profits generated on your funded account. Propr retains 20%.
+Payout Requests
+✓
+On-demand, at any time, with no minimum waiting period
+✓
+Minimum payout amount:
+$20
+✓
+No limit on the number of payout requests
+✓
+Processed within
+24 hours
+✓
+All payouts in
+USDC
+on-chain
+Payout = (Current Balance - Starting Balance) × 0.80
+Each payout sweeps all available profit. After a payout, your account balance resets to the initial funded amount (starting balance). Drawdown limits reset accordingly. No partial withdrawals.
+Payout Restrictions
+•
+All positions must be closed before requesting a payout.
+•
+Full profit sweep only — no partial withdrawals.
+•
+Payouts are not available on evaluation or breached accounts.
+•
+On 2-Step funded accounts, payouts reduce the HWM by the payout amount.
+Payout Receipt
+Starting Balance
+$50,000
+Current Balance
+$56,000
+Gross Profit
++$6,000
+Your Split (80%)
+$4,800
+Propr (20%)
+$1,200
+Payout (USDC)
+$4,800
+New Balance
+$50,000 (reset)
+Drawdown Limit
+$47,000 (reset)
+12
+Leverage
+Leverage is applied automatically and cannot be changed by the trader. Using maximum leverage is not required. Traders may use any leverage up to the limit.
+Asset Class
+Max Leverage
+BTC Perpetual
+10x
+ETH Perpetual
+10x
+SOL Perpetual
+10x
+Other Crypto Perpetuals
+2x
+Equities Perpetuals
+4x
+SP500 Index
+10x
+XYZ100 (Nasdaq) Index
+10x
+Other Indices Perpetuals
+5x
+Gold, Silver, CL, Brent Oil
+8x
+Other Commodities Perpetuals
+5x
+FX Perpetuals
+25x
+Max Leverage by Asset
+SP500 & XYZ100
+10
+x
+Gold, Silver, CL, Brent
+8
+x
+BTC & ETH
+5
+x
+Equities
+4
+x
+Other Crypto
+2
+x
+13
+Tradeable Markets
+Propr operates on Hyperliquid. All perpetual futures contracts available on Hyperliquid are eligible for trading on Propr accounts, including crypto, equities, and commodities perpetuals, subject to the leverage limits above.
+The exact list of available pairs and instruments is determined by Hyperliquid's listed markets and may change as new markets are added or removed. A current list is always available on the Propr dashboard.
+14
+What Is NOT Restricted
+Propr does
+not
+impose any of the following rules or restrictions:
+Rule
+Status
+Consistency rule
+None. No cap on single-day profit as a percentage of total.
+Minimum trading days
+None. Pass the evaluation in one trade if you want.
+Time limit
+None. Take as long as you need to pass the evaluation.
+Profit cap
+None. There is no maximum on how much you can earn.
+News trading restriction
+None. Trade during any market event.
+Weekend holding restriction
+None. Hold positions over weekends. Crypto markets are 24/7.
+Risk-per-trade rule
+None. No maximum position size rule beyond leverage limits.
+Mandatory stop-loss
+None. Stop-losses are not required (though recommended).
+Anti-gambling rule
+None. The drawdown rules are the only risk guardrails.
+Strategy restrictions
+None. Scalping, swing trading, grid trading, etc. are all permitted.
+EA / Bot restrictions
+None. Automated trading is permitted.
+Copy trading restriction
+None. Copy trading is permitted, including between your own Propr accounts.
+Our philosophy:
+The two equity limits (daily loss and max drawdown) are the only trading rules. How you trade within those limits is entirely up to you.
+15
+Prohibited Conduct & Anti-Farming
+While trading strategies are unrestricted, the following conduct is prohibited and will result in immediate account termination and potential ban.
+General Prohibitions
+1
+Exploiting platform bugs or glitches
+Intentionally exploiting technical errors, latency issues, price feed anomalies, or Hyperliquid infrastructure issues for profit.
+2
+Account sharing or selling
+Each account is tied to one individual. Transferring, selling, or sharing account access is prohibited.
+3
+Identity fraud
+Providing false identity information during registration or KYC verification. This includes using another person's identity documents or creating multiple identities.
+Anti-Farming & Anti-Gaming Rules
+Propr's evaluation model is designed to identify skilled, consistent traders. The following activities are considered farming or gaming the system and are strictly prohibited:
+4
+Opposite hedging across accounts
+Opening opposing positions on the same instrument or correlated assets (e.g., long ETH on one account, short SOL on another) across two or more Propr accounts to guarantee that one account passes while the other breaches.
+5
+Hedging across external CEX or DEX accounts
+Opening opposing positions on external centralized exchanges (CEX), decentralized exchanges (DEX), or other prop firms to hedge against positions on your Propr account, including correlated assets (e.g., long ETH on Propr, short SOL on external account), effectively eliminating market risk.
+6
+Third-party coordination
+Coordinating trades with other Propr traders to create offsetting positions, share signals timed to exploit drawdown mechanics, or any other form of collusion.
+7
+Account cycling / high-frequency eval purchases
+Repeatedly purchasing evaluations with the intent of taking maximum-risk binary bets on each attempt, treating the evaluation fee as a lottery ticket.
+8
+Exploiting the payout/drawdown interaction
+Structuring payout requests to manipulate the relationship between account balance, High Water Mark, and drawdown equity limits (applicable to 2-Step accounts).
+9
+Latency arbitrage and tick sniping
+Exploiting delays between Propr's price feed and Hyperliquid's on-chain execution to capture risk-free or near-risk-free profits.
+10
+Simulated or wash trading
+Executing trades with yourself or a coordinated party where no genuine market risk is taken, for the purpose of inflating trade volume or manipulating account metrics.
+11
+Sharing account access or multi-account usage from same location
+Sharing account access, or trading multiple accounts from the same household, device, or IP address.
+12
+Non-replicable or high-risk strategies
+Using strategies that are difficult to replicate in live markets or carry outsized risk when replicated (for example, trades that would trigger auto-deleveraging or produce exceedingly large swings in unrealized P&L).
+Detection & Enforcement
+Propr uses automated monitoring systems to detect prohibited behaviors. Signals include correlation analysis across accounts, IP address and device fingerprinting, trade pattern analysis, payout pattern analysis, and on-chain transaction analysis via Hyperliquid.
+When suspicious activity is detected, Propr may request additional information, suspend trading and/or payouts pending investigation, permanently terminate the account with no payout, and ban the individual from future evaluations. Decisions are final and not subject to appeal.
+16
+Identity Verification (KYC)
+When Is KYC Required?
+KYC is
+not required
+to register or purchase an evaluation. You can start trading immediately after purchase.
+KYC
+is required
+before you can access a funded account. Once you pass the evaluation, you must complete identity verification before your funded account is activated. No payouts will be processed without completed KYC.
+We recommend completing KYC early (available at any time via your dashboard settings) to avoid delays.
+What You Need
+✓
+A valid government-issued ID (passport or national ID)
+✓
+A live selfie for identity matching
+✓
+No proof of address required
+Verification is typically completed within minutes.
+Restricted Countries
+Important
+Propr is unable to offer services to individuals from and/or located in the following jurisdictions:
+Bangladesh, Belarus, Burkina Faso, Central African Republic, Congo, Cuba, Ethiopia, Haiti, Iran, Iraq, Kazakhstan, Kyrgyzstan, Lebanon, Libya, Mali, Myanmar, Nigeria, North Korea, Pakistan, Russia, Somalia, South Sudan, Sudan, Syria, Tajikistan, Turkmenistan, Uzbekistan, Venezuela, Yemen, Zimbabwe
+And the following regions of Ukraine:
+Crimea, Donetsk, Luhansk
+or any jurisdiction subject to OFAC sanctions.
+Attempting to access Propr services from a restricted jurisdiction (including via VPN) will result in immediate account termination with no refund or payout.
+All KYC submissions are screened against global sanctions lists and Politically Exposed Persons (PEP) databases. Propr may conduct periodic rescreening of active funded traders.
+17
+Account Limits
+A trader may hold multiple active accounts, subject to the following aggregate limits:
+Evaluation accounts:
+up to
+$200,000
+aggregate AUM
+Funded accounts:
+up to
+$300,000
+aggregate balance
+For example, a trader could hold two $100,000 evaluation accounts simultaneously, or one $100,000 funded account, one $50,000 funded account, and multiple smaller funded accounts simultaneously.
+18
+On-Chain Transparency
+All A-booked trades executed on Propr accounts are routed through Hyperliquid and are verifiable on-chain. This means:
+Every A-booked trade, including entries, exits, and liquidations, is recorded on Hyperliquid's blockchain.
+Traders can independently verify A-booked trade history on-chain.
+Propr's aggregate payout history will be published on-chain.
+B-booked trades (internal book entries) are not routed to Hyperliquid and are therefore not visible on-chain. The P&L outcome is identical regardless of execution method. Every trade on your Propr dashboard is labeled as A-booked or B-booked, so you always have full visibility into how each trade was executed.
+Propr is committed to publishing aggregate transparency data including total evaluations sold, pass rates, total payouts issued, firm-level P&L, and the overall A-book vs B-book ratio across all funded accounts.
+19
+Trade Execution & Capital Allocation
+When a funded trader submits a trade on Propr, the platform operates under a hybrid execution model. Propr may, at its sole discretion, handle each trade in one of two ways:
+A-Book · Market Execution
+1
+Trader submits order
+2
+Propr routes to Hyperliquid
+3
+Executed on-chain
+4
+Verifiable on explorer
+Firm assumes market risk
+B-Book · Internal Book Entry
+1
+Trader submits order
+2
+Propr records internally
+3
+Hypothetical result calculated
+4
+Same P&L outcome for trader
+No on-chain execution
+How Propr Decides
+The Firm selects the execution method at its absolute discretion on a trade-by-trade basis. Factors include:
+Current market conditions and liquidity
+The Firm's aggregate risk exposure across all funded traders
+The size and direction of the trade relative to existing positions
+Internal risk management thresholds and hedging requirements
+Capital pool utilization
+Funded traders have no control over which method is selected. However, every trade on your dashboard is clearly labeled as either A-booked or B-booked. From a P&L perspective, the outcome is identical regardless of execution method.
+Conflicts of Interest
+1
+.
+Execution discretion
+The Firm chooses whether to route trades to market or record them internally. When trades are B-booked, the Firm's profit on those trades is inversely correlated with the trader's profit. To mitigate this, Propr labels every trade with its execution method.
+2
+.
+Evaluation fee model
+The Firm earns evaluation fees each time a trader fails and repurchases an evaluation. This creates a financial incentive for evaluations to be difficult to pass, though the rules are transparent and applied uniformly.
+3
+.
+Third-party incentives
+Revenue from third-party financial incentives is not shared with traders and may influence execution decisions.
+4
+.
+Hedging discretion
+The Firm's hedging decisions may not perfectly align with individual trader interests.
+Ownership & Rights
+Funded traders do not own any trading account, position, or capital on the Firm's books. The funded account is a performance-tracking mechanism that determines the trader's eligibility for profit-based payouts. It is not a brokerage account, investment account, or custodial arrangement.
+The relationship between the Firm and the funded trader is solely that of a performance-based payout arrangement, not an employment, partnership, joint venture, or agency relationship.
+20
+Fees & Costs
+Evaluation Fee
+A one-time, non-refundable fee paid to activate an evaluation account. See Section 2 for pricing.
+Trading Fees
+Standard Hyperliquid maker/taker fees apply. These are passed through at cost. Propr does not add markup. Trading fees are deducted from your account balance and count toward your P&L (and therefore affect your equity limits).
+Funding Rates
+Hyperliquid perpetual contracts carry periodic funding rates. These are standard on all perpetual futures and are deducted or credited to your account automatically. Funding rate impact is included in your equity calculation.
+No Hidden Fees
+There are no monthly fees, inactivity fees, data fees, platform fees, or withdrawal fees. The evaluation fee and standard trading costs are the only charges.
+21
+Risk Acknowledgment
+By purchasing a Propr evaluation, you acknowledge and accept the following:
+1
+Most traders do not pass. The evaluation is designed to be rigorous. There is no guarantee of success.
+2
+Evaluation fees are non-refundable. If you fail or breach, the fee is not returned.
+3
+Funded accounts can be lost. Even after passing, your funded account is subject to the same drawdown rules and can be breached at any time.
+4
+Past performance is not indicative of future results. Passing one evaluation does not guarantee future profitability.
+5
+Crypto markets are volatile. Prices can move rapidly and unpredictably. Losses can be sudden and severe.
+6
+Leverage amplifies risk. Higher leverage means larger gains but also larger losses relative to account size.
+7
+You are not trading your own capital. You do not own the funded account or any positions within it. You are eligible for performance-based payouts only.
+8
+Propr may modify these rules. Rules may be updated with reasonable notice. Active funded accounts will be governed by the rules in effect at the time of account activation unless otherwise stated.
+22
+Quick Reference Card
+1-Step Accounts
+Parameter
+Evaluation
+Funded
+Profit target
+10% of starting balance
+None
+Max daily loss
+3% of start-of-day balance
+3% of start-of-day balance
+Max drawdown
+6% static from starting balance
+6% static from starting balance
+Drawdown type
+Equity-based (includes floating P&L)
+Equity-based (includes floating P&L)
+Leverage (BTC/ETH/SOL)
+10x
+10x
+Leverage (Other Crypto)
+2x
+2x
+Leverage (Equities)
+4x
+4x
+Leverage (SP500/XYZ100)
+10x
+10x
+Leverage (Other Indices)
+5x
+5x
+Leverage (Gold, Silver, CL, Brent)
+8x
+8x
+Leverage (Other Commodities)
+5x
+5x
+Leverage (FX)
+25x
+25x
+Profit split
+N/A
+80% to trader
+Payouts
+Not available
+On-demand, USDC, within 24h, $20 min
+Time limit
+None
+None
+Minimum trading days
+None
+None
+Breach
+Permanent, no resets
+Permanent, no resets
+2-Step Accounts
+Parameter
+Step 1
+Step 2
+Funded
+Profit target
+5% of starting balance
+10% of starting balance
+None
+Max daily loss
+5% of start-of-day balance
+5% of start-of-day balance
+5% of start-of-day balance
+Max drawdown
+8% trailing (HWM)
+8% trailing (HWM)
+8% trailing (HWM)
+Drawdown type
+Equity-based
+Equity-based
+Equity-based
+Leverage (BTC/ETH/SOL)
+10x
+10x
+10x
+Leverage (Other Crypto)
+2x
+2x
+2x
+Leverage (Equities)
+4x
+4x
+4x
+Leverage (SP500/XYZ100)
+10x
+10x
+10x
+Leverage (Other Indices)
+5x
+5x
+5x
+Leverage (Gold, Silver, CL, Brent)
+8x
+8x
+8x
+Leverage (Other Commodities)
+5x
+5x
+5x
+Leverage (FX)
+25x
+25x
+25x
+Profit split
+N/A
+N/A
+80% to trader
+Payouts
+Not available
+Not available
+On-demand, USDC, within 24h, $20 min
+Time limit
+None
+None
+None
+Minimum trading days
+None
+None
+None
+Breach
+Permanent, no resets
+Permanent, no resets
+Permanent, no resets
+23
+Support & Contact
+For questions about these rules, your account, or payout requests:
+Discord
+discord.gg/propr
+Dashboard
+app.propr.xyz
+This rulebook governs all Propr Classic 1-Step, Turbo 1-Step, and Classic 2-Step accounts. Propr reserves the right to update these rules with reasonable notice. The most current version is always available at propr.xyz/rules.
+Copyright 2026 Propr. All rights reserved.
+24
+Changelog
+Every rule change is documented here with the date it took effect. We never change rules retroactively.
+July 27, 2026
+v1.0.5
+update
+Daily Loss Limit Based on Start-of-Day Balance
+✓
+Max daily loss dollar limit is a percentage of your start-of-day balance, recalculated each day: it shrinks as you draw down and grows as you bank realized profit
+✓
+The equity floor for the day is your start-of-day balance minus the daily loss limit; touching it at any point triggers a breach
+✓
+Breach is measured on equity, which includes floating P&L
+✓
+3% for 1-Step, 5% for 2-Step; daily reset at 00:00 UTC
+July 21, 2026
+v1.0.4
+update
+Daily Loss Anchored to Your Balance
+✓
+Max daily loss dollar limit is now a percentage of the greater of your starting balance and your day-start balance, floored at the starting-balance amount: it never drops below the starting allowance and grows as you bank realized profit (reverses the fixed-limit behavior from v1.0.2)
+✓
+Breach enforcement is unchanged and remains equity-based: a floating loss can still breach an account at any time
+✓
+Percentage values and the 00:00 UTC daily reset are unchanged; 1-Step static drawdown is unchanged
+June 29, 2026
+v1.0.3
+update
+Turbo 1-Step Added & Aggregate Limit Increased
+✓
+Added Turbo 1-Step evaluation type with 9% profit target and 3% max drawdown (vs. 10% target and 6% drawdown for Classic 1-Step)
+✓
+Turbo 1-Step offers lower fees for traders who prefer tighter risk parameters
+✓
+Increased aggregate funded balance limit from $200,000 to $300,000
+✓
+Turbo accounts available in all sizes: $5K, $10K, $25K, $50K, $100K
+April 23, 2026
+v1.0.2
+update
+Max Daily Loss Now Fixed at Starting Balance
+✓
+Max daily loss dollar limit is now fixed at a percentage of the challenge starting balance (3% for 1-Step, 5% for 2-Step) and no longer scales with equity growth
+✓
+Previously, the limit was recalculated each day from the day-start equity snapshot, meaning the allowance scaled up as the account grew
+✓
+The daily reset at 00:00 UTC still snapshots equity (including floating P&L) to set the day-start reference point; the equity floor = day-start equity − fixed daily loss limit
+✓
+Percentage values (3% for 1-Step, 5% for 2-Step) are unchanged
+February 25, 2026
+v1.0.1
+update
+Duplicate Account Restriction Removed
+✓
+Removed the restriction preventing traders from purchasing two evaluations of the same size simultaneously
+✓
+Traders may now hold multiple evaluations of any size at the same time, up to the aggregate funded balance cap
+February 25, 2026
+v1.0
+launch
+Initial Rules Established
+✓
+1-Step and 2-Step evaluation models introduced with four account sizes ($10K, $25K, $50K, $100K)
+✓
+Maximum drawdown set: 6% static (1-Step), 8% trailing (2-Step)
+✓
+Daily loss limit set: 3% (1-Step), 5% (2-Step)
+✓
+Profit targets set: 10% (1-Step), 5% → 10% (2-Step)
+✓
+Leverage caps defined per asset class: BTC/ETH/SOL 10x, other crypto 2x, equities 4x, SP500/XYZ100 10x, other indices 5x, gold/silver/CL/brent 8x, other commodities 5x, FX 25x
+✓
+140+ tradable assets: crypto, equity perps, and commodity perps on Hyperliquid
+✓
+80% profit split for all funded traders
+✓
+On-demand payouts via USDC on-chain (minimum $50)
+✓
+No time limit, no minimum trading days, no consistency rules
+✓
+News trading, weekend holding, overnight holding all permitted
+✓
+A-Book / B-Book hybrid execution model with on-chain transparency
+✓
+KYC required before first payout
+✓
+Scaling program available for funded traders
+Important Disclosures about Propr, Propr Limited and Funded Trading.
+All Propr content is for educational purposes only and does not constitute investment advice, business recommendations, or financial analysis. Content is not intended for residents of any jurisdiction where such distribution or use would violate local laws.
+All Propr accounts, including "Funded Accounts", are 100% simulated. No real financial instruments are traded by you. Where Propr chooses to replicate a signal in live markets, the resulting position belongs entirely to Propr and is executed at its sole discretion. Any payout represents a performance-based reward for signal evaluation, not an investment return or capital gain. Most participants do not pass evaluations.
+Services are used strictly in a personal capacity and not "by way of business". Propr Limited is not a broker, does not accept deposits, and is not authorized or regulated by the BVI Financial Services Commission or any other financial authority. You will not receive regulatory protections associated with licensed financial services. Service availability varies by jurisdiction.
+Propr services are provided by Propr Limited (Reg. No. 2211330), registered at Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands.
+Prop Trading You Can Verify.
+© 2026 Propr. All rights reserved.
+Trading
+Rules
+FAQ
+Asset Universe
+Resources
+Transparency
+Careers
+Discord
+X (Twitter)
+Developers
+Docs
+Builders
+Grant
+Legal
+Terms & Conditions
+Funded Terms
+Affiliate Terms
+Privacy Notice
+Risk Disclaimer
+Trading
+Resources
+Developers
+English
+Login
+Sign up

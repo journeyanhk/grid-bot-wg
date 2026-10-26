@@ -32,3 +32,6 @@ __pycache__/
 .runtime/
 # VA 探针产物
 probe_*.json
+
+# Propr 研究报告的行情数据（用 docs/propr/fetch_btc_1h.py 重新拉取）
+docs/propr/btc_1h.json
