@@ -220,7 +220,8 @@ test('破界硬止损：独立回收模式（outOfRange=false）亏损达上限�
   assert.equal(stopped, true, '独立回收模式亏损达上限应触发硬止损');
 });
 
-test('尘埃仓守卫：部分成交低于最小下单量时跳过补挂对腿', async () => {
+// 2026-10-26 行为变更：低于最小下单量不再跳过，而是按最小量补挂（见 v1.6.38）。
+test('尘埃仓守卫：部分成交低于最小下单量时按最小量补挂对腿', async () => {
   const ex = new MockExchange();
   const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
   await bot.start({ ...CFG, sizeBase: 0.0002, minOrderSize: 0.0002 });
@@ -232,7 +233,7 @@ test('尘埃仓守卫：部分成交低于最小下单量时跳过补挂对腿',
   const before = bot.active.size;
   bot._handleFill(fakeFill);
   await sleep(10);
-  assert.equal(bot.active.size + 1, before, '不补挂对腿（5 补前数量 - 1 删除 = 4）');
+  assert.equal(bot.active.size, before, '成交档被移除、对腿按最小量补回，总数不变');
   assert.ok(bot.alerts.some((a) => a.message.includes('低于最小下单量')), '应有尘埃仓提示');
 });
 
