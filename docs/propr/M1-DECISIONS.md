@@ -73,7 +73,11 @@ classify(err) → { retryable, terminal, benign, mayExist }
 
 Review 提的 `SchemaError` / `PaginationError` **不该是 API 错误类型**：它们是我们的 bug，应当直接抛 `Error` 让单测红掉，而不是被上层"优雅重试"。
 
-### 1.6 分页与去重
+### 1.6 批量执行的落点
+
+`src/exchange/pr/batch.js`：`placeBatch()` 串行执行 + 逐项聚合，`assertBatchShape()` 校验等长同序，`toBotResults()` 转成 bot 形态。M1 只测契约，M2 把 `placeOne` 换成真实 `POST /orders`。
+
+### 1.7 分页与去重
 
 - 订单/持仓：`limit=100` 循环到不足一页；**记录页数**，超过上限（默认 20 页）抛 pagination 异常，不静默截断。
 - 成交：`tradeId` 为主键去重（不按时间戳）；维护 `seenTradeIds` LRU（上限 5,000）。
@@ -91,13 +95,18 @@ Review 提的 `SchemaError` / `PaginationError` **不该是 API 错误类型**�
 2. 全仓（cross）模式下杠杆只影响**保证金占用与最大名义**，不改变权益风险曲线；权益风险由仓位大小决定。
 3. 付费账户交接时杠杆可能已被旧程序改过，硬门槛会直接卡住切换。
 
-替代做法：**读杠杆 → 算容量 → 夹住库存**：
+替代做法：**读杠杆 → 算容量 → 夹住库存**，且**容量不随平台杠杆扩张**：
 
 ```text
-maxOpenNotional = availableBalance × leverage × PR_CAPACITY_USE (默认 0.8)
-超限的买单不下发，记 warn
-leverage > 3 时告警（不是拒绝）
+maxOpenNotional = min(PR_MAX_INV_USD,
+                      availableBalance × min(leverage, PR_CAPACITY_LEVERAGE) × 0.8)
+
+PR_MAX_INV_USD      = 1500   # 固定风险上限
+PR_CAPACITY_LEVERAGE = 1     # 平台报 10x 也只按 1x 算
+leverage > 3x → 告警（不是拒绝，也不放大）
 ```
+
+实现：`src/exchange/pr/shadow.js computeCapacity()`，单测 `test/propr-shadow.test.js`。
 
 ### 2.2 "active attempt 不唯一就拒绝启动"
 

@@ -330,7 +330,7 @@ class ProprExchange extends EventEmitter {
 | # | 内容 | 工日 | 验收 |
 |---|---|---|---|
 | M0 ✅ | 只读探针（free 账户）：13 个端点 + WS，落 `docs/propr/PROBE.md` | 0.5 | **已完成**：费率 1.5/4.5bp、`marginBalance`=权益、规则可从 `/challenges.phases` 读、accountId 前缀可选；`13084` 与 PUT 杠杆仍需写测 |
-| M1 | 适配器读路径 + paper + fixture 单测 | 1.5 | `npm test` 全绿；paper 能跑 1 小时无异常 |
+| M1 ✅ | 适配器读路径 + paper + fixture 单测 + shadow CLI | 1.5 | **已完成**：`src/exchange/pr/{client,errors,mapper,market,paper,shadow,batch,index}.js`、`scripts/pr-shadow.mjs`、5 个测试文件全绿；实盘 shadow 2 轮 `writeAttemptCount=0` |
 | M2 | 写路径（下单/撤单/平仓/幂等） | 1.0 | mock 服务端覆盖部分成功、超时、13084、无仓可减 |
 | M3 | 风控门 + 持久化 + 日切 + 重启 | 1.0 | 单测覆盖：日切、权益过期、breach 检测、重启重锚 |
 | M4 | server/dashboard 接线 | 0.5 | 面板能启停、能看到风控状态 |
