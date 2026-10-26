@@ -301,3 +301,34 @@ test('恢复后首轮重校准：基线锚点同刻校正，不把合法积累�
   await bot.reconcileOpenOrders();
   assert.ok(!bot.alerts.some((a) => a.message.includes('库存与成交流水不符')), '重校准后干净');
 });
+
+test('库存漂移审计：固定基差不重复播报，偏差继续变大才再告警', async () => {
+  const { ex, bot } = await makeBot({}, { ...CFG, sizeBase: 0.5 }); // 容忍 = max(2, ceil(10*0.03)) = 2 格 = 1.0 币
+  const cnt = () => bot.alerts.filter((a) => a.message.includes('库存与成交流水不符')).length;
+  bot.stats.buys = 0; bot.stats.sells = 0;
+
+  // 实际 3.5 vs 推导 0 → 偏差 7 格：首次超限，告警一次
+  ex.positions.set(1, { sizeBase: 3.5, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  await bot.reconcileOpenOrders();
+  assert.equal(cnt(), 1, '首次超限应告警一次');
+
+  // 同一固定基差，下一小时窗口：不应重复播报（此前是每小时刷一条）
+  bot._lastDriftAlertAt = 0;
+  await bot.reconcileOpenOrders();
+  assert.equal(cnt(), 1, '固定基差不重复播报');
+
+  // 偏差再涨 2 格 → 是真漂移，必须再告警
+  ex.positions.set(1, { sizeBase: 4.5, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  bot._lastDriftAlertAt = 0;
+  await bot.reconcileOpenOrders();
+  assert.equal(cnt(), 2, '偏差继续变大应再告警');
+
+  // 回到容忍内（0.5 币 = 1 格 ≤ 2 格容忍）后清标记，之后再超限仍会告警
+  ex.positions.set(1, { sizeBase: 0.5, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  await bot.reconcileOpenOrders();
+  assert.equal(bot._lastDriftGrids, 0, '回落容忍内应清漂移基线');
+  ex.positions.set(1, { sizeBase: 3.5, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  bot._lastDriftAlertAt = 0;
+  await bot.reconcileOpenOrders();
+  assert.equal(cnt(), 3, '清基线后再次超限应重新告警');
+});

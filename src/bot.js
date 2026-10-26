@@ -159,6 +159,7 @@ export class GridBot {
       invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
       auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
       auditSellsBase: this._auditSellsBase ?? 0,
+      lastDriftGrids: this._lastDriftGrids ?? 0,  // 上次播报的库存漂移（静态基差去噪，跨重启保留）
       dynLog: this._dynLog,             // 动态动作记录（毕业评审数据源）
       dynGateBlocked: this._dynGateBlocked, // 门拦截计数
     };
@@ -183,6 +184,7 @@ export class GridBot {
       ? { inventory: 0, calm: 0, cooldown: 0, ...snap.dynGateBlocked } : { inventory: 0, calm: 0, cooldown: 0 };
     this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线
+    this._lastDriftGrids = Number.isFinite(Number(snap.lastDriftGrids)) ? Number(snap.lastDriftGrids) : 0; // 漂移播报基线
     this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0); // 审计锚点（旧快照缺省=从现在重新对账）
     this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
     // Review13: 旧快照缺省时不"只重置锚点"（基线沿用旧值会不同步 layer 假漂移）——打重校准标记，首次观测时基线与锚点同刻校正
@@ -218,6 +220,7 @@ export class GridBot {
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
     this._restorePendingPlacementRetries();
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线（跨重启保留）
+    this._lastDriftGrids = Number.isFinite(Number(snap.lastDriftGrids)) ? Number(snap.lastDriftGrids) : 0; // 漂移播报基线（跨重启保留）
     // 审计锚点：旧快照缺省时取当前 stats（等效"从现在起重新对账"，跨重启不双重计数）
     this._auditBuysBase = Number.isFinite(Number(snap.auditBuysBase)) ? Number(snap.auditBuysBase) : (this.stats.buys || 0);
     this._auditSellsBase = Number.isFinite(Number(snap.auditSellsBase)) ? Number(snap.auditSellsBase) : (this.stats.sells || 0);
@@ -1897,10 +1900,18 @@ export class GridBot {
     const base = this._invBase || 0; // 库存基线（保留持仓重启时不把已知遗留库存当漂移）
     const net = Math.abs(actual - base - expected); // 全带符号：顺带修掉空头基线假警/方向翻转漏报（Review11 P3）
     const tolerance = toleranceGrids * this.config.sizeBase;
-    if (net <= tolerance) return;
+    if (net <= tolerance) { this._lastDriftGrids = 0; return; }
+    const driftGrids = net / this.config.sizeBase;
+    // 静态基差去噪（2026-10-26 实测）：部分成交按最小量补挂会在"实际持仓 vs 成交流水"之间留下
+    // 一个固定基差（实测恒为 2.5 格、不随时间增长）。它不是新的成交确认丢失，却因长期超容忍值
+    // 每小时重复告警，把真正的漏成交淹没。只有偏差相对上次播报继续变大（>=1 格）才再播报；
+    // 回落到容忍内清标记，之后再次超限仍会告警。
+    const lastDrift = Number(this._lastDriftGrids) || 0;
+    const grew = lastDrift <= 0 || driftGrids - lastDrift >= 1;
+    if (!grew) { this._lastDriftGrids = driftGrids; return; }
     if (Date.now() - (this._lastDriftAlertAt || 0) < 60 * 60_000) return;
     this._lastDriftAlertAt = Date.now();
-    const driftGrids = net / this.config.sizeBase;
+    this._lastDriftGrids = driftGrids;
     this._alert(`⚠️ [${this.config.displayName}] 库存与成交流水不符：实际持仓 ${round4(actual)} 币（基线 ${round4(base)}），成交流水推导 ${round4(expected)} 币，偏差 ${driftGrids.toFixed(1)} 格（> 容忍 ${toleranceGrids} 格）。疑似成交确认丢失，请核对交易所真实挂单/成交并考虑重启网格补齐空洞档位。`);
   }
 
