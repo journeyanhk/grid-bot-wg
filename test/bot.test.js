@@ -617,6 +617,27 @@ test('start 会重置活动水位（防停机后重启被误杀）', async () =>
 
 // 2026-10-26 实测：sizeBase == minOrderSize 时，任何部分成交都低于最小下单量，
 // 旧逻辑直接跳过补腿 → 现价附近 3 小时攒出 10 档永久空洞。改为按最小量补挂。
+test('死手全撤后残留少数单（非 0 单）：连续多轮大面积缺格应自动重铺', async () => {
+  const ex = new MockExchange();
+  const bot = new GridBot(ex);
+  bot._alert = () => {};
+  bot.running = true;
+  bot.config = { ...bot.config, marketId: 1, mode: 'neutral', lower: 90, upper: 110, gridCount: 20, sizeBase: 0.1 };
+  bot.grid = { lower: 90, upper: 110, levels: Array.from({ length: 21 }, (_, i) => 90 + i), spacing: 1, sizeBase: 0.1, marketId: 1 };
+  let rebuilds = 0;
+  bot.refillGrid = async () => { rebuilds += 1; };
+  for (let i = 0; i < 20; i += 1) bot.active.set(`o${i}`, { orderId: `o${i}`, levelIndex: i, side: 'buy', price: 90 + i, sizeBase: 0.1 });
+  ex.orders.clear();
+  // 交易所只活下来 1 张：massVanish 的「0 单」判据不成立，旧逻辑只 prune 不重铺
+  ex.orders.set('o5', { marketId: 1, side: 'buy', price: 95, sizeBase: 0.1, levelIndex: 5, orderId: 'o5' });
+  for (let i = 0; i < 3; i += 1) await bot.reconcileOpenOrders();
+  await sleep(20);
+  assert.equal(rebuilds, 0, '前 3 轮还在确认期，不应立刻重铺');
+  await bot.reconcileOpenOrders();
+  await sleep(20);
+  assert.equal(rebuilds, 1, '连续 4 轮大面积缺格应自动重铺一次');
+});
+
 test('部分成交低于最小下单量：仍按最小量补挂对腿（不留空洞）', async () => {
   const mkt = { marketId: 1, name: 'BTC-USD', displayName: 'BTC-USD', symbol: 'BTC',
     stepSize: 0.00001, stepPrice: 1, maxLeverage: 50, minOrderSize: 0.0001, lastPrice: 150 };

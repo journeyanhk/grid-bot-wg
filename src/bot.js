@@ -12,6 +12,12 @@ const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 
 // 挂单"全撤"确认门：连续多少轮对账都拿到 0 单才认定是真的没了（对账约 30 秒一轮）。
 const MASS_VANISH_CONFIRM_ROUNDS = 3;
+// 阶梯"塌陷"（非全撤）：死手/交易所批量撤销后仍残留少数挂单时 massVanish 不会触发，
+// 旧逻辑只做 prune，没有重铺出口，网格会长期空转（2026-10-26 实测空了 4.5 小时）。
+// 连续 N 轮缺口占比 ≥50% 才视为塌陷并重建，抖动期内不动手。
+const LADDER_COLLAPSE_ROUNDS = 4;
+const LADDER_COLLAPSE_RATIO = 0.5;
+const LADDER_COLLAPSE_MIN_HOLES = 10;
 
 export class GridBot {
   constructor(exchange, opts = {}) {
@@ -1818,10 +1824,27 @@ export class GridBot {
       if (sig && sig !== this._lastGapSig && now - (this._lastGapAlertAt || 0) > 600_000) {
         this._lastGapSig = sig;
         this._lastGapAlertAt = now;
-        this._alert(`⚠️ 阶梯缺口 ${holes.length} 档（索引 ${holes[0]}~${holes[holes.length - 1]}），最活跃区间可能瘫痪；对账不会自动重铺，需人工补挂或重铺。`);
+        this._alert(`⚠️ 阶梯缺口 ${holes.length} 档（索引 ${holes[0]}~${holes[holes.length - 1]}），最活跃区间可能瘫痪；对账不补单，连续 ${LADDER_COLLAPSE_ROUNDS} 轮大面积缺格才自动重铺，零散缺口需人工补挂。`);
         this._changed();
       } else if (!sig) {
         this._lastGapSig = '';
+      }
+
+      // 阶梯塌陷自愈：死手全撤、交易所批量撤单等场景常常留下 1~3 张幸存单，
+      // 此时 massVanish 的「0 单」判据不成立，reconcile 只清理不重铺，网格会一直空着。
+      // 只有在「区间内、非恢复模式、连续多轮大面积缺格」时才自动重建，避免误伤抖动。
+      const levelsTotal = Math.max(1, this.grid?.levels?.length || 0);
+      const collapsed = holes.length >= Math.max(LADDER_COLLAPSE_MIN_HOLES, levelsTotal * LADDER_COLLAPSE_RATIO);
+      if (collapsed) {
+        this._collapseStreak = (this._collapseStreak || 0) + 1;
+      } else {
+        this._collapseStreak = 0;
+      }
+      if (collapsed && this._collapseStreak >= LADDER_COLLAPSE_ROUNDS) {
+        const left = levelsTotal - holes.length;
+        this._collapseStreak = 0;
+        this._alert(`🛠 阶梯塌陷已确认（连续 ${LADDER_COLLAPSE_ROUNDS} 轮缺口 ${holes.length}/${levelsTotal}，仅剩 ${left} 档）：自动重铺网格。`);
+        try { this._autoReseedAfterVanish(); } catch { /* ignore */ }
       }
     }
 
