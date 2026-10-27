@@ -257,6 +257,8 @@ export function parseAccount(payload) {
     marginUsed: num(pick(obj, ['marginUsed', 'totalMarginUsed']), null),
     unrealizedPnl: num(pick(obj, ['unrealizedPnl', 'unrealized_pnl']), null),
     realizedPnl: num(pick(obj, ['realizedPnl', 'realized_pnl']), null),
+    // 入金累计（对账用：equity 与 netDeposits 的差额才是真实盈亏）
+    netDeposits: num(pick(obj, ['netDeposits', 'net_deposits']), null),
     raw: payload,
   };
 }
