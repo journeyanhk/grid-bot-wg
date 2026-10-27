@@ -19,6 +19,7 @@ export function createExchange(cfg = {}) {
       deadmanMs: cfg.deadmanMs,
       pollMs: cfg.pollMs,
       maxMakerFeePpm: cfg.maxMakerFeePpm,
+      minGridNetUsd: cfg.minGridNetUsd,
     });
   }
   const paper = new ArcusPaperExchange({
@@ -29,5 +30,6 @@ export function createExchange(cfg = {}) {
   });
   // 与 live 保持同一启动闸门语义，便于 paper 复现主网费率判断。
   paper.maxMakerFeePpm = Number.isFinite(Number(cfg.maxMakerFeePpm)) ? Number(cfg.maxMakerFeePpm) : 200;
+  paper.minGridNetUsd = Number.isFinite(Number(cfg.minGridNetUsd)) ? Number(cfg.minGridNetUsd) : 0;
   return paper;
 }

@@ -24,6 +24,7 @@ const rungs = Number(arg('rungs', 66));
 const spacingPct = Number(arg('spacing-pct', 0.09));      // 百分比，如 0.09 表示 0.09%
 const sizeBase = Number(arg('size', 0.0002));
 const leverage = Number(arg('leverage', 10));
+const minNet = Number(arg('min-net', process.env.AR_MIN_GRID_NET_USD || 0.01));
 const marketHint = String(arg('market', process.env.AR_MARKET || 'BTC-USD'));
 
 const rows = [];
@@ -93,7 +94,7 @@ add(feePpm <= ex.maxMakerFeePpm, 'maker 费率闸门', `maker ${feePpm} ppm / ta
 add(Math.abs(ex.clockSkewMs ?? 999) < 1200, '时钟偏差', `${fmt(ex.clockSkewMs, 0)} ms（>1200ms 需校时，签名时间戳已被补偿）`);
 add(Number(freeCollateral) > 0, '账户可用保证金', `equity ${fmt(acct?.equity)} / free ${fmt(freeCollateral)} / netDeposits ${fmt(acct?.netDeposits)} / balance ${fmt(acct?.balance)}`);
 add(margin != null && Number(freeCollateral) >= margin * 1.2, '保证金充足', `需 ${fmt(margin)}（名义 ${fmt(notional)} @ ${leverage}x），可用 ${fmt(freeCollateral)}，余量 ${fmt(Number(freeCollateral) - (margin ?? 0))}`);
-add(netPerRung != null && netPerRung > 0, '单格净利为正', `毛利 ${fmt(grossPerRung, 4)} − 双边费 ${fmt(feePerRung, 4)} = ${fmt(netPerRung, 4)} / 格（盈亏平衡格距 ${(2 * feePpm / 1e4).toFixed(3)}%）`);
+add(netPerRung != null && netPerRung >= minNet, '单格净利红线', `毛利 ${fmt(grossPerRung, 4)} − 双边费 ${fmt(feePerRung, 4)} = ${fmt(netPerRung, 4)} / 格，红线 $${minNet}（盈亏平衡格距 ${(2 * feePpm / 1e4).toFixed(3)}%）`);
 add(sizeBase * price >= Number(m.minOrderNotional) && sizeBase >= Number(m.minOrderSize), '最小下单量', `size ${sizeBase} × ${fmt(price)} = ${fmt(sizeBase * price)} ≥ minNotional ${m.minOrderNotional}，size ≥ minOrderSize ${m.minOrderSize}`);
 
 let openOrders = [];

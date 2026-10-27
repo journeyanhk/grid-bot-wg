@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+## [1.6.40] - 2026-10-27
+
+### 单格净利红线进启动断言（费率上限只是代理指标）
+
+评审结论：`AR_MAX_MAKER_FEE_PPM` 挡不住「费率 190 ppm + 窄间距」这种组合，真正的不变量是单格净利。
+- 新增 `netPerRungUsd({spacing,sizeBase,price,feeRate})`：毛利 = 间距×size，费项 = 2×feeRate×size×price。
+- `bot.start()` 在铺单前算一次：低于 `ex.minGridNetUsd` 直接抛错拒启（主网默认 **$0.01**，testnet/paper 默认 0，避免历史窄间距档在重启时被拒）。
+- `risk` 暴露 `perRungNet`（4 位小数）与 `sizeBase`，验收可直接读 state。
+- `scripts/preflight-arcus.mjs` 增加 `--min-net`（默认 $0.01）红线检查。
+- 回归：0.09% 间距在 150 ppm 下净利 $0.00954 必须拒启、0.10% 的 $0.01113 必须放行。
+
+
 ## [1.6.39] - 2026-10-27
 
 ### 启动闸门改为可配置 maker 费率上限（主网 150 ppm 不再被 0 ppm 硬闸挡住）

@@ -22,6 +22,19 @@ const LADDER_COLLAPSE_ROUNDS = 4;
 const LADDER_COLLAPSE_RATIO = 0.25;
 const LADDER_COLLAPSE_MIN_HOLES = 8;
 
+/**
+ * 单格往返净利（USD）：间距×每格数量 − 双边 maker 费。
+ * 费率按名义额收，所以费项 = 2 × feeRate × size × price。
+ * 这是网格真正的盈利不变量：费率上限（AR_MAX_MAKER_FEE_PPM）挡不住
+ * "费率 190 ppm + 窄间距" 这种组合，只有净利本身能。
+ */
+export function netPerRungUsd({ spacing, sizeBase, price, feeRate }) {
+  const gross = Number(spacing) * Number(sizeBase);
+  const fee = 2 * Number(feeRate) * Number(sizeBase) * Number(price);
+  if (![gross, fee].every(Number.isFinite)) return null;
+  return gross - fee;
+}
+
 export class GridBot {
   constructor(exchange, opts = {}) {
     this.ex = exchange;
@@ -548,6 +561,29 @@ export class GridBot {
       this._alert(`⚠️ 网格间距 ${this.risk.spacingPct}% 不足以覆盖往返手续费（约 ${round2(roundTripFeePct)}%），每完成一格可能亏损。建议拉大间距或减少网格数。`);
     }
 
+    // ---- 单格净利红线（硬断言）----
+    // 费率上限只是代理指标：190 ppm + 窄间距同样能过闸门却做亏本生意。
+    // 交易所给 minGridNetUsd（Arcus 主网默认 0.01）时，算不过这条线就直接拒启。
+    const minNetUsd = Number(this.ex.minGridNetUsd ?? 0);
+    if (Number.isFinite(minNetUsd) && minNetUsd > 0) {
+      const mid = (this.config.lower + this.config.upper) / 2;
+      const net = netPerRungUsd({
+        spacing: this.grid.spacing, sizeBase: this.config.sizeBase, price: mid, feeRate,
+      });
+      if (net == null) {
+        this._alert('⚠️ 单格净利无法计算（参数异常），已跳过红线校验。');
+      } else if (net < minNetUsd) {
+        throw new Error(
+          `单格净利 $${net.toFixed(4)} 低于红线 $${minNetUsd}：`
+          + `间距 $${round2(this.grid.spacing)} × ${this.config.sizeBase} = $${round2(this.grid.spacing * this.config.sizeBase)} 毛利，`
+          + `扣双边 ${Math.round(feeRate * 1e6)} ppm ≈ $${round2(2 * feeRate * this.config.sizeBase * mid)}。`
+          + `请放宽间距或加大每格数量后再启动。`,
+        );
+      } else {
+        this._alert(`单格净利 $${net.toFixed(4)}（红线 $${minNetUsd}）：间距 $${round2(this.grid.spacing)} / ${this.config.sizeBase} / maker ${Math.round(feeRate * 1e6)} ppm。`);
+      }
+    }
+
     const levOk = await this.ex.setLeverage(market.marketId, leverage).catch(() => false);
     if (levOk === false) this._alert(`⚠️ 杠杆设置 ${leverage}x 未生效，将沿用交易所端该市场的当前杠杆，请在交易所网页端核实后再继续。`);
     await this._cancelAllConfirmed(market.marketId, '启动网格前撤销原有挂单');
@@ -806,6 +842,12 @@ export class GridBot {
       notional: round2(notional),
       requiredMargin: round2(notional / this.config.leverage),
       perRungProfit: round2(this.grid.spacing * this.config.sizeBase),
+      // 扣双边 maker 费后的净利（$0.0111 这种量级，四舍五入到 4 位否则全是 0.01）
+      perRungNet: Number(netPerRungUsd({
+        spacing: this.grid.spacing, sizeBase: this.config.sizeBase, price: mid,
+        feeRate: Number(this.ex?.displayFeeRate ?? this.ex?.feeRate ?? 0),
+      })?.toFixed(4) ?? 0),
+      sizeBase: this.config.sizeBase,
       spacingPct: round2((this.grid.spacing / mid) * 100),
     };
   }

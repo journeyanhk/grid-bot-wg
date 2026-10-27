@@ -682,6 +682,33 @@ test('部分成交低于最小下单量：仍按最小量补挂对腿（不留�
   assert.ok(bot._dustPromoted > 0, '漂移已记账');
 });
 
+test('单格净利红线：150ppm 下 0.09% 间距拒启，0.10% 放行（review 2026-10-27）', async () => {
+  const mk = (pct) => {
+    const px = 79500, spacing = px * pct / 100, half = spacing * 66 / 2;
+    const ex = new MockExchange({ feeRate: 0.00015, balance: 100000 });
+    ex.minGridNetUsd = 0.01;
+    ex.prices.set(1, px);
+    ex.marketDefs[0].lastPrice = px;
+    return { ex, cfg: { marketId: 1, mode: 'neutral', lower: px - half, upper: px + half,
+      gridCount: 66, sizeBase: 0.0002, leverage: 10, outOfRangeAction: 'recover', outDwellMs: 0 } };
+  };
+
+  // 0.09%：毛利 $0.01431 − 双边费 $0.00477 = $0.00954 < $0.01 → 必须拒绝
+  const bad = mk(0.09);
+  const badBot = new GridBot(bad.ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await assert.rejects(() => badBot.start(bad.cfg), /低于红线/, '0.09% 间距单格净利 0.0095 必须被拒');
+  assert.equal(badBot.running, false, '拒启后不得处于运行态');
+  assert.equal(bad.ex.orders.size, 0, '拒启前不得下任何单');
+
+  // 0.10%：$0.0159 − $0.00477 = $0.01113 ≥ $0.01 → 放行，且 risk 暴露净利
+  const good = mk(0.10);
+  const goodBot = new GridBot(good.ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await goodBot.start(good.cfg);
+  assert.equal(goodBot.running, true);
+  assert.ok(goodBot.risk.perRungNet >= 0.011, `risk.perRungNet 应约为 0.0111，实际 ${goodBot.risk.perRungNet}`);
+  assert.equal(goodBot.risk.sizeBase, 0.0002, 'risk 暴露 sizeBase 供验收');
+});
+
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
 (async () => {
   for (const [name, fn] of T) {

@@ -99,6 +99,11 @@ export class ArcusExchange extends EventEmitter {
     this.marketHint = opts.market || '';       // 可选：默认市场（如 BTC-USD）
     // 启动闸门上限：主网 BTC-USD 实测 maker 150 ppm，硬写 0 会拒绝启动。
     this.maxMakerFeePpm = Number.isFinite(Number(opts.maxMakerFeePpm)) ? Number(opts.maxMakerFeePpm) : 200;
+    // 单格净利红线（USD）：间距×size − 双边 maker 费 < 此值则拒绝启动。
+    // 主网默认 0.01：150 ppm 费下 0.09% 间距只剩 $0.0095，必须把不变量写成断言。
+    // testnet 默认 0（不拦），免得历史的窄间距档位在重启时被拒。
+    const dfltMinNet = this.network === 'mainnet' ? 0.01 : 0;
+    this.minGridNetUsd = Number.isFinite(Number(opts.minGridNetUsd)) ? Number(opts.minGridNetUsd) : dfltMinNet;
 
     this.markets = new Map();
     this._prices = new Map();

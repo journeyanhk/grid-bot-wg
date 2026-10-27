@@ -476,6 +476,16 @@ test('主网 maker 费率闸门：150 ppm 在默认 200 上限内放行，250 pp
   assert.equal(assertMakerFree({ displayName: 'X', makerFeePpm: null }, 200), true, '费率未知时放行，由适配器告警');
 });
 
+test('单格净利红线默认值：主网 0.01，testnet 0（避免历史窄间距在重启时被拒）', () => {
+  const live = createExchange({ mode: 'live', network: 'mainnet', address: `0x${'a'.repeat(40)}`, signingKey: 'ab'.repeat(32) });
+  assert.equal(live.minGridNetUsd, 0.01, '主网必须默认 0.01 红线');
+  assert.equal(live.maxMakerFeePpm, 200);
+  const tn = createExchange({ mode: 'live', network: 'testnet', address: `0x${'a'.repeat(40)}`, signingKey: 'ab'.repeat(32) });
+  assert.equal(tn.minGridNetUsd, 0, 'testnet 默认不拦');
+  const paper = createExchange({ mode: 'paper' });
+  assert.equal(paper.minGridNetUsd, 0, 'paper 默认不拦');
+});
+
 test('createExchange 透传 maxMakerFeePpm（默认 200）', () => {
   const ex = createExchange({ mode: 'paper' });
   assert.equal(ex.maxMakerFeePpm, 200, '未配置时应回落到 200 ppm');

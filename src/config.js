@@ -119,6 +119,8 @@ export function getConfig() {
     feeRate: Number(process.env.AR_FEE_RATE || 0),
     // 主网启动闸门：maker 费超过此值直接拒绝启动（主网 BTC-USD 实测 150 ppm）。
     maxMakerFeePpm: Number(process.env.AR_MAX_MAKER_FEE_PPM ?? 200),
+    // 单格净利红线（USD）：间距×size − 双边费低于它拒启；主网默认 0.01，testnet 默认 0。
+    minGridNetUsd: Number(process.env.AR_MIN_GRID_NET_USD ?? ''),
     deadmanMs: Number(process.env.AR_DEADMAN_MS || 60_000),
     // 全局止损线（USDC，按盘口价重算）：持仓亏到这条线强制平仓停止；0 = 不启用。
     stopLossUsd: Number(process.env.AR_STOP_LOSS_USD ?? 50),
