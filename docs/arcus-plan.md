@@ -35,7 +35,7 @@
 
 | 项 | 实测 |
 |---|---|
-| BTC-USD | `marketId=1`，tick 0.1（tickTiers），step 1e-8，minOrderSize 0.0001，minNotional $5，**maker 0 ppm / taker 225 ppm**，IMF 2.5%（≈40x） |
+| BTC-USD | `marketId=1`，tick 0.1（tickTiers），step 1e-8，minOrderSize 0.0001，minNotional $5，**maker 150 ppm / taker 450 ppm（Tier 0，2026-10-27 实测；早期误记 0/225）**，IMF 2.5%（≈40x） |
 | 下单签名 | Scheme 1 类型化载荷，键排序 `ad ai ct g id m op p q r s t v`；`ct` **纳秒**；`g` = goodTilTime(µs)×1000；`p`/`q` 为 tick/quantum 整数；body 里 price/qty 十进制串必须与之一致 |
 | 其它签名 | Scheme 2（timestamp + action + canonical body）：`cancelAllOrders` / `setLeverage` / WS `authenticate`；批量下单每张单独签、共用 `X-Timestamp`、头里放任一张的签名 |
 | GTT | **每单必填**，µs，≥ 现在 + 1 个月 |
@@ -59,7 +59,7 @@ Arcus 价差 0.1（0.012 bps），但顶档 bid 0.00078 BTC vs ask 3.56 BTC（�
 
 ```
 单格名义     = 0.0002 BTC × 82,600      ≈ $16.5
-单格毛利     = $50 间距 = 6.05 bps      ≈ $0.0100（maker 0 费时才成立）
+单格毛利     = size × 格距 ；净利 = size × (格距% − 2×150ppm)，盈亏平衡格距 0.03%
 单次 taker 腿 = $16.5 × 22.5 bps        ≈ $0.0370  ← 一次就吃掉 3.7 格
 全梯 132 格往返一次                      ≈ $1.32
 BTC 日内 1% 振幅（$826 ÷ $50 ≈ 16 格来回）≈ 30-40 格成交 ≈ $0.3-0.4/天
@@ -101,7 +101,7 @@ src/exchange/ar/
 4. 时钟：`ct` 容差 ±5s，启动自检 `Date.now()` 与 `/v1/time`（或 `Date` 头）偏差，>2s 拒绝启动。
 5. `cancelAll(marketId)` 实现为"先 `getOpenOrders` 过滤市场，再 `batchCancelOrders`（≤100/批）"；账户级 `cancelAllOrders`（-100 权重）只留给 panic/stop。
 6. 市场闸门：`regularTradingHours !== null` 或非 CRYPTO → 直接拒绝启动（42 个股票类市场）。
-7. 启动断言：`makerFeePpm === 0`，否则打印单格净利并**拒绝启动**（你的规则保留，判定前置到启动）。
+7. 启动断言：`makerFeePpm > AR_MAX_MAKER_FEE_PPM`（默认 200 ppm）才拒绝启动。主网实测 150 ppm，硬写 0 会直接拒启（v1.6.39 已改）。
 8. `stop()` 顺序：撤单 → 等确认 → 解除死手 → 断 WS。
 
 ---
@@ -116,7 +116,7 @@ src/exchange/ar/
 | **D3** (1d) | `arcus.js` REST 全通 | testnet 满梯 132 单铺 → 撤 → 重铺（9 批 × 15）；`getPosition/equity` 与网页一致 | — |
 | **D4** (1d) | 成交真值环 + WS 行情 | 拔网线：WS 断 → 行情降级 REST → 重连补订阅 → 对账零重复；`fills` 游标不丢不重（构造断点回放） | 可后置 `trades` 频道 |
 | **D5** (1d) | `paper.js` + 6 处接线 + 概览卡片 + wiki | 实验 VPS 起 paper 24h；`npm test` 全绿；面板能切到 Arcus | **UI tab 可后置**（先复用 paper 页）→ 省 0.5d |
-| **D6** (0.5d) | 主网半梯：66 格 / $100 / 0.0002 / $400 / 10x | 启动自检行（间距、makerFee=0、GTT、死手已武装）、48h 观察窗起点、首小时逐笔对账零差 | 需你亲自按开关 |
+| **D6** (0.5d) | 主网半梯：66 格 / 0.0002 / 10x（名义 ~$1.05k、保证金 ~$105） | 启动自检行（间距、makerFee=0、GTT、死手已武装）、48h 观察窗起点、首小时逐笔对账零差 | 需你亲自按开关 |
 | **D7** (0.5d) | 观察窗内校准 | 实测成交密度、库存峰值、recover 阶梯触发次数 → 定满梯参数与 `recover+$X` | — |
 
 压缩版：只要 testnet + paper 验证（不接 UI、不上主网）→ **5 个工作日**。
@@ -165,7 +165,7 @@ src/exchange/ar/
 | 批量撤单 | 202 ACK，**撤净 110ms**（调用 791ms，含轮询确认） | 必须轮询确认，不能只看 202 |
 | 死手 arm/disarm | deadline +240s，撤销成功 | 安全网可用 |
 | 子账户池 | order used 17 / cap 20,000；cancel used 40 / cap 40,000 | 132 单/次重铺 → 约 150 次重铺才见底，非瓶颈 |
-| 费率 | testnet 模拟 150/450 ppm；主网 0/225 | 守卫在 testnet 只告警，主网 maker>0 直接拒启 |
+| 费率 | testnet 模拟 150/450 ppm；主网实测 150/450 ppm | 守卫在 testnet 只告警，主网超 `AR_MAX_MAKER_FEE_PPM`（默认 200）拒启 |
 | fills(from=µs) | rows=0（无成交） | 游标链路通，待充值后验证真实成交 |
 
 ### D1 抓到的两个真实缺陷（已修）
