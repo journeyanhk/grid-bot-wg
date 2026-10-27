@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+## [1.6.41] - 2026-10-27
+
+### `AR_MARKET` 指定默认市场（主网 75 个市场，默认挑选不可控）
+
+主网 `_defaultMarket()` 取「第一个可交易市场」，可能是股票/商品永续而非 BTC-USD。
+- `config.ar.market = AR_MARKET`，工厂透传为 `marketHint`，启动闸门与行情订阅都按它走。
+- `.env.example` 补 `AR_MARKET=BTC-USD`；回归断言 `marketHint === 'BTC-USD'`。
+
+
 ## [1.6.40] - 2026-10-27
 
 ### 单格净利红线进启动断言（费率上限只是代理指标）

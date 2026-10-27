@@ -480,6 +480,8 @@ test('单格净利红线默认值：主网 0.01，testnet 0（避免历史窄间
   const live = createExchange({ mode: 'live', network: 'mainnet', address: `0x${'a'.repeat(40)}`, signingKey: 'ab'.repeat(32) });
   assert.equal(live.minGridNetUsd, 0.01, '主网必须默认 0.01 红线');
   assert.equal(live.maxMakerFeePpm, 200);
+  const hinted = createExchange({ mode: 'live', network: 'mainnet', address: `0x${'a'.repeat(40)}`, signingKey: 'ab'.repeat(32), market: 'BTC-USD' });
+  assert.equal(hinted.marketHint, 'BTC-USD', 'AR_MARKET 必须透传成 marketHint（主网 75 个市场不能靠默认挑）');
   const tn = createExchange({ mode: 'live', network: 'testnet', address: `0x${'a'.repeat(40)}`, signingKey: 'ab'.repeat(32) });
   assert.equal(tn.minGridNetUsd, 0, 'testnet 默认不拦');
   const paper = createExchange({ mode: 'paper' });

@@ -9,6 +9,7 @@ export function createExchange(cfg = {}) {
     return new ArcusExchange({
       address: cfg.address,
       accountIndex: cfg.accountIndex ?? 0,
+      market: cfg.market,
       keyHex: cfg.signingKey,
       keyPath: cfg.signingKeyFile || '',
       apiUrl: cfg.apiUrl,
