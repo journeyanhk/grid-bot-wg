@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+## [1.6.42] - 2026-10-27
+
+### 主网「上限内的 maker 费率」不再污染 operationalIssue
+
+主网实盘首日 `operationalIssue` 一直是「Arcus maker 费率非零」——把已知成本当成了故障，
+会让 7 天观察窗的「全程 None」验收永远失败。
+- 分段：testnet 模拟费率 → `feeWarning`；mainnet 费率 ≤ `AR_MAX_MAKER_FEE_PPM` → `feeWarning`（已知成本，净利红线已扣）；
+  只有 **超出上限** 才升 `operationalIssue`（且正常情况下会被 `assertMakerFree` 拦在启动前）。
+- beta 免费期恢复（费率回到 0）时自动收掉自家那条费率异常，不误清其他 issue。
+
+
 ## [1.6.41] - 2026-10-27
 
 ### `AR_MARKET` 指定默认市场（主网 75 个市场，默认挑选不可控）

@@ -409,14 +409,20 @@ test('testnet 模拟费率只进 warning，不污染 operationalIssue', async ()
     tickSize: '0.1', stepSize: '0.00000001', minOrderNotional: '5',
     maxLeverage: 40, status: 'ONLINE',
   }] };
-  const expectations = [['testnet', false], ['mainnet', true]];
+  // 上限内（150 ≤ 200）都不是运营异常：mainnet 的真实费率是已知成本，净利红线已扣过
+  const expectations = [['testnet', false], ['mainnet', false]];
   for (const [network, shouldFlag] of expectations) {
     const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network });
     ex._http = async () => markets;
     await ex._loadMarkets(true);
     assert.equal(!!ex.operationalIssue, shouldFlag, `${network} 的 operationalIssue 判定`);
-    if (!shouldFlag) assert.ok(ex.feeWarning, 'testnet 要留 warning 供巡检查看');
+    assert.ok(ex.feeWarning, `${network} 要留 warning 供巡检查看`);
   }
+  // 超出 maker 上限（250 > 200）才升成运营异常
+  const over = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network: 'mainnet' });
+  over._http = async () => ({ markets: [{ ...markets.markets[0], effectiveMakerFeePpm: 250 }] });
+  await over._loadMarkets(true);
+  assert.match(over.operationalIssue?.title || '', /超上限/);
 });
 
 test('空轮成交轮询也要打心跳（否则游标年龄永远是 null）', async () => {

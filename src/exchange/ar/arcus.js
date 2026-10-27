@@ -395,16 +395,24 @@ export class ArcusExchange extends EventEmitter {
     // operationalIssue 会让测试网长跑永远挂着一条"运营异常"，验收单的
     // "operationalIssue 全程 null" 也就永远不可能通过。测试网只留 warning。
     if (def && def.makerFeePpm > 0) {
-      const message = `BTC-USD maker ${def.makerFeePpm}ppm / taker ${def.takerFeePpm}ppm。单格毛利约 $0.01，请重算净利后再启动实盘。`;
+      const message = `BTC-USD maker ${def.makerFeePpm}ppm / taker ${def.takerFeePpm}ppm（上限 ${this.maxMakerFeePpm}ppm）。`
+        + '单位经济由 risk.perRungNet 把关：间距×size − 双边费 必须 ≥ AR_MIN_GRID_NET_USD。';
       if (this.network === 'testnet') {
         this.feeWarning = { title: 'testnet 模拟费率', message };
         logger.warn('ar', `${message}（testnet 模拟费率，不计入 operationalIssue）`);
+      } else if (def.makerFeePpm > this.maxMakerFeePpm) {
+        // 只有"超出上限"才是运营异常（正常会被 assertMakerFree 直接拦在启动前）。
+        this.operationalIssue = { title: 'Arcus maker 费率超上限', message };
+        logger.warn('ar', message);
       } else {
-        this.operationalIssue = { title: 'Arcus maker 费率非零', message };
+        // 主网上限内的真实费率是已知成本，不是异常：净利红线已经扣过它了。
+        this.feeWarning = { title: '主网 maker 费率', message };
         logger.warn('ar', message);
       }
     } else {
       this.feeWarning = null;
+      // beta 免费期恢复时把自家那条费率异常收掉（别误清别人的 issue）
+      if (String(this.operationalIssue?.title || '').includes('maker 费率')) this.operationalIssue = null;
     }
   }
 
