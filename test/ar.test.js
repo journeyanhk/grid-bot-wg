@@ -197,7 +197,8 @@ test('assertMakerFree fails fast once the beta ends', () => {
   const [btc] = parseMarkets({ markets: [BTC] });
   assert.equal(assertMakerFree(btc), true);
   const [paid] = parseMarkets({ markets: [{ ...BTC, effectiveMakerFeePpm: 10 }] });
-  assert.throws(() => assertMakerFree(paid), /maker 费/);
+  assert.throws(() => assertMakerFree(paid), /maker fee 10 ppm/);
+  assert.equal(assertMakerFree(paid, 200), true, '上限放宽后 10 ppm 应放行');
 });
 
 console.log('ar/market.js — endpoints and parsers');
@@ -463,6 +464,23 @@ test('WS 静默超过阈值时强制断开并走 REST 兜底', () => {
   ex._wsReady = true; ex._ws = { close() { closed += 1; } }; ex._lastWsMsgAt = Date.now();
   ex._pollPrices().catch(() => {});
   assert.equal(closed, 1, '有新鲜帧时不得断开');
+});
+
+
+test('主网 maker 费率闸门：150 ppm 在默认 200 上限内放行，250 ppm 拒启动', () => {
+  const mk = (ppm) => ({ displayName: 'BTC-USD', makerFeePpm: ppm, takerFeePpm: 450 });
+  assert.equal(assertMakerFree(mk(0)), true, '免手续费仍放行');
+  assert.throws(() => assertMakerFree(mk(150)), /maker fee 150 ppm/, '默认上限为 0 时 150 ppm 必须拒绝（旧行为）');
+  assert.equal(assertMakerFree(mk(150), 200), true, '上限 200 ppm 时主网 150 ppm 应放行');
+  assert.throws(() => assertMakerFree(mk(250), 200), /exceeds limit 200 ppm/, '超上限必须拒绝');
+  assert.equal(assertMakerFree({ displayName: 'X', makerFeePpm: null }, 200), true, '费率未知时放行，由适配器告警');
+});
+
+test('createExchange 透传 maxMakerFeePpm（默认 200）', () => {
+  const ex = createExchange({ mode: 'paper' });
+  assert.equal(ex.maxMakerFeePpm, 200, '未配置时应回落到 200 ppm');
+  const ex2 = createExchange({ mode: 'paper', maxMakerFeePpm: 50 });
+  assert.equal(ex2.maxMakerFeePpm, 50, '显式配置必须透传');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

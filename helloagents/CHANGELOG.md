@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+## [1.6.39] - 2026-10-27
+
+### 启动闸门改为可配置 maker 费率上限（主网 150 ppm 不再被 0 ppm 硬闸挡住）
+
+主网 BTC-USD 的 `effectiveMakerFeePpm` 实测为 **150 ppm**（taker 450 ppm），而 `assertMakerFree`
+把上限硬写成 0，导致主网 live 启动会被直接拒绝。现改为 `AR_MAX_MAKER_FEE_PPM`（默认 200 ppm）：
+- `assertMakerFree(market, maxPpm = 0)` 语义不变，但上限可传；超限报错带实测费率与上限。
+- 适配器构造时读 `maxMakerFeePpm`（默认 200），paper 适配器同样挂该字段，便于 paper 复现主网判断。
+- 主网启动时若 maker > 0，额外打 WARN 说明「单格往返扣 2×maker ppm，格距必须显著大于它」。
+- 经济含义：单格往返净利 = size × (spacingPct − 2×makerFeePpm)，150 ppm 对应盈亏平衡格距 0.03%。
+
+
 ## [1.6.38] - 2026-10-26
 
 ### 部分成交低于最小下单量时改为「按最小量补挂」，不再放弃对腿

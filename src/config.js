@@ -115,8 +115,10 @@ export function getConfig() {
     paperApiUrl: (process.env.AR_PAPER_API_URL || '').replace(/\/$/, ''),
     paperNetwork: process.env.AR_PAPER_NETWORK || 'mainnet',
     wsUrl: process.env.AR_WS_URL || arDefaults.ws,
-    // maker 0 ppm 时网格才成立；未知按 0 处理，适配器启动时会读真实费率复核。
+    // 单格毛利仅几美分，双边 maker 费必须显著低于格距；未知按 0 处理，启动时读真实费率复核。
     feeRate: Number(process.env.AR_FEE_RATE || 0),
+    // 主网启动闸门：maker 费超过此值直接拒绝启动（主网 BTC-USD 实测 150 ppm）。
+    maxMakerFeePpm: Number(process.env.AR_MAX_MAKER_FEE_PPM ?? 200),
     deadmanMs: Number(process.env.AR_DEADMAN_MS || 60_000),
     // 全局止损线（USDC，按盘口价重算）：持仓亏到这条线强制平仓停止；0 = 不启用。
     stopLossUsd: Number(process.env.AR_STOP_LOSS_USD ?? 50),

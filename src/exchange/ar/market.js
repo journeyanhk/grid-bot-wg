@@ -106,13 +106,15 @@ export function assertGridTradable(market) {
 }
 
 /**
- * The whole strategy is premised on zero maker fees: one grid is worth ~1 cent,
- * so a single ppm of maker fee is a meaningful share of the edge. Fail fast.
+ * One grid round trip is worth size x spacing (a few cents); the fee on each leg
+ * is size x ppm, so break-even spacing equals 2 x makerFeePpm. Gate on a
+ * configurable ceiling instead of hard-coding "zero": mainnet BTC-USD charges
+ * 150 ppm maker, and a hard 0 ppm gate would refuse to start at all.
  */
-export function assertMakerFree(market) {
+export function assertMakerFree(market, maxPpm = 0) {
   if (market?.makerFeePpm == null) return true; // unknown: adapter logs a warning
-  if (market.makerFeePpm > 0) {
-    throw new Error(`${market.displayName} maker 费 ${market.makerFeePpm} ppm 超过上限 0 ppm（网格毛利约 1 美分/格），拒绝启动。`);
+  if (market.makerFeePpm > maxPpm) {
+    throw new Error(`${market.displayName} maker fee ${market.makerFeePpm} ppm exceeds limit ${maxPpm} ppm (one grid is worth a few cents; two-leg fees above the spacing kill the edge), refusing to start.`);
   }
   return true;
 }

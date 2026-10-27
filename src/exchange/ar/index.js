@@ -18,12 +18,16 @@ export function createExchange(cfg = {}) {
       feeRate: cfg.feeRate,
       deadmanMs: cfg.deadmanMs,
       pollMs: cfg.pollMs,
+      maxMakerFeePpm: cfg.maxMakerFeePpm,
     });
   }
-  return new ArcusPaperExchange({
+  const paper = new ArcusPaperExchange({
     apiUrl: cfg.paperApiUrl,
     paperNetwork: cfg.paperNetwork,
     network: cfg.network,
     startBalance: cfg.startBalance,
   });
+  // 与 live 保持同一启动闸门语义，便于 paper 复现主网费率判断。
+  paper.maxMakerFeePpm = Number.isFinite(Number(cfg.maxMakerFeePpm)) ? Number(cfg.maxMakerFeePpm) : 200;
+  return paper;
 }

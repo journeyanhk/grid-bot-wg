@@ -97,6 +97,8 @@ export class ArcusExchange extends EventEmitter {
     this.keyHex = opts.keyHex || opts.signingKey || '';
     this.proxy = opts.proxy || '';
     this.marketHint = opts.market || '';       // 可选：默认市场（如 BTC-USD）
+    // 启动闸门上限：主网 BTC-USD 实测 maker 150 ppm，硬写 0 会拒绝启动。
+    this.maxMakerFeePpm = Number.isFinite(Number(opts.maxMakerFeePpm)) ? Number(opts.maxMakerFeePpm) : 200;
 
     this.markets = new Map();
     this._prices = new Map();
@@ -169,8 +171,9 @@ export class ArcusExchange extends EventEmitter {
   }
 
   /**
-   * 启动闸门（D2 ③）：默认市场必须 24/7 可交易，且主网必须 maker 免费。
-   * testnet 的费用表是模拟值（150/450 ppm），只告警不拦，否则测试网无法跑单。
+   * 启动闸门（D2 ③）：默认市场必须 24/7 可交易，且 maker 费不得超过上限。
+   * testnet 的费用表是模拟值，只告警不拦；主网用 AR_MAX_MAKER_FEE_PPM（默认 200 ppm）
+   * 卡上限——主网 BTC-USD 实测 maker 150 ppm，硬写 0 会直接拒绝启动。
    */
   _assertStartupGates() {
     const target = this.marketHint
@@ -179,10 +182,14 @@ export class ArcusExchange extends EventEmitter {
     if (!target) throw new Error(`找不到默认市场 ${this.marketHint || '(无)'}。`);
     assertGridTradable(target);
     if (this.network === 'testnet') {
-      if (target.makerFeePpm > 0) logger.warn('ar', `testnet 费用表为模拟值 maker ${target.makerFeePpm} ppm / taker ${target.takerFeePpm} ppm；主网才是 0/225，此处不拦。`);
+      if (target.makerFeePpm > 0) logger.warn('ar', `testnet 费用表为模拟值 maker ${target.makerFeePpm} ppm / taker ${target.takerFeePpm} ppm；主网实测 150/450，此处不拦。`);
       return;
     }
-    assertMakerFree(target);
+    const maxMakerPpm = this.maxMakerFeePpm;
+    assertMakerFree(target, maxMakerPpm);
+    if (target.makerFeePpm > 0) {
+      logger.warn('ar', `主网 maker ${target.makerFeePpm} ppm / taker ${target.takerFeePpm} ppm（上限 ${maxMakerPpm} ppm）：单格往返要扣 ${2 * target.makerFeePpm} ppm，格距必须显著大于它才有净利。`);
+    }
   }
 
   _validateConfig() {
