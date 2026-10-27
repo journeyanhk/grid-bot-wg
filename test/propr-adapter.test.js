@@ -51,4 +51,23 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   await assert.rejects(() => ex.closePosition(), ProprReadOnlyError);
 }
 
+{
+  // paired：对腿只在"有反向仓"时才 reduceOnly；未配置 paired 时不参与决策
+  const ex = new ProprExchange({ mode: 'paper', gridSidePolicy: 'paired' });
+  await ex.init();
+  assert.equal(ex.resolveReduceOnly({ side: 'sell' }), false, '空仓时卖单是开仓');
+  assert.equal(ex.resolveReduceOnly({ side: 'buy' }), false);
+  ex._paper.placeLimitOrder({ side: 'buy', price: 79000, sizeBase: 0.001, positionSide: 'long' });
+  ex._paper.onPrice(78999);
+  assert.equal(ex.resolveReduceOnly({ side: 'sell' }), true, '有多仓时卖对腿必须减仓');
+  assert.equal(ex.resolveReduceOnly({ side: 'buy' }), false);
+  ex._paper.placeLimitOrder({ side: 'sell', price: 81000, sizeBase: 0.001, positionSide: 'long', reduceOnly: true });
+  ex._paper.onPrice(81001);
+  assert.equal(ex.resolveReduceOnly({ side: 'sell' }), false, '平掉后回到开仓');
+
+  const ex2 = new ProprExchange({ mode: 'paper' });
+  assert.equal(ex2.resolveReduceOnly({ side: 'sell' }), undefined, '非 paired 模式不参与决策');
+  ex.stop(); ex2.stop();
+}
+
 console.log('✓ propr-adapter.test.js 全部通过');

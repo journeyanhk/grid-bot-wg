@@ -736,6 +736,15 @@ export class GridBot {
     return this.getState();
   }
 
+  /** 只撤 opening（扩大敞口）的挂单，保留 reduceOnly 出场腿。 */
+  async cancelOpeningOrders() {
+    const ids = [...this.active.entries()].filter(([, a]) => a.opening !== false).map(([id]) => id);
+    for (const id of ids) {
+      try { await this.ex.cancelOrder(this.config?.marketId ?? 0, id); } catch { /* 下一轮对账会补 */ }
+    }
+    return ids.length;
+  }
+
   /** Zero cumulative stats and re-baseline PnL to the current equity. */
   resetStats() {
     // 动作计数（recenters/autoRestarts）不是盈亏统计，重置时保留
@@ -874,9 +883,23 @@ export class GridBot {
     };
   }
 
+  /**
+   * 有效 reduceOnly：默认沿用 isReduceOnly；若适配器提供 resolveReduceOnly
+   * （Propr paired 模式），由它按"当前反向持仓是否存在"决定。其它交易所无此钩子，
+   * 行为完全不变。
+   */
+  _effectiveReduceOnly(side, requested, opening) {
+    const fn = this.ex.resolveReduceOnly;
+    if (typeof fn !== 'function') return requested;
+    try {
+      const r = fn.call(this.ex, { side, requested: !!requested, opening: !!opening });
+      return typeof r === 'boolean' ? r : requested;   // undefined = 该所不参与决策
+    } catch { return requested; }
+  }
+
   async _place(o) {
     const opening = o.opening !== false;
-    const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
+    const reduceOnly = this._effectiveReduceOnly(o.side, o.reduceOnly ?? isReduceOnly(o.side, this.config.mode), opening);
     // Back-off: while paused (after a burst of cancellations / collateral
     // rejections) do not place new OPENING orders. CLOSING / reduce-only /
     // recovery legs need no extra margin and are never blocked — dropping a
@@ -900,6 +923,7 @@ export class GridBot {
         sizeBase, reduceOnly,
         levelIndex: o.levelIndex, clientOrderId,
       }).catch((e) => {
+        if (e?.benign) { this._alert('跳过无害拒单: ' + e.message); return null; }
         this._placeFails++; this._lastFailAt = Date.now();
         this._alert('下单失败: ' + e.message);
         this._queueRetry({ ...o, opening, reduceOnly, sizeBase }, e);
@@ -934,7 +958,7 @@ export class GridBot {
     const reservedLevels = new Set();
     for (const o of orders) {
       const opening = o.opening !== false;
-      const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
+      const reduceOnly = this._effectiveReduceOnly(o.side, o.reduceOnly ?? isReduceOnly(o.side, this.config.mode), opening);
       if (opening && !o.recovery && this._refillPausedUntil && Date.now() < this._refillPausedUntil) continue;
       const levelIndex = o.levelIndex;
       if (this._pendingLevels.has(levelIndex) || reservedLevels.has(levelIndex)) {
@@ -1013,6 +1037,8 @@ export class GridBot {
                 opening: item.opening, recovery: !!item.source.recovery, placedAt: Date.now(),
               });
               this._markPlacementConfirmed(item.source);
+            } else if (result?.benign) {
+              this._alert(`跳过无害拒单（level ${item.levelIndex}）: ${result.error || '无仓可减'}`);
             } else {
               this._placeFails++; this._lastFailAt = Date.now();
               const error = new Error(`批量下单中的 level ${item.levelIndex} 未被交易所确认。`);
@@ -2036,6 +2062,7 @@ export class GridBot {
         log: Array.isArray(this._dynLog) ? this._dynLog.slice(-20) : [],
       },
       openOrders: this.active.size,
+      venue: typeof this.ex.getState === 'function' ? this.ex.getState() : null,   // 所特有状态（Propr: 双边/写计数）
       exchangeOpenOrders: this._exchangeOpenOrders,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
       placementProgress: this._placementProgressView(),

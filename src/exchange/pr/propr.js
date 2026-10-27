@@ -12,7 +12,6 @@ import { HlMarketData, BTC_MARKET, roundPrice, roundSize } from './market.js';
 import { parseAccount, splitPositions, openOrders, parseTrade, closeSide } from './mapper.js';
 import { computeRiskState } from './risk.js';
 import { ProprReadOnlyError } from './errors.js';
-import fs from 'node:fs';
 
 const MODES = new Set(['paper', 'shadow', 'sim-write']);
 
@@ -161,6 +160,13 @@ export class ProprExchange extends EventEmitter {
       });
       if (known.reduceOnly) this._tracked.delete(String(t.orderId));
     }
+    // 双边持仓：进入时告警一次；退出时复位
+    if (this._positions?.dualSide && !this._dualSideActive) {
+      this._dualSideActive = true;
+      this.emit('dualside', { long: this._positions.long?.size ?? 0, short: this._positions.short?.size ?? 0 });
+    } else if (!this._positions?.dualSide) {
+      this._dualSideActive = false;
+    }
     const px = await this._marketData.getPrice(this.market.symbol).catch(() => null);
     if (px) this._emitPrice(px);
   }
@@ -207,6 +213,17 @@ export class ProprExchange extends EventEmitter {
     };
   }
 
+  /**
+   * paired 模式：对腿只减仓。
+   * 卖单只有在"有多仓可减"时才 reduceOnly；买单同理。初始铺单时两侧都为空，
+   * 因此 seed 的买卖仍是开仓单（保留中性网格的对称入场）。
+   */
+  resolveReduceOnly({ side }) {
+    if (this.cfg.gridSidePolicy !== 'paired') return undefined;
+    const p = this.getPositions();
+    return side === 'sell' ? (p.long?.size ?? 0) > 0 : (p.short?.size ?? 0) > 0;
+  }
+
   // ── 订单 ────────────────────────────────────────────────────────────────
   async fetchOpenOrders() {
     if (this.mode === 'paper') {
@@ -229,7 +246,17 @@ export class ProprExchange extends EventEmitter {
       return r;
     }
     if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset, paceMs: 120 });
-    const row = await this.writer.placeLimitOrder(o);
+    let row;
+    try {
+      row = await this.writer.placeLimitOrder(o);
+    } catch (e) {
+      if (isNoPositionToReduce(e)) {
+        const benign = new Error(`无仓可减，丢弃该 reduceOnly 腿（${o.side} @ ${o.price}）`);
+        benign.benign = true;
+        throw benign;
+      }
+      throw e;
+    }
     this._tracked.set(String(row.orderId), { levelIndex: o.levelIndex, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: !!o.reduceOnly, opening: o.opening !== false });
     return { orderId: row.orderId, price: o.price, sizeBase: o.sizeBase };
   }
@@ -239,7 +266,10 @@ export class ProprExchange extends EventEmitter {
     const out = [];
     for (const o of list) {
       try { out.push(await this.placeLimitOrder(o)); }
-      catch (e) { this.emit('error', e); out.push(null); }
+      catch (e) {
+        if (e?.benign) { out.push({ benign: true, error: e.message }); continue; }
+        this.emit('error', e); out.push(null);
+      }
       if (this.orderBatchPaceMs) await new Promise((r) => setTimeout(r, this.orderBatchPaceMs));
     }
     return out;
@@ -276,10 +306,39 @@ export class ProprExchange extends EventEmitter {
     return this.writer.closePosition(this.market.asset);
   }
 
+  /** 面板用状态：账户脱敏、双侧持仓、双边冻结、写尝试次数。 */
+  getState() {
+    const p = this.getPositions();
+    const mask = (x) => (x ? String(x).replace(/(urn:prp-account:.{4}).*/, '$1…') : null);
+    return {
+      mode: this.mode,
+      accountId: mask(this.cfg.accountId),
+      attemptStatus: this.attempt?.status ?? null,
+      long: p.long?.size ?? 0,
+      short: p.short?.size ?? 0,
+      dualSide: !!p.dualSide,
+      net: roundSize(p.netSize ?? 0),
+      openOrders: this.mode === 'paper' ? this._paper.orders.size : (this._openOrders?.length ?? 0),
+      equity: typeof this.equity === 'number' ? Math.round(this.equity * 100) / 100 : null,
+      balance: typeof this.balance === 'number' ? Math.round(this.balance * 100) / 100 : null,
+      writeAttemptCount: this.client?.writeAttemptCount ?? 0,
+      apiStatus: this.operationalIssue ? 'degraded' : (this.dataSource || 'init'),
+      lastOkAt: this.lastOkAt || null,
+      policy: { gridSide: this.cfg.gridSidePolicy || 'dual', dualSide: this.cfg.dualSidePolicy || 'freeze' },
+      risk: this._risk ?? null,
+    };
+  }
+
   async setLeverage() {
     this.emit('error', new Error('Propr 不修改杠杆（规则不允许）；保持平台当前值'));
     return false;
   }
 }
 
-export { parseAccount, splitPositions, openOrders, roundPrice, roundSize, fs };
+function isNoPositionToReduce(e) {
+  if (!e) return false;
+  const msg = String(e.message || '');
+  return e.status === 400 && /reduce|position|no position/i.test(msg);
+}
+
+export { parseAccount, splitPositions, openOrders, roundPrice, roundSize };

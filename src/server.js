@@ -131,6 +131,21 @@ vaExchange.onNotify = (p) => notifier.send({
 const prBot = prExchange ? new GridBot(prExchange, { onChange: (s) => saveSnapshot('pr', s),
   onAlert: (a) => notifier.send({ source: 'pr', message: `[Propr] ${a.message}`, level: a.level, key: a.key ? 'pr:' + a.key : undefined }) }) : null;
 
+// 双边冻结（附件 C）：一旦 long>0 且 short>0 → 撤掉所有 opening 单、暂停开仓、告警。
+// 不自动恢复：必须人工处理后在面板重新启动。
+if (prExchange && prBot) {
+  prExchange.on('dualside', async (p) => {
+    try {
+      const n = await prBot.cancelOpeningOrders();
+      prBot.pauseOpening(Date.now() + 365 * 24 * 3600_000, '双边持仓冻结');
+      logger.error('propr', `双边持仓：long=${p.long} short=${p.short}，已撤 ${n} 张开仓单并暂停开仓`);
+      notifier.send({ source: 'pr', level: 'critical', key: 'pr:dualside',
+        title: 'Propr 双边持仓冻结',
+        message: `⚠️ 检测到 long=${p.long} 且 short=${p.short}，已撤销 ${n} 张开仓单并暂停开仓。需人工对账后重启网格。` });
+    } catch (e) { logger.error('propr', '双边冻结处理失败: ' + e.message); }
+  });
+}
+
 const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
   onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
