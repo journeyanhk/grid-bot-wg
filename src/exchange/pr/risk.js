@@ -79,3 +79,37 @@ export function evaluateWriteGate({
 }
 
 function round2(x) { return Math.round((Number(x) || 0) * 100) / 100; }
+
+/**
+ * 双边持仓策略。
+ *   freeze（默认，按附件 C）：检测到 long>0 且 short>0 → 禁止开仓，只允许减仓
+ *   cap（沙盒）：允许继续，但每侧不得超过 maxPerSide；仍会告警
+ * ack 由人工确认文件/按钮产生，只对 cap 生效。
+ */
+export function evaluateDualSide({ positions, policy = 'freeze', ack = false, maxPerSide = 0.003 }) {
+  const long = positions?.long?.size ?? 0;
+  const short = positions?.short?.size ?? 0;
+  const dual = long > 0 && short > 0;
+  if (!dual) return { dual: false, allowOpen: true, reason: null };
+  if (policy === 'cap' && ack) {
+    const over = long > maxPerSide + 1e-12 || short > maxPerSide + 1e-12;
+    return { dual: true, allowOpen: !over, capped: true, reason: over ? `单侧超过 ${maxPerSide} BTC` : 'cap 模式：仍在每侧上限内' };
+  }
+  return { dual: true, allowOpen: false, reason: '双边持仓：冻结开仓，等待人工确认' };
+}
+
+/** 趋势过滤：命中时只允许减仓，并撤掉扩大敞口的挂单。 */
+export function trendHalt({ trend, strength = 0, threshold = 0.6 }) {
+  const strong = Math.abs(Number(strength) || 0) >= threshold;
+  const dir = trend === 'down' ? 'long' : trend === 'up' ? 'short' : null;
+  return { halt: strong && !!dir, blockSide: strong && dir ? dir : null, reason: strong && dir ? `趋势过滤：${trend} ${strength}` : null };
+}
+
+/** 突破处置：撤单 + reduce-only 平仓 + 停止（与 outOfRangeAction=close 对齐）。 */
+export function breakoutAction({ price, lower, upper, hysteresis = 0 }) {
+  if (!(upper > lower)) return { out: false, action: 'none' };
+  const out = price < lower * (1 - hysteresis) || price > upper * (1 + hysteresis);
+  return out
+    ? { out: true, action: 'cancel_and_flatten', side: price < lower ? 'long' : 'short' }
+    : { out: false, action: 'none' };
+}

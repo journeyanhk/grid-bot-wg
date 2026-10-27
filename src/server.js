@@ -15,6 +15,7 @@ import { createExchange as createRsExchange } from './exchange/rs/index.js';
 import { createExchange as createLrExchange } from './exchange/lr/index.js';
 import { createExchange as createHlExchange } from './exchange/hl/index.js';
 import { createExchange as createVaExchange } from './exchange/va/index.js';
+import { createExchange as createPrExchange } from './exchange/pr/index.js';
 import { GridBot } from './bot.js';
 import { analyzeTrend } from './trend.js';
 import { setupProxies, checkProxy } from './proxy.js';
@@ -119,11 +120,17 @@ const hlExchange = createHlExchange(cfg.hl);
 const hlBot = new GridBot(hlExchange, { onChange: (s) => saveSnapshot('hl', s),
   onAlert: (a) => notifier.send({ source: 'hl', message: `[Entropy] ${a.message}`, level: a.level, key: a.key ? 'hl:' + a.key : undefined }) });
 const vaExchange = createVaExchange(cfg.va);
+
+// Propr（第 7 所）：默认不启用。challenge / live 在适配器层硬拒绝。
+const prExchange = cfg.pr?.enabled ? createPrExchange(cfg.pr) : null;
 // VA 会话 token 三档寿命预警：交易所内部判寿命，经通知总线按级别推送（info 仅面板，warn/critical 推手机）。
 vaExchange.onNotify = (p) => notifier.send({
   source: p.source || 'va', level: p.level, message: p.message, title: p.title,
   key: p.key ? 'va:' + p.key : undefined, cooldownMs: p.cooldownMs,
 });
+const prBot = prExchange ? new GridBot(prExchange, { onChange: (s) => saveSnapshot('pr', s),
+  onAlert: (a) => notifier.send({ source: 'pr', message: `[Propr] ${a.message}`, level: a.level, key: a.key ? 'pr:' + a.key : undefined }) }) : null;
+
 const vaBot = new GridBot(vaExchange, { onChange: (s) => saveSnapshot('va', s),
   onAlert: (a) => notifier.send({ source: 'va', message: `[Variational] ${a.message}`, level: a.level, key: a.key ? 'va:' + a.key : undefined }) });
 
@@ -136,6 +143,7 @@ rsBot.restore(loadSnapshot('rs'));
 lrBot.restore(loadSnapshot('lr'));
 hlBot.restore(loadSnapshot('hl'));
 vaBot.restore(loadSnapshot('va'));
+if (prBot) prBot.restore(loadSnapshot('pr'));
 
 // Belt-and-suspenders: ensure every exchange always has an 'error' listener so a
 // stray emit can never crash the process (the GridBot also attaches one).
@@ -221,12 +229,14 @@ const _LIVENESS_TARGETS = [
   { prefix: 'rs', name: 'RISEx', ex: rsExchange, bot: rsBot },
   { prefix: 'lr', name: 'RHC', ex: lrExchange, bot: lrBot },
   { prefix: 'hl', name: 'Entropy', ex: hlExchange, bot: hlBot },
+  ...(prExchange ? [{ prefix: 'pr', name: 'Propr', ex: prExchange, bot: prBot }] : []),
 ];
 const _wdTimer = setInterval(() => {
   const now = Date.now();
   for (const { prefix, name, ex, bot } of _LIVENESS_TARGETS) {
     try {
-      const watched = ex?.mode === 'live' && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
+      const liveish = ex?.mode === 'live' || ex?.mode === 'sim-write';
+      const watched = liveish && bot?.running && typeof ex.lastOkAt === 'number' && ex.lastOkAt > 0;
       if (!watched) { _livenessStale.delete(prefix); continue; }
       const ageMs = now - ex.lastOkAt;
       if (ageMs > LIVENESS_STALE_MS) {
@@ -409,6 +419,7 @@ const rsHandler = makeExchangeHandler('/api/rs', rsBot, rsExchange, cfg.rs, rsCl
 const lrHandler = makeExchangeHandler('/api/lr', lrBot, lrExchange, cfg.lr, lrClients, 'RHC Lighter');
 const hlHandler = makeExchangeHandler('/api/hl', hlBot, hlExchange, cfg.hl, hlClients, 'Entropy');
 const vaHandler = makeExchangeHandler('/api/va', vaBot, vaExchange, cfg.va, vaClients, 'Variational');
+const prHandler = prBot ? makeExchangeHandler('/api/pr', prBot, prExchange, cfg.pr, new Set(), 'Propr') : null;
 
 // ── 鉴权守卫（VPS 安全）──────────────────────────────────────────────────────
 // 三层防护：
@@ -709,6 +720,9 @@ const server = http.createServer(async (request, res) => {
     if (p.startsWith('/api/va/')) {
       return await vaHandler(request, res, p.slice('/api/va'.length), url);
     }
+    if (prHandler && p.startsWith('/api/pr/')) {
+      return await prHandler(request, res, p.slice('/api/pr'.length), url);
+    }
 
     // ── 静态文件 ──────────────────────────────────────────────────────────
     let file = p === '/' ? '/index.html' : p;
@@ -869,6 +883,7 @@ await Promise.all([
   resumeIfWasRunning(lrBot, lrExchange, 'lr'),
   resumeIfWasRunning(hlBot, hlExchange, 'hl'),
   resumeIfWasRunning(vaBot, vaExchange, 'va'),
+  ...(prBot ? [resumeIfWasRunning(prBot, prExchange, 'pr')] : []),
 ]);
 
 // ── 续跑看门狗（Review22 / 9·21）────────────────────────────────────────────

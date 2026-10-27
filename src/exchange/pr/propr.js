@@ -1,0 +1,285 @@
+// Propr 交易所适配器（GridBot 契约）。三种模式：
+//   paper     — 真实 HL 行情 + 本地账本，不发任何请求
+//   shadow    — 只读真实账户，绝不写
+//   sim-write — 只允许 Free Trial 写入（challenge/live 在构造时硬拒绝）
+//
+// 关键立场：long / short 永远分开读、分开对账、分开平仓，绝不合并成净仓。
+import { EventEmitter } from 'node:events';
+import { ProprClient } from './client.js';
+import { ProprWriter } from './write.js';
+import { ProprPaper } from './paper.js';
+import { HlMarketData, BTC_MARKET, roundPrice, roundSize } from './market.js';
+import { parseAccount, splitPositions, openOrders, parseTrade, closeSide } from './mapper.js';
+import { computeRiskState } from './risk.js';
+import { ProprReadOnlyError } from './errors.js';
+import fs from 'node:fs';
+
+const MODES = new Set(['paper', 'shadow', 'sim-write']);
+
+export class ProprExchange extends EventEmitter {
+  constructor(cfg = {}) {
+    super();
+    const mode = String(cfg.mode || 'paper').toLowerCase();
+    if (!MODES.has(mode)) throw new Error(`PR_MODE=${mode} 被拒绝：challenge/live 不开放`);
+    this.mode = mode;
+    this.cfg = cfg;
+    this.market = BTC_MARKET;
+    this.feeRate = cfg.feeMaker ?? 0.00015;
+    this.displayFeeRate = this.feeRate * 100;
+    this.balance = null;
+    this.equity = null;
+    this.realizedPnl = 0;
+    this.operationalIssue = null;
+    this.dataSource = null;
+    this.lastOkAt = 0;
+    this.supportsSafeOpeningRetry = true;
+    this.orderBatchSize = 1;            // Propr 一次只允许一个入场单
+    this.orderBatchPaceMs = 120;
+    this.openingRetryBaseMs = 15_000;
+    this.openingRetryMax = 6;
+    this._tracked = new Map();          // orderId -> {levelIndex, side, price, sizeBase, reduceOnly, opening}
+    this._seenTrades = new Set();
+    this._lastPrice = null;
+    this._timer = null;
+    this._pollInFlight = false;
+    this._paper = mode === 'paper' ? new ProprPaper({ startBalance: cfg.startBalance ?? 5000 }) : null;
+    this._marketData = new HlMarketData({});
+    this._risk = null;
+    this._dualAck = false;
+  }
+
+  // ── 生命周期 ────────────────────────────────────────────────────────────
+  async init() {
+    if (this.mode === 'paper') {
+      this.balance = 5000;
+      this.equity = 5000;
+      this.dataSource = 'paper';
+      this.lastOkAt = Date.now();
+      this.start();
+      return true;
+    }
+    if (!this.cfg.apiKey && !this.cfg.apiKeyFile) throw new Error('Propr 需要 PR_API_KEY 或 PR_API_KEY_FILE');
+    if (!this.cfg.accountId) throw new Error('Propr 需要 PR_ACCOUNT_ID');
+    this.client = new ProprClient({
+      apiKey: this.cfg.apiKey,
+      baseUrl: this.cfg.baseUrl,
+      allowWrites: this.mode === 'sim-write',
+      timeoutMs: 15_000,
+    });
+    const attempt = await this._resolveAttempt();
+    this.attempt = attempt;
+    await this._refresh();
+    this.dataSource = 'real';
+    this.lastOkAt = Date.now();
+    this.start();
+    return true;
+  }
+
+  async reconnect() {
+    this.stop();
+    return this.init();
+  }
+
+  start() {
+    if (this._timer) return;
+    this._timer = setInterval(() => this._poll().catch(() => {}), this.cfg.pollMs ?? 5000);
+    this._timer.unref?.();
+  }
+
+  stop() {
+    if (this._timer) clearInterval(this._timer);
+    this._timer = null;
+  }
+
+  setPollLight() { /* Propr 5s 轮询本身很轻，忽略 */ }
+
+  async _resolveAttempt() {
+    const body = await this.client.getAttempts({ limit: 50 });
+    const rows = body?.data ?? [];
+    const norm = (x) => String(x).replace(/^urn:prp-account:/, '');
+    const hits = rows.filter((a) => norm(a.accountId) === norm(this.cfg.accountId));
+    if (hits.length !== 1) throw new Error(`PR_ACCOUNT_ID 命中 ${hits.length} 个 attempt（应为 1）`);
+    if (String(hits[0].status).toLowerCase() !== 'active') throw new Error(`attempt 状态 ${hits[0].status}，不是 active`);
+    return hits[0];
+  }
+
+  // ── 轮询 ────────────────────────────────────────────────────────────────
+  async _poll() {
+    if (this._pollInFlight) return;
+    this._pollInFlight = true;
+    try {
+      if (this.mode === 'paper') {
+        const px = await this._marketData.getPrice(this.market.symbol);
+        const fills = this._paper.onPrice(px);
+        for (const f of fills) this.emit('fill', { orderId: f.orderId, marketId: 0, side: f.side, price: f.price, sizeBase: f.qty, levelIndex: this._tracked.get(f.orderId)?.levelIndex });
+        this.balance = this._paper.cash;
+        this.equity = this._paper.equity(px);
+        this._emitPrice(px);
+        this.lastOkAt = Date.now();
+        return;
+      }
+      await this._refresh();
+      this.lastOkAt = Date.now();
+      this.operationalIssue = null;
+    } catch (e) {
+      this.operationalIssue = { title: 'Propr 数据异常', message: e.message };
+      this.emit('error', e);
+    } finally {
+      this._pollInFlight = false;
+    }
+  }
+
+  async _refresh() {
+    const [acct, pos, ord, trd] = await Promise.all([
+      this.client.getAccount(this.cfg.accountId),
+      this.client.getPositions(this.cfg.accountId),
+      this.client.getOrders(this.cfg.accountId, { status: 'open' }),
+      this.client.getTradesPage(this.cfg.accountId, { limit: 100, offset: 0 }),
+    ]);
+    const a = parseAccount(acct);
+    this.balance = a.balance;
+    this.equity = a.equity;
+    this._positions = splitPositions(pos.rows);
+    this._openOrders = openOrders(ord.rows);
+    this._risk = computeRiskState({
+      equity: a.equity, balance: a.balance,
+      dayStartBalance: this._dayStart ?? a.balance, startBalance: this.cfg.startBalance ?? 5000,
+    });
+    this._dayStart = this._dayKey() === this._dayKeyAt ? this._dayStart : a.balance;
+    this._dayKeyAt = this._dayKey();
+
+    // 成交 → fill 事件（只认本地跟踪过的单，避免幽灵成交）
+    for (const raw of trd?.data ?? []) {
+      const t = parseTrade(raw);
+      if (!t.tradeId || this._seenTrades.has(t.tradeId)) continue;
+      this._seenTrades.add(t.tradeId);
+      const known = this._tracked.get(String(t.orderId));
+      if (!known) continue;
+      this.emit('fill', {
+        orderId: String(t.orderId), marketId: 0, side: t.side,
+        price: t.price, sizeBase: t.qty, levelIndex: known.levelIndex,
+      });
+      if (known.reduceOnly) this._tracked.delete(String(t.orderId));
+    }
+    const px = await this._marketData.getPrice(this.market.symbol).catch(() => null);
+    if (px) this._emitPrice(px);
+  }
+
+  _dayKey(now = Date.now()) { return Math.floor(now / 86_400_000); }
+
+  _emitPrice(px) {
+    if (px === this._lastPrice) return;
+    this._lastPrice = px;
+    this.emit('price', { marketId: 0, price: px });
+  }
+
+  // ── 市场数据 ────────────────────────────────────────────────────────────
+  async getMarkets() { return [this.market]; }
+  getMarket() { return this.market; }
+  async getPrice() { return this._marketData.getPrice(this.market.symbol); }
+  async getCandles(_id, intervalSec = 3600, n = 200) { return this._marketData.getCandles(this.market.symbol, intervalSec, n); }
+
+  // ── 持仓：两侧分开，绝不合并 ─────────────────────────────────────────────
+  getPositions() {
+    if (this.mode === 'paper') {
+      const rows = this._paper.getPositions();
+      const long = rows.find((p) => p.side === 'long') || null;
+      const short = rows.find((p) => p.side === 'short') || null;
+      return {
+        long: long ? { side: 'long', size: long.size, entryPrice: long.entryPrice } : null,
+        short: short ? { side: 'short', size: short.size, entryPrice: short.entryPrice } : null,
+        dualSide: !!(long && short),
+        netSize: (long?.size ?? 0) - (short?.size ?? 0),
+      };
+    }
+    return this._positions || { long: null, short: null, dualSide: false, netSize: 0 };
+  }
+
+  getPosition() {
+    const p = this.getPositions();
+    const one = p.long || p.short;
+    if (!one) return null;
+    return {
+      marketId: 0, side: one.side, sizeBase: one.size, entryPrice: one.entryPrice,
+      markPrice: one.markPrice, liquidationPrice: one.liquidationPrice,
+      unrealizedPnl: one.uPnl, marginUsed: one.marginUsed, leverage: one.leverage,
+      dualSide: p.dualSide,
+    };
+  }
+
+  // ── 订单 ────────────────────────────────────────────────────────────────
+  async fetchOpenOrders() {
+    if (this.mode === 'paper') {
+      return { orders: [...this._paper.orders.values()].map((o) => ({ orderId: o.orderId, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: o.reduceOnly })) };
+    }
+    const res = await this.client.getOrders(this.cfg.accountId, { status: 'open' });
+    return { orders: openOrders(res.rows).map((o) => ({ orderId: o.orderId, side: o.side, price: o.price, sizeBase: o.qty, reduceOnly: o.reduceOnly, positionSide: o.positionSide })) };
+  }
+
+  getOpenOrders() { return [...this._tracked.entries()].map(([orderId, o]) => ({ orderId, ...o })); }
+  adoptOrder(o) { this._tracked.set(String(o.orderId), { levelIndex: o.levelIndex, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: !!o.reduceOnly, opening: o.opening !== false }); }
+  forgetOrder(id) { this._tracked.delete(String(id)); }
+  forgetOrders() { this._tracked.clear(); }
+
+  async placeLimitOrder(o) {
+    if (this.mode === 'shadow') throw new ProprReadOnlyError('下单');
+    if (this.mode === 'paper') {
+      const r = this._paper.placeLimitOrder({ side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: o.reduceOnly, positionSide: o.positionSide });
+      this._tracked.set(r.orderId, { ...o });
+      return r;
+    }
+    if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset, paceMs: 120 });
+    const row = await this.writer.placeLimitOrder(o);
+    this._tracked.set(String(row.orderId), { levelIndex: o.levelIndex, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: !!o.reduceOnly, opening: o.opening !== false });
+    return { orderId: row.orderId, price: o.price, sizeBase: o.sizeBase };
+  }
+
+  /** bot 契约：等长、同序、逐项。串行执行，失败项返回 null。 */
+  async placeLimitOrders(list) {
+    const out = [];
+    for (const o of list) {
+      try { out.push(await this.placeLimitOrder(o)); }
+      catch (e) { this.emit('error', e); out.push(null); }
+      if (this.orderBatchPaceMs) await new Promise((r) => setTimeout(r, this.orderBatchPaceMs));
+    }
+    return out;
+  }
+
+  async cancelOrder(_marketId, orderId) {
+    if (this.mode === 'shadow') throw new ProprReadOnlyError('撤单');
+    if (this.mode === 'paper') { this._paper.cancelOrder(orderId); this._tracked.delete(String(orderId)); return true; }
+    const r = await this.writer.cancelOrder(orderId);
+    this._tracked.delete(String(orderId));
+    return r;
+  }
+
+  async cancelAll() {
+    if (this.mode === 'shadow') throw new ProprReadOnlyError('批量撤单');
+    if (this.mode === 'paper') { this._paper.cancelAll(); this._tracked.clear(); return { cancelled: [], remaining: 0 }; }
+    if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset });
+    const r = await this.writer.cancelAll();
+    if (r.remaining === 0) this._tracked.clear();
+    return r;
+  }
+
+  async closePosition() {
+    if (this.mode === 'shadow') throw new ProprReadOnlyError('平仓');
+    if (this.mode === 'paper') {
+      this._paper.cancelAll();
+      for (const p of this._paper.getPositions()) {
+        this._paper.placeLimitOrder({ side: closeSide(p.side), price: this._lastPrice, sizeBase: p.size, reduceOnly: true, positionSide: p.side, timeInForce: 'IOC' });
+      }
+      this._paper.onPrice(this._lastPrice);
+      return { closed: true };
+    }
+    if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset });
+    return this.writer.closePosition(this.market.asset);
+  }
+
+  async setLeverage() {
+    this.emit('error', new Error('Propr 不修改杠杆（规则不允许）；保持平台当前值'));
+    return false;
+  }
+}
+
+export { parseAccount, splitPositions, openOrders, roundPrice, roundSize, fs };

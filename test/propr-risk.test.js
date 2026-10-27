@@ -1,6 +1,6 @@
 // 风控状态与写门：只拦开仓，不拦降风险。
 import { strict as assert } from 'node:assert';
-import { computeRiskState, evaluateWriteGate, DEFAULT_LIMITS } from '../src/exchange/pr/risk.js';
+import { computeRiskState, evaluateWriteGate, evaluateDualSide, trendHalt, breakoutAction, DEFAULT_LIMITS } from '../src/exchange/pr/risk.js';
 
 {
   // 正常
@@ -83,6 +83,31 @@ const good = {
   const g = evaluateWriteGate({ ...good, notional: 1000, newNotional: 500 });
   assert.equal(g.allowOpen, true);
   assert.equal(DEFAULT_LIMITS.staleMs, 45_000);
+}
+
+{
+  // 双边策略：默认 freeze；cap 需要人工 ack，且每侧有上限
+  const dual = { long: { size: 0.002 }, short: { size: 0.002 } };
+  const f = evaluateDualSide({ positions: dual, policy: 'freeze' });
+  assert.equal(f.allowOpen, false);
+  assert.equal(f.dual, true);
+  const cNoAck = evaluateDualSide({ positions: dual, policy: 'cap', ack: false });
+  assert.equal(cNoAck.allowOpen, false);
+  const cAck = evaluateDualSide({ positions: dual, policy: 'cap', ack: true, maxPerSide: 0.003 });
+  assert.equal(cAck.allowOpen, true);
+  const over = evaluateDualSide({ positions: { long: { size: 0.004 }, short: { size: 0.002 } }, policy: 'cap', ack: true, maxPerSide: 0.003 });
+  assert.equal(over.allowOpen, false);
+  assert.ok(evaluateDualSide({ positions: { long: { size: 0.002 }, short: null }, policy: 'freeze' }).allowOpen);
+}
+
+{
+  // 趋势过滤与突破处置
+  assert.equal(trendHalt({ trend: 'down', strength: 0.8 }).blockSide, 'long');
+  assert.equal(trendHalt({ trend: 'up', strength: 0.8 }).blockSide, 'short');
+  assert.equal(trendHalt({ trend: 'down', strength: 0.3 }).halt, false);
+  assert.equal(breakoutAction({ price: 90, lower: 100, upper: 120 }).side, 'long');
+  assert.equal(breakoutAction({ price: 130, lower: 100, upper: 120 }).side, 'short');
+  assert.equal(breakoutAction({ price: 110, lower: 100, upper: 120 }).out, false);
 }
 
 console.log('✓ propr-risk.test.js 全部通过');

@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ProprClient } from './client.js';
 import { ProprShadow, computeCapacity } from './shadow.js';
+import { ProprExchange } from './propr.js';
 import { ProprPaper } from './paper.js';
 import { HlMarketData, BTC_MARKET } from './market.js';
 
-export { ProprClient, ProprShadow, ProprPaper, HlMarketData, BTC_MARKET, computeCapacity };
+export { ProprClient, ProprShadow, ProprPaper, ProprExchange, HlMarketData, BTC_MARKET, computeCapacity };
 
 export function readKeyFile(file, root = process.cwd()) {
   if (!file) return '';
@@ -20,6 +21,11 @@ export function readKeyFile(file, root = process.cwd()) {
  * @param {object} cfg 至少含 mode / accountId / apiKey|apiKeyFile
  * @returns {{mode:string, market:object, client?:ProprClient, shadow?:ProprShadow, paper?:ProprPaper}}
  */
+/** GridBot / server 用的适配器工厂。challenge / live 已在 ProprExchange 构造函数里硬拒绝。 */
+export function createExchange(cfg = {}) {
+  return new ProprExchange(cfg);
+}
+
 export function createPropr(cfg = {}) {
   const mode = String(cfg.mode || 'paper').toLowerCase();
   const market = cfg.market || BTC_MARKET;

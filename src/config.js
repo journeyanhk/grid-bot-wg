@@ -184,6 +184,34 @@ export function getConfig() {
     proxy: process.env.VA_PROXY || globalProxy,
   };
 
+  // ── Propr（第 7 所：HL 上的 prop 模拟账户）────────────────────────────────
+  // 默认 paper；shadow 只读；sim-write 只允许 Free Trial 写入。
+  // challenge / live 在适配器层硬拒绝，不提供开关。
+  const prMode = (process.env.PR_MODE || 'paper').toLowerCase();
+  const pr = {
+    enabled: (process.env.PR_ENABLED || 'NO').toUpperCase() === 'YES',
+    mode: ['paper', 'shadow', 'sim-write'].includes(prMode) ? prMode : 'paper',
+    baseUrl: process.env.PR_BASE_URL || 'https://api.propr.xyz/v1',
+    wsUrl: process.env.PR_WS_URL || 'wss://api.propr.xyz/ws',
+    apiKey: process.env.PR_API_KEY || '',
+    apiKeyFile: process.env.PR_API_KEY_FILE || '',
+    accountId: process.env.PR_ACCOUNT_ID || '',
+    allowLive: (process.env.PR_ALLOW_LIVE || 'NO').toUpperCase() === 'YES',
+    allowChallenge: (process.env.PR_ALLOW_CHALLENGE || 'NO').toUpperCase() === 'YES',
+    symbol: process.env.PR_SYMBOL || 'BTC',
+    gridSidePolicy: (process.env.PR_GRID_SIDE_POLICY || 'dual').toLowerCase() === 'paired' ? 'paired' : 'dual',
+    dualSidePolicy: (process.env.PR_DUAL_SIDE_POLICY || 'freeze').toLowerCase() === 'cap' ? 'cap' : 'freeze',
+    dualAckFile: process.env.PR_DUAL_ACK_FILE || '.runtime/pr-dual-ack',
+    maxInvUsd: Number(process.env.PR_MAX_INV_USD || 1500),
+    maxInvBtc: Number(process.env.PR_MAX_INV_BTC || 0.02),
+    capacityLeverage: Number(process.env.PR_CAPACITY_LEVERAGE || 1),
+    feeMaker: Number(process.env.PR_FEE_MAKER || 0.00015),
+    feeTaker: Number(process.env.PR_FEE_TAKER || 0.00045),
+    pollMs: Number(process.env.PR_POLL_MS || 5000),
+    staleMs: Number(process.env.PR_STALE_MS || 45000),
+    proxy: process.env.PR_PROXY || globalProxy,
+  };
+
   return {
     port: Number(process.env.PORT || 8080),
     // SECURITY: bind to loopback by default so the dashboard (which can start/stop
@@ -201,6 +229,7 @@ export function getConfig() {
     lr,
     hl,
     va,
+    pr,
   };
 }
 
