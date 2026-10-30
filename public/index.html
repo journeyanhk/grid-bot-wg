@@ -145,6 +145,7 @@ body {
 .ov-card.lr::before { background: var(--lr-color); }
 .ov-card.hl::before { background: var(--hl-color); }
 .ov-card.va::before { background: var(--va-color); }
+.ov-card.pr::before { background: var(--pur); }
 .ov-exname {
   font-size: 12px; font-weight: 700; letter-spacing: .4px; margin-bottom: 10px;
   display: flex; align-items: center; gap: 8px;
@@ -695,6 +696,30 @@ details.dyn .row { gap: 8px; margin-top: 6px; }
       <div id="ov-va-trend" class="trend-box trend-idle">趋势监测：等待数据…</div>
       <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="reconnectEx('va', this)">🔌 重连交易所（不动挂单/持仓）</button>
       <button class="btn btn-ghost" style="margin-top:8px;font-size:12px" onclick="switchTab('va')">进入 Variational 控制台 →</button>
+    </div>
+
+    <!-- Propr（第 7 所）：独立卡片，不参与任何"其他交易所汇总" -->
+    <div class="ov-card pr">
+      <div class="ov-exname" style="color:var(--pur)">
+        <span class="run-dot" id="ov-pr-dot"></span>
+        Propr
+        <span id="ov-pr-badge" class="badge badge-paper" style="margin-left:auto">—</span>
+      </div>
+      <div id="ov-pr-health" class="exhealth eh-idle">—</div>
+      <div class="ov-pnl" id="ov-pr-eq">—</div>
+      <div class="ov-sub" id="ov-pr-policy">策略 —</div>
+      <div style="margin-top:10px">
+        <div class="ov-stat"><span class="lbl">余额</span><span class="val" id="ov-pr-bal">—</span></div>
+        <div class="ov-stat"><span class="lbl">多头</span><span class="val" id="ov-pr-long">—</span></div>
+        <div class="ov-stat"><span class="lbl">空头</span><span class="val" id="ov-pr-short">—</span></div>
+        <div class="ov-stat"><span class="lbl">挂单</span><span class="val" id="ov-pr-orders">—</span></div>
+        <div class="ov-stat"><span class="lbl">写请求</span><span class="val" id="ov-pr-writes">—</span></div>
+        <div class="ov-stat"><span class="lbl">区间</span><span class="val" id="ov-pr-range">—</span></div>
+        <div class="ov-stat"><span class="lbl">最新价</span><span class="val" id="ov-pr-price">—</span></div>
+        <div class="ov-stat"><span class="lbl">状态</span><span class="val" id="ov-pr-state">—</span></div>
+      </div>
+      <div class="ov-position" id="ov-pr-position"><span class="ov-position-empty">当前无持仓</span></div>
+      <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="proprStop(this)">🛑 停止并撤单</button>
     </div>
   </div>
 
@@ -2415,6 +2440,68 @@ const vaCtrl = makeExchangeCtrl('va', 'va-chart');
 // （服务器崩溃、网络断开、电脑休眠）则显示"连接不稳/已掉线"。
 let lastBeat = 0;
 let lastOverview = {};
+// ── Propr 卡片（独立轮询；刻意不进 /api/overview 汇总）──
+function proprFmt(x, d = 2) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n.toFixed(d).replace(/\.?0+$/, '') : '—';
+}
+async function proprRefresh() {
+  const $ = (id) => document.getElementById(id);
+  try {
+    const r = await fetch('/api/pr/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const v = d.venue || {};
+    const mode = (v.mode || d.mode || '—').toUpperCase();
+    $('ov-pr-badge').textContent = mode;
+    $('ov-pr-badge').className = 'badge ' + (mode === 'SIM-WRITE' ? 'badge-live' : 'badge-paper');
+    $('ov-pr-dot').className = 'run-dot' + (d.running ? ' on' : '');
+    const ok = v.apiStatus === 'real' || v.apiStatus === 'paper';
+    $('ov-pr-health').textContent = d.running ? (ok ? '运行中' : '数据降级：' + (v.apiStatus || '未知')) : '已停止';
+    $('ov-pr-health').className = 'exhealth ' + (d.running ? (ok ? 'eh-ok' : 'eh-warn') : 'eh-idle');
+    $('ov-pr-eq').textContent = v.equity != null ? '$' + proprFmt(v.equity) : '—';
+    $('ov-pr-bal').textContent = v.balance != null ? '$' + proprFmt(v.balance) : '—';
+    $('ov-pr-long').textContent = proprFmt(v.long ?? 0, 4) + ' BTC';
+    $('ov-pr-short').textContent = proprFmt(v.short ?? 0, 4) + ' BTC';
+    $('ov-pr-orders').textContent = v.openOrders ?? '—';
+    $('ov-pr-writes').textContent = v.writeAttemptCount ?? '—';
+    const c = d.config || {};
+    $('ov-pr-range').textContent = c.lower && c.upper ? proprFmt(c.lower) + ' – ' + proprFmt(c.upper) : '—';
+    $('ov-pr-price').textContent = d.lastPrice ? proprFmt(d.lastPrice) : '—';
+    $('ov-pr-state').textContent = d.running ? (d.outOfRange ? '区间外' : '正常') : '空闲';
+    const pol = v.policy || {};
+    $('ov-pr-policy').textContent = `策略 ${pol.gridSide || '—'} / 双边 ${pol.dualSide || '—'}`;
+    const pos = $('ov-pr-position');
+    if (v.dualSide) {
+      pos.innerHTML = '<span style="color:var(--red)">⚠ 双边持仓：已冻结开仓</span>';
+    } else if ((v.long || 0) > 0) {
+      pos.textContent = '多头 ' + proprFmt(v.long, 4) + ' BTC';
+    } else if ((v.short || 0) > 0) {
+      pos.textContent = '空头 ' + proprFmt(v.short, 4) + ' BTC';
+    } else {
+      pos.innerHTML = '<span class="ov-position-empty">当前无持仓</span>';
+    }
+  } catch (e) {
+    const el = document.getElementById('ov-pr-health');
+    if (el) { el.textContent = '读取失败：' + e.message; el.className = 'exhealth eh-bad'; }
+  }
+}
+async function proprStop(btn) {
+  if (!confirm('停止 Propr 网格并撤销全部挂单？（不会平仓）')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/pr/stop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cancelOrders: true }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    btn.textContent = '已停止';
+  } catch (e) {
+    alert('停止失败：' + e.message);
+    btn.disabled = false;
+  }
+}
+setInterval(proprRefresh, 5000);
+proprRefresh();
+
 const ovEs = new EventSource(sseUrl('/api/overview/stream'));
 ovEs.onmessage = (e) => {
   lastBeat = Date.now();
