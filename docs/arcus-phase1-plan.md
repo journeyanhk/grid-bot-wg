@@ -538,3 +538,57 @@ const opening = o.opening !== false && !reduceOnly && !o.recovery;
 2. 撤单确认依赖交易所 `fetchOpenOrders` 的准确性（已做两轮一致，但仍非绝对）。
 3. 主网 `accountIndex` 与资金账户待人工确认。
 4. `_enforceDefensive` 只撤被封锁方向，破界撤单仍由既有 `outOfRange` 逻辑负责——两条路径未合并，长期应收敛。
+
+---
+
+## 13. 启动闸门 / fail-closed / 熔断全量撤单 —— 演练记录（v1.6.46）
+
+### 13.1 三项修复
+
+| # | 问题 | 修法 |
+|---|---|---|
+| P0 | 区间外启动先铺开仓单 | `start()` 顺序改为「算 outOfRange → running=true → `_runRiskCycle('start')` → `_startBlockedReason()` → 才 seed」；拦截时一张单都不提交 |
+| P1 | 一致性未知被当一致 | `checkConsistency` 增 `status: ok\|mismatch`；调用方读不出仓位时构造 `unknown`；单次 → DEFENSIVE，连续 2 次 → HALTED；适配器新增 `positionsFetchedAt`（>2 分钟未同步即 unknown）；`_runRiskCycle` 自身异常也 fail-closed |
+| P1 | 熔断只撤本地 active | `_enforceHalt` 改为先 `fetchOpenOrders`，按**交易所真实订单**撤（本地没有的幽灵单也撤），本地标记 reduceOnly/recovery 的保留；最终以交易所剩余判定 |
+
+**迟滞语义拆分**（本次新引入）：`outOfRange`（2 拍 + 驻留）负责切换 recovery/停机；`_beyondHysteresis`（外侧半格）负责禁止新增开仓。两者混用会出现「价格已破界却还在补开仓单」。
+
+### 13.2 演练 A：区间外启动（testnet，真实下单通道）
+
+```
+POST /api/ar/start  lower=90000 upper=95000 gridCount=10 sizeBase=0.0002 10x
+最新价 76924.3（区间外）
+```
+
+| 观察项 | 结果 |
+|---|---|
+| 接口返回 | `running=true`（保持运行态等待） |
+| **交易所真实挂单** | **0** |
+| 日志 | `⛔ 启动被风控拦截：最新价 76924.3 在区间 [90000, 95000] 之外。本轮不铺任何开仓单，保持等待（无挂单、无持仓变化）。` |
+
+### 13.3 演练 B：区间内启动
+
+```
+POST /api/ar/start  lower=73500 upper=79000 gridCount=10 sizeBase=0.0002 10x
+```
+
+| 观察项 | 结果 |
+|---|---|
+| 铺单耗时 | 2,514 ms |
+| 交易所挂单 | 10 张，BUY 8 / SELL 2，10 个唯一价 |
+| 价格区间 | 73,500 – 79,000（与配置一致） |
+| 日志 | `启动完成：BTC-USD 中性网格，10 格，间距 550（0.72%），杠杆 10x；目标 10 单 / 已确认 10 单 / 待重试 0 单` |
+
+收尾：`/stop` → openOrders **0**、positions **0**；testnet equity 837.80 未受影响。
+
+### 13.4 演练结论
+
+- 启动闸门**真的挡住**了「区间外先铺单」——交易所侧确认 0 单，不是本地视图。
+- 闸门拦截后**没有自动补铺路径**：价格回到区间内也需人工重新 `/start`（已由测试锁定）。
+- 本轮全部为 testnet 真实下单，**主网全程未下单**：openOrders 0 / positions 0 / equity 245.414038607。
+
+### 13.5 演练中发现的附带缺陷
+
+1. `_checkMaxLoss()` 直接调用 `ex.getPosition()` 未保护，适配器异常会打断整个价格处理链路 → 已加保护。
+2. `_guardCtx()` 与 `_guardConsistency()` 对「接口抛错」与「确实空仓」未区分 → 已分开处理。
+3. guard 原先用严格价重算破界，绕过 bot 的迟滞 → 改为尊重 `ctx.outOfRange` 布尔值，并新增 `_beyondHysteresis` 承担「封开仓」语义。
