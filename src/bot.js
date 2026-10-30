@@ -2469,8 +2469,14 @@ export class GridBot {
     if (!recovery && !this.outOfRange && this.running && this.grid && this._placementProgress?.status !== 'running') {
       const levels = this.grid.levels;
       const px = this.lastPrice;
+      // 活跃窗口：窗口外的档位本来就不该有单，不能算缺口。
+      // 漏这一步会让哨兵看到「66 格只有 8 单」→ 判阶梯塌陷 → 每 1.5 分钟自动重铺
+      // → 大量请求把 fills 轮询打进 429 → 账本停在旧值 → 熔断（2026-10-30 实测）。
+      const win = Number(this.config.activeWindowGrids) || 0;
+      const inWindow = (lvl) => !(win && px != null) || Math.abs(lvl - px) <= sp * win;
       const holes = [];
       for (let i = 0; i < levels.length; i += 1) {
+        if (!inWindow(levels[i])) continue;
         if (occupied.has(i)) continue;
         // 现价附近 1 格是铺梯时本就留空的带，不算缺口。
         if (px != null && Math.abs(levels[i] - px) <= sp * 1.5) continue;
@@ -2490,7 +2496,9 @@ export class GridBot {
       // 阶梯塌陷自愈：死手全撤、交易所批量撤单等场景常常留下 1~3 张幸存单，
       // 此时 massVanish 的「0 单」判据不成立，reconcile 只清理不重铺，网格会一直空着。
       // 只有在「区间内、非恢复模式、连续多轮大面积缺格」时才自动重建，避免误伤抖动。
-      const levelsTotal = Math.max(1, this.grid?.levels?.length || 0);
+      const levelsTotal = Math.max(1, win && px != null
+        ? levels.filter((l) => Math.abs(l - px) <= sp * win).length
+        : (this.grid?.levels?.length || 0));
       const collapsed = holes.length >= Math.max(LADDER_COLLAPSE_MIN_HOLES, levelsTotal * LADDER_COLLAPSE_RATIO);
       if (collapsed) {
         this._collapseStreak = (this._collapseStreak || 0) + 1;

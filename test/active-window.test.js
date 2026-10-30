@@ -139,6 +139,20 @@ test('窗口滚动绝不触碰 reduceOnly / recovery 腿', async () => {
   await bot.stop({ closePosition: false }).catch(() => {});
 });
 
+test('阶梯哨兵只把窗口内的空档算缺口，不判塌陷', async () => {
+  const { bot } = await boot();
+  // 窗口模式：66 格里只有现价附近 8 张单是正常的。
+  // 旧哨兵按 66 格算 → 58 个「缺口」→ 判塌陷 → 每 1.5 分钟自动重铺 → 429 → 熔断。
+  await bot.reconcileOpenOrders();
+  const gaps = bot._ladderGaps || [];
+  const sp = bot.grid.spacing;
+  const outside = gaps.filter((i) => Math.abs(bot.grid.levels[i] - bot.lastPrice) > sp * 4 + 1e-9);
+  assert.equal(outside.length, 0, `窗口外档位被当成缺口了：${outside.slice(0, 5)}`);
+  assert.ok(gaps.length <= 3, `窗口内缺口应为个位数，实际 ${gaps.length}（疑似仍按 66 格算）`);
+  assert.equal(bot._collapseStreak || 0, 0, '窗口模式下不应累计塌陷计数');
+  await bot.stop({ closePosition: false }).catch(() => {});
+});
+
 test('未配置 activeWindowGrids 时退回旧行为（全档铺满）', async () => {
   const cfg = { ...CFG };
   delete cfg.activeWindowGrids;
