@@ -592,3 +592,72 @@ POST /api/ar/start  lower=73500 upper=79000 gridCount=10 sizeBase=0.0002 10x
 1. `_checkMaxLoss()` 直接调用 `ex.getPosition()` 未保护，适配器异常会打断整个价格处理链路 → 已加保护。
 2. `_guardCtx()` 与 `_guardConsistency()` 对「接口抛错」与「确实空仓」未区分 → 已分开处理。
 3. guard 原先用严格价重算破界，绕过 bot 的迟滞 → 改为尊重 `ctx.outOfRange` 布尔值，并新增 `_beyondHysteresis` 承担「封开仓」语义。
+
+---
+
+## 14. 独立库存硬上限（v1.6.47）
+
+### 14.1 先修正两处表述
+
+| 原表述 | 更正后 |
+|---|---|
+| 「网格本身是正期望」 | **「59 小时内程序统计的 gridProfit 为 +5.83，但整体是否正期望尚未证明」**。网格价差统计为正 ≠ 扣掉趋势库存损失后仍为正。新方案待验证的假设是：*限制库存后，能保留一部分网格价差收益，同时显著降低趋势持仓损失* |
+| 「库存上限 6–8 格只需一行配置」 | **不成立**。`_maxInventoryBase()` 原为 `grid.count × sizeBase`，66 格网格就是 66 格上限；比例阈值只是把 66 格切成 50%/75%/100%。必须新增独立配置 |
+
+### 14.2 实现
+
+```js
+_maxInventoryBase() {
+  const cap = Number(this.config.maxInventoryGrids);
+  const grids = Number.isFinite(cap) && cap > 0 ? cap : Number(this.grid.count);
+  return grids * sizeBase;
+}
+```
+
+| 配置 | 值 | 含义 |
+|---|---|---|
+| `AR_MAX_INVENTORY_GRIDS` | 8 | 库存硬上限（格） |
+| `AR_INVENTORY_WARN_GRIDS` | 4 | 预警，禁止升量 |
+| `AR_INVENTORY_BLOCK_GRIDS` | 6 | 停同向开仓 + 撤同向多余普通单 |
+| `AR_INVENTORY_HALT_GRIDS` | 8 | 熔断（真实持仓触顶） |
+
+格阈值换算成 guard 比例（4/6/8 ÷ 8 = 50%/75%/100%），未配置时传空对象、行为与旧版完全一致。
+
+### 14.3 projectedInventory 与两个刻意的设计选择
+
+```
+projectedInventory = |真实持仓| + 会继续放大 |持仓| 的同向未成交开仓单
+```
+
+**选择一：只算同向。** 66 格中性网格两侧各挂约 33 张，若把两侧都算进去，空仓时 projected 就等于 66 格 —— 一铺单就熔断，那不是风控而是自锁。
+
+**选择二：空仓时不投影。** 对称挂单是网格的设计本身，只有在已有持仓、方向已经暴露时才开始收紧。
+
+**选择三：熔断只认真实持仓，不认 projected。** projected 到顶 = 「再成交就到上限」，此时应做的是停开仓 + 撤同向多余挂单；若拿 projected 熔断，一个正常挂单的网格会被自己的待成交单反复熔断，永远开不起来。真实持仓触顶才是「已经发生越界」（并发/延迟/重复成交的征兆）。
+
+### 14.4 行为矩阵
+
+| 真实持仓 | projected | 状态 | 动作 |
+|---:|---:|---|---|
+| 0–3 格 | — | RUNNING | 正常 |
+| 4 格 | ≥4 | DEFENSIVE | 预警，禁止升量 |
+| 5 格 | 8 格 | DEFENSIVE + blockSide | 停同向开仓、撤同向多余普通单；**不熔断** |
+| 8 格 | — | HALTED | 撤全部非减仓单，人工恢复 |
+
+### 14.5 测试（test/inventory-cap.test.js，8 项全绿）
+
+上限取自 maxInventoryGrids 而非 gridCount / 未配置时向后兼容 / 格数换算比例 / projected 只累同向且空仓不投影 / 真实 8 格熔断 / projected 顶到 8 不熔断只封锁 / 4 格预警 6 格封向 / 到限后同向开仓被拦而 reduceOnly 放行。
+
+### 14.6 下一阶段顺序（未获批准不越过）
+
+```
+A. testnet：0.10% + 0.0001 BTC + maxInventoryGrids=8
+B. testnet 验证 4/6/8 格防守
+C. 主网东京主机只读 preflight
+D. 连续 2 根 1h 收盘站稳下沿后，申请主网金丝雀
+E. 主网 6–8 个实际开仓档位，2–4 小时
+F. 金丝雀通过后才扩到完整 66 格
+G. 未经人工批准不得升回 0.0002 BTC
+```
+
+当前状态：**HALTED / FLAT / NO ORDERS**（主网 0 单 / 0 仓 / equity 245.414038607）。

@@ -344,6 +344,10 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
         // 运维级风控以服务端配置为准，请求体关不掉：止损线是最后一道闸，
         // 不能因为某个调用方（面板/脚本）没带这个字段就静默失效。
         if (exCfg?.stopLossUsd != null) body.stopLossUsd = exCfg.stopLossUsd;
+        // 库存硬上限是运维级参数，同样不允许请求体覆盖（否则等于没有上限）
+        for (const k of ['maxInventoryGrids', 'inventoryWarnGrids', 'inventoryBlockGrids', 'inventoryHaltGrids']) {
+          if (exCfg?.[k] > 0) body[k] = exCfg[k];
+        }
         if (exCfg?.recoverMaxLossUsd != null) body.recoverMaxLossUsd = exCfg.recoverMaxLossUsd;
         return send(res, 200, await bot.start(body));
       }
@@ -899,6 +903,9 @@ async function resumeIfWasRunning(bot, exchange, key) {
     const liveCfg = cfg[key];
     if (liveCfg && snap.config) {
       if (liveCfg.stopLossUsd != null) snap.config.stopLossUsd = liveCfg.stopLossUsd;
+      for (const k of ['maxInventoryGrids', 'inventoryWarnGrids', 'inventoryBlockGrids', 'inventoryHaltGrids']) {
+        if (liveCfg[k] > 0) snap.config[k] = liveCfg[k];
+      }
       if (liveCfg.recoverMaxLossUsd != null) snap.config.recoverMaxLossUsd = liveCfg.recoverMaxLossUsd;
     }
     if (exchange.resumeWithoutOrders && snap.config?.marketId != null) {

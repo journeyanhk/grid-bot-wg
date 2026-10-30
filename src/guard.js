@@ -136,7 +136,9 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   }
 
   // 3) 库存偏置
-  const pos = num(ctx.positionBase);
+  // inventoryBase 允许带上「同向未成交开仓单」（projected），比裸持仓更早发现暴露；
+  // 未提供时退回真实持仓，保持向后兼容。
+  const pos = num(ctx.inventoryBase ?? ctx.positionBase);
   const maxInv = Math.abs(num(ctx.maxInventoryBase));
   const frac = maxInv > 0 ? Math.abs(pos) / maxInv : 0;
   metrics.inventoryFrac = +frac.toFixed(4);
@@ -146,21 +148,31 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   let blockOpening = false;
   let blockSide = null;
 
+  // 真实持仓：不含待成交。只有它触顶才说明「已经发生」了越界（并发/延迟/重复成交）。
+  const realAbs = Math.abs(num(ctx.positionBase));
+  metrics.inventoryRealBase = realAbs;
+  metrics.inventoryProjectedBase = Math.abs(pos);
+
   if (maxInv > 0) {
-    if (frac >= L.inventoryHaltFrac) {
+    // 熔断只认「已实现的真实持仓」。projected（含同向待成交）到顶只是停开仓，
+    // 否则一个正常挂单的网格会被自己的待成交单反复熔断。
+    if (realAbs >= maxInv) {
       return {
         state: STATES.HALTED,
-        reasons: [`库存 ${pos} 达到上限 ${maxInv}（${(frac * 100).toFixed(0)}%）`],
+        reasons: [
+          `库存触顶：真实持仓 |${realAbs}|、含待成交 |${Math.abs(pos)}|，上限 ${maxInv}`,
+        ],
         blockOpening: true,
         blockSide: 'both',
-        haltReason: `库存触顶：|${pos}| ≥ ${maxInv}`,
+        haltReason: `库存触顶：真实持仓 |${realAbs}| ≥ ${maxInv}`
+          + (Math.abs(pos) > realAbs ? `（含同向待成交共 |${Math.abs(pos)}|）` : ''),
         metrics,
       };
     }
     if (frac >= L.inventoryBlockFrac) {
       state = STATES.DEFENSIVE;
       blockSide = addSideFor(pos);
-      reasons.push(`库存 ${(frac * 100).toFixed(0)}% ≥ ${(L.inventoryBlockFrac * 100)}%，停止 ${blockSide} 方向开仓`);
+      reasons.push(`库存暴露 ${(frac * 100).toFixed(0)}%（真实 ${realAbs} + 同向待成交）≥ ${(L.inventoryBlockFrac * 100)}%，停止 ${blockSide} 方向开仓`);
     } else if (frac >= L.inventoryWarnFrac) {
       state = STATES.DEFENSIVE;
       reasons.push(`库存 ${(frac * 100).toFixed(0)}% ≥ ${(L.inventoryWarnFrac * 100)}%，进入防守`);

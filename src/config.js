@@ -123,6 +123,13 @@ export function getConfig() {
     maxMakerFeePpm: Number(process.env.AR_MAX_MAKER_FEE_PPM ?? 200),
     // 单格净利红线（USD）：间距×size − 双边费低于它拒启；主网默认 0.01，testnet 默认 0。
     minGridNetUsd: Number(process.env.AR_MIN_GRID_NET_USD ?? ''),
+    // 独立库存硬上限（单位：格）。0/空 = 沿用旧行为（= gridCount），仅为兼容。
+    // 66 格价格覆盖 + 8 格真实库存上限，是两件事：覆盖范围决定成交机会，
+    // 库存上限决定最大暴露。把后者绑到前者，等于让"铺得多"自动变成"敢扛得多"。
+    maxInventoryGrids: Number(process.env.AR_MAX_INVENTORY_GRIDS || 0) || null,
+    inventoryWarnGrids: Number(process.env.AR_INVENTORY_WARN_GRIDS || 0) || null,
+    inventoryBlockGrids: Number(process.env.AR_INVENTORY_BLOCK_GRIDS || 0) || null,
+    inventoryHaltGrids: Number(process.env.AR_INVENTORY_HALT_GRIDS || 0) || null,
     deadmanMs: Number(process.env.AR_DEADMAN_MS || 60_000),
     // 全局止损线（USDC，按盘口价重算）：持仓亏到这条线强制平仓停止；0 = 不启用。
     stopLossUsd: Number(process.env.AR_STOP_LOSS_USD ?? 50),

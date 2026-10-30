@@ -496,6 +496,11 @@ export class GridBot {
       gridCount: Number(cfg.gridCount), sizeBase, leverage,
       // 区间外止损策略：'close'=冲破区间平仓（撤单+平仓+停止）；'recover'=只减仓回收阶梯
       outOfRangeAction: cfg.outOfRangeAction === 'recover' ? 'recover' : 'close',
+      // 独立库存硬上限（格）。null = 沿用旧行为（= gridCount），仅为兼容保留。
+      maxInventoryGrids: Number(cfg.maxInventoryGrids) > 0 ? Number(cfg.maxInventoryGrids) : null,
+      inventoryWarnGrids: Number(cfg.inventoryWarnGrids) > 0 ? Number(cfg.inventoryWarnGrids) : null,
+      inventoryBlockGrids: Number(cfg.inventoryBlockGrids) > 0 ? Number(cfg.inventoryBlockGrids) : null,
+      inventoryHaltGrids: Number(cfg.inventoryHaltGrids) > 0 ? Number(cfg.inventoryHaltGrids) : null,
       // 破界出口纪律：recover 模式下若未实现亏损达到该上限（USDC），强制撤单+市价平仓+停止
       // （recover 本身不止损，此值给单边行情一条硬退出线；0/缺省 = 不启用）
       recoverMaxLossUsd: Number(cfg.recoverMaxLossUsd) > 0 ? Number(cfg.recoverMaxLossUsd) : null,
@@ -1001,7 +1006,50 @@ export class GridBot {
   /** 最大允许库存（绝对值）：整条梯子全部朝一个方向成交时的持仓。 */
   _maxInventoryBase() {
     if (!this.grid || !this.config) return 0;
-    return Math.abs(Number(this.grid.count) * Number(this.config.sizeBase)) || 0;
+    // 价格覆盖范围（gridCount）与风险上限（maxInventoryGrids）是两件事。
+    // 绑在一起等于「铺得多 ⇒ 敢扛得多」，66 格网格就自动获得 66 格敞口许可。
+    const cap = Number(this.config.maxInventoryGrids);
+    const grids = Number.isFinite(cap) && cap > 0 ? cap : Number(this.grid.count);
+    return Math.abs(grids * Number(this.config.sizeBase)) || 0;
+  }
+
+  /** 把「格」阈值换算成 guard 用的比例；未配置 maxInventoryGrids 时返回空（行为不变）。 */
+  _inventoryLimits() {
+    const maxGrids = Number(this.config?.maxInventoryGrids);
+    if (!(maxGrids > 0)) return {};
+    const warn = Number(this.config?.inventoryWarnGrids) || maxGrids * 0.5;
+    const block = Number(this.config?.inventoryBlockGrids) || maxGrids * 0.75;
+    const halt = Number(this.config?.inventoryHaltGrids) || maxGrids;
+    return {
+      inventoryWarnFrac: Math.min(0.99, warn / maxGrids),
+      inventoryBlockFrac: Math.min(0.999, block / maxGrids),
+      inventoryHaltFrac: Math.min(1, halt / maxGrids),
+    };
+  }
+
+  /**
+   * 库存暴露 = 真实持仓 + 会继续放大 |持仓| 的同向未成交开仓单。
+   *
+   * 只算「同向」是刻意的：66 格中性网格两侧各挂约 33 张，把两侧都算进去的话，
+   * 空仓时 projected 就等于 66 格 —— 一铺单就熔断，那不是风控，是自锁。
+   * 空仓时也不做投影（对称挂单就是网格的设计本身），有持仓后才开始收紧。
+   */
+  _projectedInventory() {
+    let pos = 0;
+    try { pos = Number(this.ex.getPosition?.(this.config?.marketId)?.sizeBase) || 0; } catch { pos = 0; }
+    const unit = Number(this.config?.sizeBase) || 0;
+    const absPos = Math.abs(pos);
+    if (!(unit > 0) || absPos < unit * 0.5) {
+      return { pos, projected: absPos, side: null, pending: 0 };
+    }
+    const side = pos > 0 ? 'buy' : 'sell';
+    let pending = 0;
+    for (const o of this.active.values()) {
+      if (o.reduceOnly || o.recovery || o.opening === false) continue;
+      if (String(o.side).toLowerCase() !== side) continue;
+      pending += Number(o.sizeBase) || 0;
+    }
+    return { pos, projected: absPos + pending, side, pending };
   }
 
   /** 组装风控上下文。缺项按"未知"跳过，绝不猜。 */
@@ -1015,6 +1063,7 @@ export class GridBot {
       upper: Number(cfg.upper) || 0,
       outOfRange: !!this.outOfRange || this._beyondHysteresis(),
       positionBase: pos,
+      inventoryBase: this._projectedInventory().projected,
       maxInventoryBase: this._maxInventoryBase(),
       equity: typeof this.ex.equity === 'number' ? this.ex.equity : null,
       startBalance: this.guard?.startBalance ?? this.startBalance,
@@ -1087,7 +1136,7 @@ export class GridBot {
         ...this._guardCtx(), consistency,
         consistencyUnknownStreak: this._consistencyUnknownStreak,
         haltReason: this.guard?.haltReason,
-      });
+      }, this._inventoryLimits());
     } catch (e) {
       this._alert(`风控评估异常（已跳过本轮）：${e.message}`);
       return null;
