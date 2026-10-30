@@ -90,9 +90,11 @@ test('活跃窗口：66 格覆盖只提交现价附近 4 格内的开仓单', as
 
 test('窗口铺单后 projected 不会因为「远端 33 张」直接顶到上限', async () => {
   const { ex, bot } = await boot();
-  // 空仓：projected 必须为 0，而不是 33
+  // 空仓：projected 必须反映「窗口内会立刻开仓的那几张」，而不是 33 格
   const p0 = bot._projectedInventory();
-  assert.equal(p0.projected, 0, `空仓 projected 应为 0，实际 ${p0.projected}`);
+  assert.ok(p0.projected > 0, '空仓时窗口内同向挂单也应计入投影（否则成交那一刻才突然跳变）');
+  assert.ok(p0.projected <= 8, `空仓 projected 不应超过上限，实际 ${p0.projected}`);
+  assert.equal(p0.side, null, '空仓不封锁方向');
 
   // 有 2 格持仓：projected = 2 格 + 窗口内同向单（≤4 格），必须仍在上限 8 格以内
   ex.positions.set(1, { sizeBase: 2, entryPrice: 150 });
@@ -151,6 +153,44 @@ test('阶梯哨兵只把窗口内的空档算缺口，不判塌陷', async () =>
   assert.ok(gaps.length <= 3, `窗口内缺口应为个位数，实际 ${gaps.length}（疑似仍按 66 格算）`);
   assert.equal(bot._collapseStreak || 0, 0, '窗口模式下不应累计塌陷计数');
   await bot.stop({ closePosition: false }).catch(() => {});
+});
+
+test('已请求撤单的残留台账不计入投影（观察窗 projected=51.5 事故）', async () => {
+  const { ex, bot } = await boot();
+  bot.active.clear();                       // 只留残留台账，便于精确断言
+  ex.positions.set(1, { sizeBase: 0.0001, entryPrice: 150 });
+  bot.posLedger.reset(0.0001);
+  // 模拟「熔断撤单拿不到交易所快照」留下的 50 条残留台账
+  for (let i = 0; i < 50; i += 1) {
+    bot.active.set(`ghost-${i}`, {
+      levelIndex: 100 + i, side: 'buy', price: 150 - i * 0.1, sizeBase: 0.0001,
+      reduceOnly: false, recovery: false, opening: true,
+      placedAt: Date.now() - 60_000, cancelRequestedAt: Date.now() - 30_000,
+    });
+  }
+  const p = bot._projectedInventory();
+  assert.ok(p.projected <= 0.0001 + 1e-9,
+    `已撤单的残留记录仍被计入投影：${p.projected}（应只剩持仓 0.0001）`);
+  await bot.stop({ closePosition: false }).catch(() => {});
+});
+
+test('启动前投影超上限则一张单都不铺', async () => {
+  const ex = new MockEx();
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 4 });
+  // 先启动一次把价格灌进来，然后人为污染台账并重置风控状态
+  await bot.start(CFG);
+  await bot.stop({ closePosition: false }).catch(() => {});
+  ex.orders.clear();
+  bot.active.clear();
+  // 空仓时投影只看「会扩大空头」的方向（sell），所以脏数据用 sell
+  for (let i = 0; i < 30; i += 1) {
+    bot.active.set(`dirty-${i}`, {
+      levelIndex: i, side: 'sell', price: 150 + i * 0.1, sizeBase: 1,
+      reduceOnly: false, recovery: false, opening: true, placedAt: Date.now(),
+    });
+  }
+  const reason = bot._startBlockedReason();
+  assert.ok(reason && reason.includes('投影库存'), `应被投影断言拦住，实际：${reason}`);
 });
 
 test('未配置 activeWindowGrids 时退回旧行为（全档铺满）', async () => {

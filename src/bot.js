@@ -1045,30 +1045,40 @@ export class GridBot {
     try { pos = Number(this.ex.getPosition?.(this.config?.marketId)?.sizeBase) || 0; } catch { pos = 0; }
     const unit = Number(this.config?.sizeBase) || 0;
     const absPos = Math.abs(pos);
-    if (!(unit > 0) || absPos < unit * 0.5) {
-      return { pos, projected: absPos, side: null, pending: 0 };
-    }
-    const side = pos > 0 ? 'buy' : 'sell';
+    if (!(unit > 0)) return { pos, projected: absPos, side: null, pending: 0, pendingBuy: 0, pendingSell: 0, nearOrders: 0 };
+    const flat = absPos < unit * 0.5;
+    const side = flat ? null : (pos > 0 ? 'buy' : 'sell');
 
-    // 只统计「近处」同向挂单：66 格网格任意时刻都有约 33 张同向挂单，
-    // 全算进来等于一有持仓就顶到上限 37 格 → 第一次成交就自锁。
-    // 远处的挂单要价格先走过来才成交，那是问题逐格暴露的过程，
-    // 由「4 格预警 → 6 格封锁」逐步兜住；这里只负责「马上可能成交的」。
+    // 只统计「近处」同向挂单：远处挂单要价格先走过来才成交，那是逐格暴露的过程，
+    // 由 4 格预警 → 6 格封锁逐步兜住；这里只负责「马上可能成交的」。
     const px = Number(this.lastPrice) || 0;
     const sp = Number(this.grid?.spacing) || 0;
     const NEAR_GRIDS = 3;
     const near = sp > 0 ? sp * NEAR_GRIDS : Infinity;
-    let pending = 0;
-    let counted = 0;
+    const nowMs = Date.now();
+    let pendingBuy = 0, pendingSell = 0, counted = 0;
     for (const o of this.active.values()) {
       if (o.reduceOnly || o.recovery || o.opening === false) continue;
-      if (String(o.side).toLowerCase() !== side) continue;
+      // 已请求撤单超过 15s 的单不再计入「随时可成交」的风险：
+      // 否则撤单确认失败时，残留台账会把 projected 虚高数倍（实测 51.5 格）。
+      if (o.cancelRequestedAt && nowMs - o.cancelRequestedAt > 15_000) continue;
       const op = Number(o.price);
       if (near !== Infinity && px > 0 && Number.isFinite(op) && Math.abs(op - px) > near) continue;
-      pending += Number(o.sizeBase) || 0;
+      const sz = Number(o.sizeBase) || 0;
+      const sd = String(o.side).toLowerCase();
+      if (sd === 'buy') pendingBuy += sz;
+      else if (sd === 'sell') pendingSell += sz;
       counted += 1;
     }
-    return { pos, projected: absPos + pending, side, pending, nearOrders: counted };
+    // 空仓时两个方向都有「会立刻开仓」的单，但只会先成交其中一个方向，取较大者。
+    // 旧实现空仓直接返回 0 —— 于是启动后 8 张同向单完全不可见，成交那一刻 projected
+    // 从 0 跳到 8，风控等于事后才发现。
+    if (flat) {
+      const pending = Math.max(pendingBuy, pendingSell);
+      return { pos, projected: absPos + pending, side: null, pending, pendingBuy, pendingSell, nearOrders: counted };
+    }
+    const pending = side === 'buy' ? pendingBuy : pendingSell;
+    return { pos, projected: absPos + pending, side, pending, pendingBuy, pendingSell, nearOrders: counted };
   }
 
   /** 组装风控上下文。缺项按"未知"跳过，绝不猜。 */
@@ -1412,7 +1422,13 @@ export class GridBot {
 
       if (!toCancel.size) return;
       for (const id of toCancel) {
-        try { await this.ex.cancelOrder?.(this.config.marketId, id); } catch { /* 由快照确认兜底 */ }
+        try {
+          await this.ex.cancelOrder?.(this.config.marketId, id);
+          // 撤单请求已发出：该单不再算「随时可成交」。交易所快照拿不到时
+          // （本次观察窗实测）残留记录会让 projectedInventory 虚高到 51.5 格。
+          const rec = this.active.get(String(id));
+          if (rec) rec.cancelRequestedAt = Date.now();
+        } catch { /* 由快照确认兜底 */ }
       }
       await this._confirmNonReduceGone(keep);
     } finally {
@@ -1504,6 +1520,15 @@ export class GridBot {
     const st = this.guardState?.state;
     if (!st) return '风控状态未建立（guardState 为空）';
     if (st !== STATES.RUNNING) return `风控状态为 ${st}`;
+    // 启动前投影断言（观察窗事故后新增）：窗口模式下 expected 是 activeWindowOrders + 持仓，
+    // 若投影已经超上限，说明台账有污染（例如熔断撤单确认失败留下的残留记录）——
+    // 那就一张单都不该铺，先让人看明细，而不是铺完再熔断。
+    const proj = this._projectedInventory();
+    const maxInv = this._maxInventoryBase();
+    if (maxInv > 0 && proj.projected > maxInv) {
+      return `启动前投影库存 ${proj.projected.toFixed(6)} 已超上限 ${maxInv.toFixed(6)}`
+        + `（持仓 ${Math.abs(proj.pos).toFixed(6)} + 近价同向挂单 ${proj.pending.toFixed(6)}）`;
+    }
     return null;
   }
 
