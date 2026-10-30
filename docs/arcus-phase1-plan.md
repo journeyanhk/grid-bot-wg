@@ -796,3 +796,50 @@ inventoryBase = 0，guardState = RUNNING
 已用 testnet 冒烟验证（13 条采样、五组输出正常；修了空价格/空 equity 的 None 崩溃）。
 
 **funding 暂未单独采集**——Arcus 账单接口还需扩展，观察窗报告里会显式标注这一项缺失，不用 0 冒充。
+
+---
+
+## 17. Testnet A 观察窗启动记录（2026-10-30 14:47，用户批准）
+
+### 17.1 固定参数（观察期间不得自行调整）
+
+```
+spacing           0.20%
+sizeBase          0.0001 BTC
+activeWindowGrids 4
+maxInventoryGrids 8
+inventoryWarn     4 格
+inventoryBlock    6 格
+inventoryHalt     8 格
+杠杆 10x          区间 73377.5 – 83747.7（66 格，现价 78562.6 居中）
+dynamic recenter  关
+automatic restart 关（进程死了由 4h 保活巡检发现后手动拉起，不加 supervisor）
+```
+
+用户明确不批准：窗口 8 / 封锁线 10 / 观察期动态升量 / 观察期主网金丝雀。
+
+### 17.2 启动实测
+
+```
+start_ms 2551
+spacingPct 0.2   perRungNet 0.0134   sizeBase 0.0001
+openOrders 7-8   交易所 7 单 B3/S4   范围 78405.5 – 79505.3
+guardState RUNNING   inventoryBase 0
+```
+
+单格毛利 $0.0158 − 双边 maker $0.0024 = **$0.0134**，与批准文件一致。
+
+### 17.3 采集与巡检
+
+- 采样器 `/data/scripts/window_collect.py --interval 30` → `/data/arcus-window.jsonl`
+- 调度 `ca77c83c`「Arcus 观察窗保活巡检（4h）」：只读，进程/采样器死了才拉起，**不 stop/start/refill/改参数**；HALTED 只记录不解除（HALTED 本身可能是要验证的正确行为）
+- 调度 `81a6e240`「Arcus 观察窗 24h 汇总」（10-31 14:50，一次性）：按批准的硬性条件逐条判「通过/未通过/样本不足」；完成格 < 2×小时数 → 只能写“运行稳定、样本不足”，**不得拿跑满 24h 当通过**
+
+### 17.4 通过条件（三态判定，写死在汇总任务里）
+
+硬性：actualInventoryPeak ≤8 格、projected 不因远端单冲到 33 格、unknown=0、untracked=0、position delta=0、taker=0、被拒单不进 active、无错误自动重启/重锚。
+行为：4 格预警、6 格封锁同向开仓并撤多余普通单、8 格 HALTED、reduceOnly 仍放行、窗口随价移动不堆幽灵单。
+
+### 17.5 主网状态
+
+HALTED / FLAT / NO ORDERS，挂单 0、持仓 0、equity **245.414038607**。观察期间不调用任何主网写接口。
