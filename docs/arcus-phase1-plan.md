@@ -720,3 +720,61 @@ risk.perRungNet = 0.0134 ✓  spacingPct = 0.2 ✓
 当前行为是：`projectedInventory = |真实持仓| + 全部同向未成交开仓单`，不按距离过滤。
 
 保留「不过滤」是有意为之：远处的开仓单将来也会成交，按距离截断等于低估暴露，与「宁严勿松」相反。若将来要改，需先有数据证明远处挂单确实构不成连续成交风险。
+
+---
+
+## 16. 活跃窗口：让「66 格覆盖」与「8 格上限」同时成立（v1.6.49）
+
+### 16.1 冲突与解法
+
+「全部同向挂单计入 projected」与「铺满 66 格」不能共存：持仓 0 时同向 33 张就是 33 格 projected，第一笔成交前就该熔断。
+
+解法不是按距离截断挂单（会低估暴露），而是**交易所上本来就只有近价单**：
+
+- 66 格仍是策略的价格覆盖范围，`seedOrders` 只提交现价 ±`activeWindowGrids` 内的档位
+- 远端档位只作候选，不落单
+- 价格移动 ≥1 格时 `_rollActiveWindow()` 撤窗口外开仓单、补窗口内缺档
+- `reduceOnly` / `recovery` / `opening=false` 的腿**永不参与滚动**
+
+### 16.2 窗口取值：4 格/侧（不是附件的 8 格）
+
+附件建议「每侧 8 格」，但代入约束会不成立：
+
+```
+projected = |真实持仓| + 窗口内同向挂单
+窗口 8：持仓 1 格 → projected 9 > block(6) → 立刻封锁补单，网格停在 8 张
+窗口 4：持仓 1 格 → projected 5 < block(6) → 正常；持仓 4 格 → 8，到封锁/熔断边界
+```
+
+**窗口 4 + 封锁 6 + 熔断 8** 才是自洽的一组：给持仓留出 4 格余量。窗口大小可配置（`AR_ACTIVE_WINDOW_GRIDS`），要 8 格只需同时把 `inventoryBlockGrids` 提到 10 以上。
+
+### 16.3 testnet 实测
+
+```
+66 格 / 0.20% / 0.0001 / 窗口 4 / 上限 8
+openOrders = 7（原为 67），B3/S4，范围 78,534.3–79,636.0，现价 79,027
+inventoryBase = 0，guardState = RUNNING
+```
+
+### 16.4 本轮修掉的两个真缺陷
+
+| 缺陷 | 后果 | 修法 |
+|---|---|---|
+| `active` 条目**没有 `orderId` 字段**（只有 Map key 是） | `_rollActiveWindow` 按 `o.orderId` 撤单 → 传 `undefined`，交易所撤不掉、本地留幽灵单，`cancelled` 计数还虚高 | 改用 `this.active.entries()` 拿 key |
+| `activeWindowGrids` 漏在 `/start` 注入白名单外 | env 配了也不生效，testnet 实测仍挂 67 单 | `server.js` 两处注入列表补该字段 |
+
+### 16.5 账本重锚条件化（附件第二项）
+
+`start()` **不再静默重置**仓位账本——自动重置会把「本地账本与交易所本来就不一致」直接抹掉，而那是最该被看见的事。
+
+- 普通 start：账本不一致 → 一致性检查判 HALTED，报差异
+- `POST /api/<key>/new-epoch`（`confirm:true` + `reason` 必填）→ `beginNewRiskEpoch()` 六项前置检查：本地 0 挂单、重试队列空、无未跟踪成交、无进行中铺单批次、两次 `openOrders` 快照一致且为 0、两次持仓查询一致；通过后重锚并记录 `prevExpected / exchangeBase / delta / by / reason`
+
+### 16.6 解除熔断加强（附件第三项）
+
+`POST /api/<key>/clear-halt` 现在要求：`confirm:true` + `reason` 必填 + **空仓** + 交易所上只剩减仓腿 + 账本与交易所一致。**只解除粘滞 HALT，不启动、不铺单、不改参数。**
+
+### 16.7 仍未做
+
+- 观察窗四组指标采集脚本（网格活动 / 成交与费用 / 库存与风控 / 账本与异常），24h 优先、样本不足延长到 48h
+- 附件要求的“管理认证 / 来源白名单”只做到「绑定 127.0.0.1 + origin 校验」，未做 token

@@ -345,7 +345,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
         // 不能因为某个调用方（面板/脚本）没带这个字段就静默失效。
         if (exCfg?.stopLossUsd != null) body.stopLossUsd = exCfg.stopLossUsd;
         // 库存硬上限是运维级参数，同样不允许请求体覆盖（否则等于没有上限）
-        for (const k of ['maxInventoryGrids', 'inventoryWarnGrids', 'inventoryBlockGrids', 'inventoryHaltGrids']) {
+        for (const k of ['maxInventoryGrids', 'inventoryWarnGrids', 'inventoryBlockGrids', 'inventoryHaltGrids', 'activeWindowGrids']) {
           if (exCfg?.[k] > 0) body[k] = exCfg[k];
         }
         if (exCfg?.recoverMaxLossUsd != null) body.recoverMaxLossUsd = exCfg.recoverMaxLossUsd;
@@ -392,9 +392,21 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
         if (body?.confirm !== true) {
           return send(res, 400, { error: '必须显式 confirm:true —— 解除熔断会恢复开仓' });
         }
-        const by = String(body?.by || 'operator').slice(0, 64);
-        const r = bot.clearHalt(by);
-        logger.warn('server', `[${key}] 人工解除熔断 by=${by} prev=${r?.prev || '-'}`);
+        const r = await bot.clearHaltSafe({ by: body?.by || 'operator', reason: body?.reason || '' });
+        logger.warn('server', `[${key}] 人工解除熔断 by=${r.by} reason=${r.reason}`);
+        return send(res, 200, r);
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // 新风险周期：唯一合法的仓位账本重锚入口（人工确认 + 六项前置检查）
+    if (subPath === '/new-epoch' && req.method === 'POST') {
+      try {
+        const body = await readBody(req);
+        if (body?.confirm !== true) {
+          return send(res, 400, { error: '必须显式 confirm:true —— 重锚会覆盖仓位账本基线' });
+        }
+        const r = await bot.beginNewRiskEpoch({ by: body?.by || 'operator', reason: body?.reason || '' });
+        logger.warn('server', `[${key}] 新风险周期 by=${r.by} ${r.prevExpected}→${r.exchangeBase}`);
         return send(res, 200, r);
       } catch (e) { return send(res, 400, { error: e.message }); }
     }
@@ -918,7 +930,7 @@ async function resumeIfWasRunning(bot, exchange, key) {
     const liveCfg = cfg[key];
     if (liveCfg && snap.config) {
       if (liveCfg.stopLossUsd != null) snap.config.stopLossUsd = liveCfg.stopLossUsd;
-      for (const k of ['maxInventoryGrids', 'inventoryWarnGrids', 'inventoryBlockGrids', 'inventoryHaltGrids']) {
+      for (const k of ['maxInventoryGrids', 'inventoryWarnGrids', 'inventoryBlockGrids', 'inventoryHaltGrids', 'activeWindowGrids']) {
         if (liveCfg[k] > 0) snap.config[k] = liveCfg[k];
       }
       if (liveCfg.recoverMaxLossUsd != null) snap.config.recoverMaxLossUsd = liveCfg.recoverMaxLossUsd;

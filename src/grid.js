@@ -31,12 +31,18 @@ export function isReduceOnly(side, mode) {
  * don't immediately cross the market.
  * @returns {{levelIndex:number, price:number, side:'buy'|'sell', reduceOnly:boolean}[]}
  */
-export function seedOrders({ levels, price, mode, skipBand = 0.25, spacing }) {
-  const band = (spacing ?? gridSpacing(levels)) * skipBand;
+export function seedOrders({ levels, price, mode, skipBand = 0.25, spacing, windowGrids }) {
+  const sp = spacing ?? gridSpacing(levels);
+  const band = sp * skipBand;
+  // 活跃窗口：只把现价附近 windowGrids 格内的档位提交为真实开仓单。
+  // 66 格价格覆盖保留，但远端档位只作候选——否则同向 33 张挂单全算进库存暴露，
+  // 持仓 0 时就顶到上限，第一笔成交即自锁。windowGrids 缺省 = 不限（旧行为）。
+  const win = Number.isFinite(windowGrids) && windowGrids > 0 ? sp * windowGrids : Infinity;
   const orders = [];
   for (let i = 0; i < levels.length; i++) {
     const lvl = levels[i];
     if (Math.abs(lvl - price) < band) continue;
+    if (Math.abs(lvl - price) > win) continue;
     if (lvl < price) {
       if (mode === 'neutral' || mode === 'long') {
         orders.push({ levelIndex: i, price: lvl, side: 'buy', reduceOnly: isReduceOnly('buy', mode) });

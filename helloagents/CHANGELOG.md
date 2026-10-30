@@ -978,7 +978,13 @@ v1.6.27 的确认门会在连续 3 轮 0 单后清空本地台账，但**界内�
 - 关键事件日志从 console 迁移至结构化日志
 
 ### 移除
-- （无）## 1.6.48
+- （无）## 1.6.49
+- **活跃窗口**：`seedOrders` 只提交现价 ±`activeWindowGrids`（默认 4）内的档位，远端档位只作候选；价格移动 ≥1 格时 `_rollActiveWindow()` 撤远补近，`reduceOnly`/`recovery` 腿不参与。让「66 格价格覆盖」与「8 格库存上限」同时成立——否则同向 33 张挂单在持仓 0 时就把 projected 顶到 33 格。
+- **账本重锚条件化**：`start()` 不再静默重置 `posLedger`；新增 `POST /api/<key>/new-epoch`（confirm + reason + 六项前置检查）作为唯一合法重锚入口。
+- **解除熔断加强**：`/clear-halt` 要求空仓、交易所只剩减仓腿、账本一致。
+- 修 `active` 条目无 `orderId` 字段导致窗口滚动撤单传 `undefined`（幽灵单源头）；修 `activeWindowGrids` 漏在 `/start` 注入白名单外。
+
+## 1.6.48
 - **新增 `POST /api/<key>/clear-halt`**：`bot.clearHalt()` 此前只有内部方法、无 HTTP 端点，主网熔断后只能改文件重启。现要求 `confirm:true` 并记录操作人。
 - **启动以交易所真实持仓为新周期基线**：修「上次会话遗留 posLedger（例如运维手动平过仓）+ 新会话空仓 → 启动即仓位不一致熔断」的恢复陷阱。
 - 参数方案 B（0.20% + 0.0001 + 库存上限 8 格）在 testnet 验证 67 单铺满、perRungNet 0.0134。

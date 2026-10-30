@@ -129,6 +129,9 @@ export function getConfig() {
     maxInventoryGrids: Number(process.env.AR_MAX_INVENTORY_GRIDS || 0) || null,
     inventoryWarnGrids: Number(process.env.AR_INVENTORY_WARN_GRIDS || 0) || null,
     inventoryBlockGrids: Number(process.env.AR_INVENTORY_BLOCK_GRIDS || 0) || null,
+    // 活跃窗口（每侧格数）：只把现价附近的档位提交为真实开仓单。
+    // 66 格价格覆盖仍在，但远端档位不落单——否则同向 33 张的潜在库存会立刻顶到上限。
+    activeWindowGrids: Number(process.env.AR_ACTIVE_WINDOW_GRIDS ?? 4),
     inventoryHaltGrids: Number(process.env.AR_INVENTORY_HALT_GRIDS || 0) || null,
     deadmanMs: Number(process.env.AR_DEADMAN_MS || 60_000),
     // 全局止损线（USDC，按盘口价重算）：持仓亏到这条线强制平仓停止；0 = 不启用。
