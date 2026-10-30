@@ -469,3 +469,72 @@ equity 245.414  free 245.414  position 0  open_orders 0  running=false
 2. `recovery` 本地标记在 `seedOrders` 补种路径上不带（只影响本地分类，不影响交易所 `reduceOnly`）。
 3. 主网 `accountIndex` 与资金账户仍需人工确认（0 号账户持有 $250）。
 4. 08:23 事件无当日仓位的逐秒快照，无法 100% 复原。
+
+---
+
+## 12. P3 复核修复（2026-10-30 11:0x，v1.6.45）
+
+复核结论（`7f224a0` 评审）全部成立：**风控函数写出来了 ≠ 运行时风控已接管机器人**。逐项修复如下。
+
+### 12.1 P0-1 风控没有持续运行 → 已修
+
+| 修复 | 说明 |
+|---|---|
+| 独立心跳 `_riskTimer` | `RISK_TICK_MS = 5000`，与对账定时器解耦（`_startReconcileTimer` 里先启风控心跳，不因对账定时器已存在而跳过） |
+| 统一入口 `_runRiskCycle(reason)` | 所有事件都走这里；`_guardInFlight` 并发锁 + `RISK_MIN_GAP_MS = 200` 聚合窗（原 1000ms 会吞掉启动后首个 tick，属真实缺陷） |
+| 接入点 | 价格 tick `_handlePrice` → `'price'`；成交 `_handleFill` → `'fill'`；`start` 主干 → `'start'`；定时器 → `'timer'`；`resume` 路径同样触发 |
+| 状态联动 | HALTED → `_enforceHalt()`；DEFENSIVE + `blockSide` → `_enforceDefensive()` |
+
+### 12.2 P0-2 用挂单推导持仓 → 已修，新增仓位账本
+
+- 新增 `src/position-ledger.js`：`startBase / expected / version / seenOrder`
+- `_guardConsistency()` 的 `localPositionBase` 改为 **`posLedger.value`**，不再从 `active` 推导
+- 账本只由「`start()` 时交易所真实持仓基线 + 真实成交」推进；`applyFill` 用 `fillKey`（含微秒 `rawTs`）幂等去重
+- 持久化到 `.state.json` 的 `positionLedger`
+- 人工重锚只允许 `beginNewRiskEpoch()`
+
+### 12.3 P1-1 HALTED 后已有挂单没处理 → 已修
+
+- `_enforceHalt()`：撤掉全部 `!reduceOnly && !recovery` 的挂单
+- `_confirmNonReduceGone()`：**两轮真实快照确认**，只删除「交易所侧已不存在」的本地记录，绝不整表清空；两轮都没消失则告警
+- reduce-only / recovery 单全程不碰
+- `_enforceDefensive()`：只撤「被封锁方向」的开仓腿
+
+### 12.4 P1-2 opening / reduceOnly 语义分裂 → 已统一
+
+统一推导，`_place` 与 `_placeMany` 共用：
+
+```js
+const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
+const opening = o.opening !== false && !reduceOnly && !o.recovery;
+```
+
+`_guardAllowsOrder()` 接收的就是这组统一后的值。
+
+### 12.5 P2-1 恢复清单只看本地 → 已改为真实快照
+
+`recoveryChecklist()` 改为异步：**两次** `fetchOpenOrders` 必须一致，再叠加 `active=0` / `retryQueue=0` / 挂单批次完成 / 未知成交=0 / 仓位一致。拿不到快照时按「不确定」处理，直接判不通过。
+
+### 12.6 P2-2 resetStats 会改基准 → 已修
+
+`resetStats()` 不再触碰 `startBalance`。新增唯一合法入口 `beginNewRiskEpoch({ reason, operator })`，会重置 `HaltLedger`、重锚仓位账本并留痕告警。
+
+### 12.7 测试
+
+| 套件 | 结果 |
+|---|---|
+| `test/guard.test.js` | 18 passed |
+| `test/guard-runtime.test.js`（新增，运行时集成） | 6 passed |
+| `test/position-ledger.test.js`（新增） | 9 passed |
+| `test/bot.test.js` | 37 passed |
+| `test/ar.test.js` | 41 passed |
+| 全量 `npm test` | EXIT 0 |
+
+运行时集成测试覆盖评审要求：启动 `RUNNING` → 仅靠 `price` 事件自动进 `DEFENSIVE` 且开仓被拦 → 权益跌破熔断线自动 `HALTED` 且普通单被撤、reduce-only 保留 → 快照恢复后重启仍是 `HALTED` → 恢复清单要求真实快照 → 挂单多但空仓不误报。
+
+### 12.8 仍未解决
+
+1. 08:23 "挂单后仓位归零、成交是否开仓"仍无实测正例/反例。
+2. 撤单确认依赖交易所 `fetchOpenOrders` 的准确性（已做两轮一致，但仍非绝对）。
+3. 主网 `accountIndex` 与资金账户待人工确认。
+4. `_enforceDefensive` 只撤被封锁方向，破界撤单仍由既有 `outOfRange` 逻辑负责——两条路径未合并，长期应收敛。

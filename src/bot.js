@@ -6,9 +6,12 @@
 // persistence with resume-on-restart, live range adjustment, and a health probe.
 import { buildGrid, seedOrders, replacementFor, isReduceOnly } from './grid.js';
 import { STATES, evaluateRisk, checkConsistency, canEnterRecovery, HaltLedger } from './guard.js';
+import { PositionLedger } from './position-ledger.js';
 import { logger } from './log.js';
 
 const RECONCILE_MS = 30000;   // periodic open-order reconciliation cadence
+const RISK_TICK_MS = 5000;    // P0-1：风控独立节拍，不依赖价格/成交/对账事件
+const RISK_MIN_GAP_MS = 200;  // 事件驱动最小间隔：只聚合同一瞬间的重复事件，不吞掉首个 tick
 const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 
 // 挂单"全撤"确认门：连续多少轮对账都拿到 0 单才认定是真的没了（对账约 30 秒一轮）。
@@ -48,6 +51,11 @@ export class GridBot {
     this._lastActivityAt = Date.now();
     // --- P3 风控状态机：HALTED 是粘滞状态，只能人工清除 ---
     this.guard = new HaltLedger(opts.guardState || {});
+    // P0-2：本地预期仓位账本（只由「启动基线 + 真实成交」推进，绝不用挂单推导）
+    this.posLedger = new PositionLedger(opts.positionLedger || {});
+    this._guardInFlight = false;
+    this._haltEnforceInFlight = false;
+    this._riskTimer = null;
     this.guardState = null;      // evaluateRisk 最新结果
     this._guardLastState = null;  // 看门狗用：任何真实活动（行情/成交/对账/状态变更）都刷新
     this._replConflicts = 0;        // 补挂时目标档仍被判占用的次数（"一格一单"被违反的证据）
@@ -170,6 +178,7 @@ export class GridBot {
       recovery: this.recovery, pnlBase: this._pnlBase,
       startBalance: this.startBalance, outOfRange: this.outOfRange, lastPrice: this.lastPrice,
       guard: this.guard.toJSON(),        // 熔断原因 + 策略起点余额（重启不清）
+      positionLedger: this.posLedger.toJSON(),   // P0-2 本地预期仓位账本
       guardState: this.guardState,
       gridProfitRaw: this._gridProfitRaw,
       active: [...this.active.entries()],
@@ -196,6 +205,7 @@ export class GridBot {
     this._gridProfitRaw = Number(snap.gridProfitRaw ?? this.stats.gridProfit ?? 0) || 0;
     this.startBalance = snap.startBalance ?? null;
     if (snap.guard) this.guard = new HaltLedger(snap.guard);
+    if (snap.positionLedger) this.posLedger = new PositionLedger(snap.positionLedger);
     if (snap.guardState) this.guardState = snap.guardState;
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
@@ -283,6 +293,7 @@ export class GridBot {
     this.running = true;
     this._startReconcileTimer();
     this._startDynTimer();
+    this._runRiskCycle('start');   // P0-1：进入运行态后立即建立 guardState，别等下一个 tick
     this._alert(`已恢复运行中的 ${this.config.displayName} ${labelMode(this.config.mode)}：接管 ${this.active.size} 个挂单，正在与交易所对账…`);
     this.reconcileOpenOrders().catch(() => {}); // immediate reconcile
     this._changed();
@@ -553,6 +564,11 @@ export class GridBot {
       this.guard.lockStartBalance(this.startBalance);
       if (this.startBalance == null) this.startBalance = this.guard.startBalance;
     }
+    // P0-2：仓位账本以启动时的交易所真实持仓为基线，之后只由成交推进
+    try {
+      const base = Number(this.ex.getPosition?.(this.config.marketId)?.sizeBase) || 0;
+      this.posLedger.reset(base);
+    } catch { this.posLedger.reset(0); }
 
     // ---- margin pre-check ----
     const requiredMargin = this.risk.requiredMargin;
@@ -638,6 +654,7 @@ export class GridBot {
     this._autoStopped = null;
     this._startReconcileTimer();
     this._startDynTimer();
+    this._runRiskCycle('start');   // P0-1：进入运行态后立即建立 guardState，别等下一个 tick
     const progress = this._placementProgressView();
     if (progress?.status === 'complete') {
       this._alert(`启动完成：${this.config.displayName} ${labelMode(this.config.mode)}，${this.grid.count} 格，间距 ${this.grid.spacing}（${this.risk.spacingPct}%），杠杆 ${leverage}x；目标 ${progress.target} 单 / 已确认 ${progress.confirmed} 单 / 待重试 0 单。动态网格：${this._dynModeText()}。`);
@@ -836,8 +853,8 @@ export class GridBot {
     this._placeFails = 0;
     this._lastFailAt = 0;
     this._refillPausedUntil = 0; this._cancelTimes = [];
-    this.startBalance = typeof this.ex.equity === 'number' ? this.ex.equity
-      : typeof this.ex.balance === 'number' ? this.ex.balance : this.startBalance;
+    // P2-2：统计重置不得改动风控基准。startBalance 只由策略周期初始化或
+    // beginNewRiskEpoch() 显式改动，否则「亏损 → 重置统计」就能绕过熔断线。
     // Offset-based reset: adapters like RISEx refresh realizedPnl from the
     // exchange every poll, so writing 0 into it never sticks — record a
     // baseline instead and subtract it in getState.
@@ -1004,8 +1021,8 @@ export class GridBot {
     const cfg = this.config || {};
     let pos = null;
     try { pos = Number(this.ex.getPosition?.(cfg.marketId)?.sizeBase); } catch { pos = null; }
-    const localPos = [...this.active.values()]
-      .reduce((acc, o) => acc + (Number(o.sizeBase) || 0) * (o.side === 'buy' ? 1 : -1), 0);
+    // P0-2 修正：本地预期仓位来自成交账本，绝不能把未成交挂单加总当持仓
+    const localPos = this.posLedger.value;
     const unknown = Array.isArray(this._untrackedFills) ? this._untrackedFills.length : 0;
     return checkConsistency({
       positionBase: Number.isFinite(pos) ? pos : undefined,
@@ -1066,16 +1083,141 @@ export class GridBot {
     return { ok: true, cleared: prev };
   }
 
+  /**
+   * P0-1：统一风控周期。所有事件（价格/成交/对账/定时）都走这里，
+   * 带并发锁与最小间隔，避免重入与每 tick 重算。
+   */
+  _runRiskCycle(reason = 'timer') {
+    if (!this.running) return this.guardState;
+    if (this._guardInFlight) return this.guardState;
+    const now = Date.now();
+    if (reason !== 'timer' && now - (this._lastRiskAt || 0) < RISK_MIN_GAP_MS) return this.guardState;
+    this._lastRiskAt = now;
+    this._guardInFlight = true;
+    try {
+      const r = this._applyGuard(reason);
+      if (r?.state === STATES.HALTED) {
+        this._enforceHalt(reason).catch(() => {});
+      } else if (r?.state === STATES.DEFENSIVE) {
+        this._enforceDefensive(r).catch(() => {});
+      }
+      return r;
+    } finally {
+      this._guardInFlight = false;
+    }
+  }
+
+  /**
+   * P1-1：熔断执行。撤掉所有非减仓、非回收的挂单，
+   * 并用交易所快照确认——撤单响应成功 ≠ 已经撤掉。
+   */
+  async _enforceHalt(reason = '') {
+    if (this._haltEnforceInFlight) return;
+    if (this.guardState?.state !== STATES.HALTED) return;
+    if (!this.config) return;
+    this._haltEnforceInFlight = true;
+    try {
+      const targets = [...this.active.entries()].filter(([, o]) => !o.reduceOnly && !o.recovery);
+      if (!targets.length) return;
+      for (const [id] of targets) {
+        try { await this.ex.cancelOrder?.(this.config.marketId, id); } catch { /* 由快照确认兜底 */ }
+      }
+      await this._confirmNonReduceGone();
+    } finally {
+      this._haltEnforceInFlight = false;
+    }
+  }
+
+  /** 防守态：只撤「被封锁方向」的开仓腿；破界撤单交给既有 outOfRange 逻辑。 */
+  async _enforceDefensive(r) {
+    if (!r?.blockSide || !this.config) return;
+    const side = r.blockSide;
+    const targets = [...this.active.entries()]
+      .filter(([, o]) => !o.reduceOnly && !o.recovery && o.opening !== false && o.side === side);
+    for (const [id] of targets) {
+      try { await this.ex.cancelOrder?.(this.config.marketId, id); } catch { /* 下轮再判 */ }
+    }
+  }
+
+  /** 两轮真实快照确认：只删除「交易所已不存在」的本地非减仓记录，绝不整表清空。 */
+  async _confirmNonReduceGone() {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let removedTotal = 0;
+    for (let i = 0; i < 2; i++) {
+      await sleep(400);
+      let rows = null;
+      try { rows = await this.ex.fetchOpenOrders?.(this.config.marketId); } catch { return; }
+      if (!Array.isArray(rows)) return;
+      const live = new Set(rows.map((r) => String(r.orderId ?? r.id ?? '')));
+      for (const [id, o] of [...this.active.entries()]) {
+        if (o.reduceOnly || o.recovery) continue;
+        if (!live.has(String(id))) { this.active.delete(id); removedTotal++; }
+      }
+      if (removedTotal > 0) this._changed();
+    }
+    const left = [...this.active.values()].filter((o) => !o.reduceOnly && !o.recovery).length;
+    if (left > 0) {
+      this._alert(`⚠️ 熔断撤单未确认：本地仍有 ${left} 张非减仓单，连续两轮快照均未见其消失。`);
+    }
+  }
+
+  /**
+   * P2-2：开启新风险周期。这是唯一允许改写 startBalance / 仓位基线的入口，
+   * 必须显式调用并留痕；resetStats() 不再具备这个能力。
+   */
+  beginNewRiskEpoch({ reason = '', operator = 'unknown' } = {}) {
+    const equity = typeof this.ex.equity === 'number' ? this.ex.equity
+      : typeof this.ex.balance === 'number' ? this.ex.balance : null;
+    const prev = { startBalance: this.guard?.startBalance ?? this.startBalance, position: this.posLedger?.value };
+    this.startBalance = equity;
+    this.guard = new HaltLedger({});
+    this.guard.lockStartBalance(equity);
+    this.guardState = null;
+    this._guardLastState = null;
+    try {
+      const base = Number(this.ex.getPosition?.(this.config?.marketId)?.sizeBase) || 0;
+      this.posLedger.reset(base);
+    } catch { this.posLedger.reset(0); }
+    this._alert(`🔁 新风险周期：基准 $${equity}（原 $${prev.startBalance}），仓位基线 ${this.posLedger.value}（原 ${prev.position}）。原因：${reason || '未说明'}，操作者：${operator}`);
+    this._changed();
+    return { ok: true, startBalance: equity, positionBase: this.posLedger.value, previous: prev };
+  }
+
   /** 恢复提请：只判断条件是否齐备，不自动转 RUNNING。 */
-  recoveryChecklist() {
-    const ctx = { ...this._guardCtx(), openOrderCount: this.active.size };
-    return canEnterRecovery(ctx);
+  async recoveryChecklist() {
+    const missing = [];
+    let realCount = null;
+    try {
+      const first = await this.ex.fetchOpenOrders?.(this.config?.marketId);
+      if (!Array.isArray(first)) {
+        missing.push('无法取得交易所挂单快照');
+      } else {
+        realCount = first.length;
+        await new Promise((r) => setTimeout(r, 400));
+        const second = await this.ex.fetchOpenOrders?.(this.config?.marketId);
+        if (!Array.isArray(second)) missing.push('第二次挂单快照失败');
+        else if (second.length !== realCount) missing.push(`挂单快照两次不一致（${realCount} → ${second.length}）`);
+        else realCount = second.length;
+      }
+    } catch (e) {
+      missing.push(`挂单快照异常：${e.message}`);
+    }
+    if (this.active.size > 0) missing.push(`本地台账仍有 ${this.active.size} 张`);
+    if (this._retryQueue?.length) missing.push(`重试队列仍有 ${this._retryQueue.length} 张`);
+    if (this._placementProgress && this._placementProgress.status !== 'complete') missing.push('仍有未完成的铺单批次');
+    if (realCount != null && realCount > 0) missing.push(`交易所仍有 ${realCount} 张未撤订单`);
+
+    // 拿不到真实快照时，用 active.size 兜底并强制判不通过（1 代表"不确定"）
+    const ctx = { ...this._guardCtx(), openOrderCount: realCount ?? (this.active.size || 1) };
+    const base = canEnterRecovery(ctx);
+    return { ok: missing.length === 0 && base.ok, missing: [...missing, ...base.missing], exchangeOrders: realCount };
   }
 
   async _place(o) {
-    if (!this._guardAllowsOrder(o)) return;
-    const opening = o.opening !== false;
     const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
+    // P1-2：reduceOnly / recovery 单一律不是 opening，全流程共用这一处推导
+    const opening = o.opening !== false && !reduceOnly && !o.recovery;
+    if (!this._guardAllowsOrder({ ...o, reduceOnly, opening })) return;
     // Back-off: while paused (after a burst of cancellations / collateral
     // rejections) do not place new OPENING orders. CLOSING / reduce-only /
     // recovery legs need no extra margin and are never blocked — dropping a
@@ -1132,8 +1274,9 @@ export class GridBot {
     const ready = [];
     const reservedLevels = new Set();
     for (const o of orders) {
-      const opening = o.opening !== false;
       const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
+      // P1-2：与 _place() 完全一致的推导，reduceOnly / recovery 单一律不是 opening
+      const opening = o.opening !== false && !reduceOnly && !o.recovery;
       if (opening && !o.recovery && this._refillPausedUntil && Date.now() < this._refillPausedUntil) continue;
       const levelIndex = o.levelIndex;
       if (this._pendingLevels.has(levelIndex) || reservedLevels.has(levelIndex)) {
@@ -1375,6 +1518,14 @@ export class GridBot {
     const closing = isRecovery ? true
       : (act ? act.opening === false
              : ((this.config.mode === 'short') ? f.side === 'buy' : f.side === 'sell'));
+    // P0-2：真实成交推进本地预期仓位（幂等键去重，重复投递不会记两次）
+    try {
+      this.posLedger.applyFill({
+        orderId: id, side: f.side, sizeBase: fillSize, price: fillPrice,
+        rawTs: f.rawTs, createdAt: f.createdAt,
+      });
+    } catch { /* 账本异常不能阻断交易主流程，由一致性巡检兜底 */ }
+    this._runRiskCycle('fill');   // P0-1：成交后立即评估（库存/偏置/账本）
     if (this.fills[0]) this.fills[0].opening = !closing;   // 供风控的「成交偏置」判定
     if (closing) {
       this.stats.completedRungs++;
@@ -1475,6 +1626,7 @@ export class GridBot {
     this._touch();
     if (p.marketId !== this.config.marketId) return;
     this.lastPrice = p.price;
+    this._runRiskCycle('price');   // P0-1：价格变化后立即评估，不等定时器
     // 破界出口纪律：recover 模式若亏损触及上限，强制硬止损（见 _checkMaxLoss）
     this._checkMaxLoss();
     this._drainRetryQueue().catch(() => {});
@@ -2084,11 +2236,20 @@ export class GridBot {
   }
 
   _startReconcileTimer() {
+    this._startRiskTimer();   // P0-1：风控心跳独立启动，不因对账定时器已存在而被跳过
     if (this._reconTimer) return;
     this._reconTimer = setInterval(() => { this.reconcileOpenOrders().catch(() => {}); }, RECONCILE_MS);
     this._reconTimer.unref?.();
   }
-  _stopReconcileTimer() { if (this._reconTimer) { clearInterval(this._reconTimer); this._reconTimer = null; } }
+  _stopReconcileTimer() { if (this._reconTimer) { clearInterval(this._reconTimer); this._reconTimer = null; } this._stopRiskTimer(); }
+
+  /** P0-1：风控独立心跳。即使没有价格/成交/对账事件，也必须周期性评估。 */
+  _startRiskTimer() {
+    if (this._riskTimer) return;
+    this._riskTimer = setInterval(() => { this._runRiskCycle('timer'); }, RISK_TICK_MS);
+    this._riskTimer.unref?.();
+  }
+  _stopRiskTimer() { if (this._riskTimer) { clearInterval(this._riskTimer); this._riskTimer = null; } }
 
   _alert(message, opts = {}) {
     this.alerts.unshift({ t: Date.now(), message });

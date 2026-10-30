@@ -29,6 +29,37 @@
 
 **测试**：新增 `test/guard.test.js` 18 项；`test/bot.test.js` 加 REJECTED 不重试 / recover 全 reduceOnly 两项（37 项）；`test/ar.test.js` 加 CANCELED 分支（41 项）。全量 `npm test` EXIT 0。
 
+## [1.6.45] - 2026-10-30
+
+### P3 复核修复：让风控真正接管运行时
+
+**P0-1 风控没有持续运行**
+- 新增 `_riskTimer`（5s 独立心跳）、`_runRiskCycle(reason)` 统一入口、`_guardInFlight` 并发锁
+- 接入价格 tick / 成交 / start / resume / 定时巡检
+- 事件聚合窗 1000ms → 200ms（原值会吞掉启动后首个价格 tick）
+
+**P0-2 把挂单当持仓**
+- 新增 `src/position-ledger.js`：本地预期仓位只由「启动基线 + 真实成交」推进
+- `_guardConsistency` 改用账本值；快照持久化 `positionLedger`
+- `fillKey` 含微秒 `rawTs`，同毫秒两笔部分成交不会互相吞掉
+
+**P1-1 HALTED 不处理已有挂单**
+- `_enforceHalt()` 撤非 reduceOnly / 非 recovery 挂单
+- `_confirmNonReduceGone()` 两轮真实快照确认，只删「交易所已不存在」的记录
+- `_enforceDefensive()` 撤被封锁方向的开仓腿
+
+**P1-2 opening / reduceOnly 语义分裂**
+- `_place` 与 `_placeMany` 统一为 `opening = o.opening !== false && !reduceOnly && !o.recovery`
+
+**P2-1 恢复清单只看本地**
+- `recoveryChecklist()` 改异步：两次真实 `fetchOpenOrders` 一致才放行
+
+**P2-2 resetStats 会改写风控基准**
+- `resetStats()` 不再触碰 `startBalance`
+- 新增唯一入口 `beginNewRiskEpoch({ reason, operator })`
+
+**测试**：新增 `guard-runtime.test.js`（6 项运行时集成）与 `position-ledger.test.js`（9 项）；全套 `npm test` EXIT 0。
+
 ## [Unreleased]
 
 ## [1.6.42] - 2026-10-27
