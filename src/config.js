@@ -199,6 +199,7 @@ export function getConfig() {
     allowLive: (process.env.PR_ALLOW_LIVE || 'NO').toUpperCase() === 'YES',
     allowChallenge: (process.env.PR_ALLOW_CHALLENGE || 'NO').toUpperCase() === 'YES',
     symbol: process.env.PR_SYMBOL || 'BTC',
+    timeInForce: (process.env.PR_TIME_IN_FORCE || 'GTX').toUpperCase(),
     gridSidePolicy: (process.env.PR_GRID_SIDE_POLICY || 'dual').toLowerCase() === 'paired' ? 'paired' : 'dual',
     dualSidePolicy: (process.env.PR_DUAL_SIDE_POLICY || 'freeze').toLowerCase() === 'cap' ? 'cap' : 'freeze',
     dualAckFile: process.env.PR_DUAL_ACK_FILE || '.runtime/pr-dual-ack',

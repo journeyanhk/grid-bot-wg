@@ -225,12 +225,13 @@ export class ProprExchange extends EventEmitter {
   }
 
   // ── 订单 ────────────────────────────────────────────────────────────────
+  /** bot 契约：必须返回**数组**（撤单确认按数组过滤 orderId）。 */
   async fetchOpenOrders() {
     if (this.mode === 'paper') {
-      return { orders: [...this._paper.orders.values()].map((o) => ({ orderId: o.orderId, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: o.reduceOnly })) };
+      return [...this._paper.orders.values()].map((o) => ({ orderId: o.orderId, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: o.reduceOnly }));
     }
     const res = await this.client.getOrders(this.cfg.accountId, { status: 'open' });
-    return { orders: openOrders(res.rows).map((o) => ({ orderId: o.orderId, side: o.side, price: o.price, sizeBase: o.qty, reduceOnly: o.reduceOnly, positionSide: o.positionSide })) };
+    return openOrders(res.rows).map((o) => ({ orderId: o.orderId, side: o.side, price: o.price, sizeBase: o.qty, reduceOnly: o.reduceOnly, positionSide: o.positionSide }));
   }
 
   getOpenOrders() { return [...this._tracked.entries()].map(([orderId, o]) => ({ orderId, ...o })); }
@@ -240,15 +241,23 @@ export class ProprExchange extends EventEmitter {
 
   async placeLimitOrder(o) {
     if (this.mode === 'shadow') throw new ProprReadOnlyError('下单');
+    // bot 的 payload 不含 positionSide：按「开/平」推导
+    //   开仓：buy→long / sell→short；平仓：sell→long / buy→short
+    const positionSide = o.positionSide || (o.side === 'buy'
+      ? (o.reduceOnly ? 'short' : 'long')
+      : (o.reduceOnly ? 'long' : 'short'));
     if (this.mode === 'paper') {
-      const r = this._paper.placeLimitOrder({ side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: o.reduceOnly, positionSide: o.positionSide });
+      const r = this._paper.placeLimitOrder({ side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: o.reduceOnly, positionSide });
       this._tracked.set(r.orderId, { ...o });
       return r;
     }
     if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset, paceMs: 120 });
     let row;
     try {
-      row = await this.writer.placeLimitOrder(o);
+      row = await this.writer.placeLimitOrder({
+        ...o, positionSide,
+        timeInForce: o.timeInForce || this.cfg.timeInForce || 'GTC',
+      });
     } catch (e) {
       if (isNoPositionToReduce(e)) {
         const benign = new Error(`无仓可减，丢弃该 reduceOnly 腿（${o.side} @ ${o.price}）`);
@@ -330,8 +339,9 @@ export class ProprExchange extends EventEmitter {
   }
 
   async setLeverage() {
-    this.emit('error', new Error('Propr 不修改杠杆（规则不允许）；保持平台当前值'));
-    return false;
+    // 规则不允许交易者改杠杆；返回 null 表示「该所不支持此调用」，
+    // bot 只对 === false 告警，因此不会刷屏。
+    return null;
   }
 }
 

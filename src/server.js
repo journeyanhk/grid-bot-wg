@@ -869,6 +869,7 @@ await Promise.all([
   initExchange(lrExchange, 'RHC Lighter', cfg.lr),
   initExchange(hlExchange, 'Entropy', cfg.hl),
   initExchange(vaExchange, 'Variational', cfg.va),
+  ...(prExchange ? [initExchange(prExchange, 'Propr', cfg.pr)] : []),
 ]);
 
 // ── 崩溃恢复 / 续跑 ────────────────────────────────────────────────────────────

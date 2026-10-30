@@ -21,8 +21,7 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   assert.ok(r.orderId);
   assert.equal(ex.getOpenOrders().length, 1);
   assert.equal(ex.getPositions().long, null);
-  const err = await new Promise((resolve) => { ex.once('error', resolve); ex.setLeverage(0, 2); });
-  assert.match(err.message, /不修改杠杆/);
+  assert.equal(await ex.setLeverage(0, 2), null, '杠杆调用应返回 null（不支持），不告警');
   ex.stop();
 }
 
@@ -68,6 +67,33 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   const ex2 = new ProprExchange({ mode: 'paper' });
   assert.equal(ex2.resolveReduceOnly({ side: 'sell' }), undefined, '非 paired 模式不参与决策');
   ex.stop(); ex2.stop();
+}
+
+{
+  // positionSide 推导：bot 不传该字段
+  const ex = new ProprExchange({ mode: 'paper' });
+  await ex.init();
+  await ex.placeLimitOrder({ side: 'buy', price: 78000, sizeBase: 0.001, reduceOnly: false, levelIndex: 0 });
+  await ex.placeLimitOrder({ side: 'sell', price: 82000, sizeBase: 0.001, reduceOnly: false, levelIndex: 6 });
+  const rows = [...ex._paper.orders.values()];
+  assert.deepEqual(rows.map((o) => o.positionSide), ['long', 'short']);
+  ex.stop();
+}
+
+{
+  // sim-write 的线上 payload 必须带 positionSide 与 GTX
+  const posted = [];
+  const fake = { writeAttemptCount: 0, post: async (route, args, body) => { posted.push(body.orders[0]); return { data: [{ orderId: 'o1' }] }; } };
+  const ex = new ProprExchange({ mode: 'sim-write', accountId: 'urn:prp-account:x', apiKey: 'k', timeInForce: 'GTX' });
+  ex.client = fake;
+  ex.writer = new (await import('../src/exchange/pr/write.js')).ProprWriter({ client: fake, accountId: 'urn:prp-account:x', asset: 'BTC' });
+  await ex.placeLimitOrder({ side: 'buy', price: 76000, sizeBase: 0.001, reduceOnly: false, levelIndex: 0 });
+  await ex.placeLimitOrder({ side: 'sell', price: 80000, sizeBase: 0.001, reduceOnly: true, levelIndex: 5 });
+  assert.equal(posted[0].positionSide, 'long');
+  assert.equal(posted[0].timeInForce, 'GTX');
+  assert.equal(posted[1].positionSide, 'long', 'reduceOnly 卖单平的是多仓');
+  assert.equal(posted[1].reduceOnly, true);
+  ex.stop();
 }
 
 console.log('✓ propr-adapter.test.js 全部通过');
