@@ -1,0 +1,384 @@
+# Arcus 第一阶段：停机审查与变更计划
+
+> 状态：**HALTED / FLAT / NO ORDERS**（equity 245.414，position 0，open_orders 0，running=false）
+> 冻结时间：2026-10-30 10:34 (+08:00)
+> 基线 commit：`e65f266`（v1.6.42）｜ `.state.json` md5 见 `~/halt-backup-1030-1034/git.txt`
+> 本文档**不含任何已执行的主网写操作**，全部为只读核对、分析与待批事项。
+
+---
+
+## 0. 冻结确认（已完成）
+
+| 项 | 结果 |
+|---|---|
+| 备份 | `~/halt-backup-1030-1034/`（1.4 MB）：`.state.json`、`gridbot-mainnet.log`、`arcus-mainnet-metrics.jsonl`、`watchdog.log`、脱敏 env 快照、commit + md5 |
+| 快照内容 | `.state.json` 为分交易所结构 `{ai, ar}`；`ar.running = false`；无 `wasRunning` 字段 |
+| 自动恢复（第一道） | `run_grid_mainnet.sh` 有闸门：`.state.json` 存在且 `ALLOW_STATE!=1` → **拒绝启动**（本意是防 testnet 快照污染主网，现兼作冻结器） |
+| 自动恢复（第二道） | `server.js:resumeIfWasRunning` 首行 `if (!(snap?.running && snap?.config)) return;` → `running=false` 时不会续跑 |
+| 自动恢复（第三道） | 无 crontab、无 systemd 单元；`watch_grid.sh` 只在 API 连续 3 次非 200 时 `pkill`，不会拉起 |
+| 结论 | **当前状态下即使 node 崩溃，也不会自动铺单。** 代价是服务无法重启，恢复时必须先 `mv .state.json .state.bak` |
+
+---
+
+## 1. reduce-only 语义核对（只读）
+
+### 1.1 证据链
+
+| 编号 | 来源 | 原文要点 |
+|---|---|---|
+| E1 | `concepts/perpetuals/order-types.md` | TP/SL orders **are reduce-only** — "they can only shrink a position, **never flip or grow it**" |
+| E2 | `api-reference/exchange/place-order.md`（错误码 `REDUCE_ONLY_WOULD_INCREASE`） | "A `reduceOnly` order **was rejected** because executing it would have opened or increased the account's position rather than reducing it." |
+| E3 | 同上（错误 schema `ReduceOnly`） | "A reduce-only order would open or increase a position rather than reduce it." |
+| E4 | `changelog.md` | "`placeOrder` and `modifyOrder` now accept `reduceOnly: true` with **any `timeInForce`** — the previous constraint forcing reduce-only orders to be IOC or FOK is removed. **Reduce-only position semantics are enforced**" |
+| E5 | `place-order.md` 请求体 | 字段名是 **`reduceOnly`（boolean）**，不是 `r`；`r` 只出现在签名载荷 |
+| E6 | `place-order.md` 响应体 | 响应**会**回显 `reduceOnly` |
+
+### 1.2 我们代码的实际行为
+
+```
+bot.js:1502/1510  _place({ side, price, reduceOnly: true, recovery: true, opening: false })
+       ↓
+bot.js:962        const reduceOnly = o.reduceOnly ?? isReduceOnly(...)
+       ↓
+arcus.js:858      body.reduceOnly = !!o.reduceOnly          ← 正确字段名
+arcus.js:850      签名载荷 r: o.reduceOnly ? 1 : 0           ← 简写仅用于签名
+```
+
+调用链**没有断点**，body 确实带了 `reduceOnly: true`。
+
+### 1.3 —— 已由 P1 实测解答（2026-10-30 10:46，testnet only）
+
+**原假设"校验发生在成交时刻"是错的。** 实测结论：**Arcus 在下单时就校验 reduce-only 语义，并用 `HTTP 200 + status:"REJECTED"` 表达拒绝。**
+
+| 实验 | 场景 | 交易所响应 | 仓位变化 |
+|---|---|---|---|
+| E1 | SHORT −0.00591704 + reduceOnly **SELL** 0.0002（会增空） | `200 {orderId:"bb5cb17f…", status:"REJECTED"}` | 无变化 |
+| E2 | SHORT −0.00591704 + reduceOnly **BUY** 0.0002 | `200 {orderId:"4aa90907…", status:"FILLED"}` | → −0.00571704（精确 −0.0002） |
+| E4 ★ | **空仓** + reduceOnly SELL 0.0002 | `200 {orderId:"20359ed4…", status:"REJECTED"}` | 仍为 0，**未开仓** |
+| E5 | LONG +0.0002 + reduceOnly SELL 0.0002 | `200 {orderId:"29a26696…", status:"FILLED"}` | → **0，未翻转** |
+
+成交 ID `5037611`–`5037615` 等共 13 笔，全部 TAKER（IOC 主动成交）。收尾 `position 0 / openOrders 0`。
+
+**语义结论：reduce-only 只减不翻；空仓或错误方向下单即被拒。`recover` 回收阶梯的立论成立。**
+
+### 1.4 由此发现的**真实生产级 bug**（已修）
+
+拒绝不是 HTTP 错误码，而是 **HTTP 200 + `status:"REJECTED"`**。而原适配器只判断 `orderId` 是否存在：
+
+```js
+const orderId = j?.orderId ? String(j.orderId) : ...
+if (!orderId) throw ...
+this._tracked.set(orderId, {...})   // ← 被拒的单也进了台账
+```
+
+后果：**一张根本没进撮合的单被登记为"已挂出"**，成为幽灵单源头——对账时"本地有、交易所无"，进而可能触发 `massVanish` 误判、`recover` 阶梯假装已挂好、refill 统计虚高。
+
+修复：`placeOrder` 在写 `_tracked` 前检查 `status`，`REJECTED/CANCELED/CANCELLED` 一律抛错并带 `rejected:true`。回归用例已加（`test/ar.test.js` **41 passed / 0 failed**，全量 `npm test` EXIT 0）。
+
+### 1.5 残留风险（已降级）
+
+| 项 | 状态 |
+|---|---|
+| "空仓 reduceOnly 会开空仓" | **已排除**（E4 实测被拒） |
+| "字段传错成 `r`" | **已排除**（body 字段名 `reduceOnly` 正确） |
+| 挂单后仓位被平、单仍在簿、成交是否开仓 | **仍未知**。下单校验已确认，此类单只能来自"先有仓、后平仓"路径；P3 状态机需加"reduce-only 单 ↔ 仓位一致性"检查 |
+| 08:23 那 66 张单的真实成因 | **仍未定位**。按本次结论，空仓下不可能挂出 reduceOnly 单——要么当时有仓，要么该批次 `reduceOnly` 在批量路径 `_placeBatch` 丢失，P3 前需查透传 |
+
+---
+
+## 2. reduce-only 验证方案（**P1 已于 2026-10-30 10:46 执行完毕**）
+
+**执行摘要**：testnet 账户 `0x6dac…798D` / accountIndex 1 / marketId 1，仓位从历史遗留 `SHORT −0.00591704` 起手，经 E1–E5 四段实验最终 `position 0 / openOrders 0`。脚本 `scripts/verify-reduce-only.mjs`（只连 testnet，代码内硬断言拒绝 mainnet），报告 `/tmp/reduce-only-report.json`。
+
+**结论**：语义通过（详见 §1.3），并暴露 §1.4 的幽灵单 bug（已修）。**未触碰主网。**
+
+以下 2.1–2.3 为原始方案，保留作复现与再次验证的依据；2.2（主网验证）**不再需要**。
+
+### 2.1 优先在测试网（零成本、零风险）
+
+testnet 与 mainnet 共用同一套 API 与文档，账户 `0x6daC…798D` / accountIndex 1 / key `36fda331…`。
+若 testnet 余额已耗尽，用官方 faucet 补（`guides/fund-testnet-account.md`）。
+
+**步骤（testnet）**
+1. 读基线：`GET /v1/positions` → 期望 `positions {}`
+2. 建仓：`placeOrder` **普通**（`reduceOnly:false`）BUY 0.0002 BTC，价格 = 对手价（IOC/ALO 均可），**确认成交**
+3. 复核：`GET /v1/positions` → 期望 `LONG 0.0002`
+4. 挂减仓单：`placeOrder` SELL 0.0002，`reduceOnly: true`，价格略低于对手价使其成交，TIF=ALO 或 IOC
+5. 复核：`GET /v1/positions`
+6. 判定
+
+**判定矩阵**
+
+| 结果 | 结论 | 动作 |
+|---|---|---|
+| `+0.0002 → 0` | **通过** | `recover` 逻辑成立，可继续 |
+| 订单被拒，错误码 `REDUCE_ONLY_WOULD_INCREASE` / `ReduceOnly` | **通过（更严格）** | 说明无仓时会被拒，需在下单前本地拦截 |
+| `+0.0002 → -0.0002` | **失败** | 立即冻结全部主网网格计划，`recover` 必须重写 |
+| 订单挂上但不成交 / 状态不明 | **未通过** | 视为不确定，不得上线 |
+
+**收尾**：确认 `positions 0`、`open_orders 0`、无残余普通开仓单。
+
+### 2.2 若只能在主网做
+
+必须单独一次人工批准，**不与网格重启混在一起**。
+
+- 仓位上限：0.0002 BTC（约 $15.4 名义，10x 下保证金 $1.6）
+- 挂单数：最多 1 张
+- **不启动网格**、不启用自动补腿、不启用 recover
+- 最大可接受损失：往返手续费 + 滑点 ≈ **$0.05**
+- 异常处理：任一步失败 → `cancelAllAccount` + `closePosition` → 复核归零
+- 全程记录 placeOrder 的**完整响应体**（拿到 `reduceOnly` 回显）
+
+### 2.3 无论结果如何都要补的代码
+
+`arcus.js` 需捕获 `REDUCE_ONLY_WOULD_INCREASE` / `ReduceOnly` 错误码，转为**撤单 + 告警**，而不是进入重试队列（否则无仓的回收单会无限重试）。
+
+---
+
+## 3. 趋势防守状态机（设计）
+
+### 3.1 四态
+
+```
+RUNNING ──(破界/库存偏置/成交偏置)──> DEFENSIVE ──(升级)──> HALTED
+   ^                                      │
+   │                                      └──> RECOVERY_PENDING ──(人工批准)──> RUNNING
+```
+
+| 状态 | 允许的动作 | 禁止的动作 |
+|---|---|---|
+| `RUNNING` | 正常双向铺格、补腿、对账 | — |
+| `DEFENSIVE` | 减仓腿、平仓、撤单、对账 | 新增**开仓腿**、自动重锚、因成交自动恢复 |
+| `HALTED` | 撤单、平仓、只读 | 任何下单 |
+| `RECOVERY_PENDING` | 只读 + 发人工提醒 | 自动铺回 |
+
+### 3.2 触发规则（第一版：可审计，不依赖 ADX）
+
+设 `maxInventory = sizeBase × gridCount`（当前满梯当量），`inv = |position|`，`bias = inv / maxInventory`。
+
+**A. 破界规则**
+- `lastPrice < lower` 或 `> upper` → 立即 `DEFENSIVE`
+- 不允许自动重锚；不允许因成交事件自动回到 `RUNNING`
+
+**B. 库存偏置规则**
+- `bias ≥ 0.50` → `DEFENSIVE`
+- `bias ≥ 0.75` → 停止该方向全部开仓腿（`DEFENSIVE` 的强化形态）
+- `bias ≥ 1.00` 或仓位方向与台账不符 → `HALTED`
+
+**C. 成交偏置规则**
+- 统计最近 **20 笔**与最近 **60 分钟**成交
+- 若开仓方向成交占比 ≥ 75% 且库存同向继续增加 → `DEFENSIVE`
+- 防守态中**不得**因成交量大而继续补格
+
+**D. 恢复规则（全部满足才进 `RECOVERY_PENDING`）**
+- 价格回到 `[lower, upper]` 内
+- 连续 **2 根 1h K 线收盘**站稳下沿（`close > lower`）
+- `bias ≤ 0.10`（或 `position = 0`）
+- 未成交订单已清理（`openOrders` 与台账一致）
+- `outOfRange = false`
+- 账本与交易所仓位/成交/余额一致，无未知成交、无重复补腿、无漂移异常
+
+`RECOVERY_PENDING` **只发提醒，不自动铺格**。
+
+**E. 可审计要求**
+每次状态变化写一行结构化日志：`[defense] STATE A->B reason=<rule> bias=0.62 inv=0.0033 max=0.0066 px=77110 lower=72021 ts=...`
+
+---
+
+## 4. 新参数计算（**不启动**）
+
+基准价 `P = 77,110`（2026-10-30 10:26 现价），费率 maker 150 ppm / taker 450 ppm（实测 142 ppm）。
+
+### 4.1 新方案
+
+| 项 | 计算 | 值 |
+|---|---|---|
+| grid spacing | `P × 0.2%` | **$154.22** |
+| grid count | — | 66 |
+| 区间宽度 | `66 × 154.22` | **$10,178.52**（±6.6%）|
+| lower | `77,110 − 5,089.26` | **$72,020.74** |
+| upper | `77,110 + 5,089.26` | **$82,199.26** |
+| 单格 sizeBase | — | **0.0001 BTC** |
+| 名义敞口（满梯） | `66 × 0.0001 × 77,110` | **$508.93** |
+| 保证金（10x） | `508.93 / 10` | **$50.89** |
+| 单格毛利 | `154.22 × 0.0001` | **$0.015422** |
+| 单格双边费 | `2 × 150ppm × 0.0001 × 77,110` | **$0.002313** |
+| 单格净利 | 毛利 − 费 | **$0.013109** |
+| 盈亏平衡格距 | `2 × 150ppm` | **0.03%（$23.13）** |
+| 满仓最大库存 | `66 × 0.0001` | **0.0066 BTC** |
+| 理论最大浮亏 | 满仓 0.0066 × 区间宽 10,178.52 | **$67.18** |
+
+### 4.1.1 止损 `$60` 的准确定义（修正）
+
+> 原文写"止损 $60 < 理论最大浮亏 $67.18，参数自洽"——**这个推论不成立**，二者不是同一量纲上的上限关系。
+
+`AR_STOP_LOSS_USD=60` 的实际语义是 **A：触发阈值**，且仅覆盖一个特定口径：
+
+```
+当前持仓按【盘口价】计算的未实现亏损 ≥ $60  →  触发平仓
+（bot.js:_quoteUnrealized，(lastPrice − entry) × size；lastPrice 缺失时退回交易所字段）
+```
+
+它**不是**以下任何一项：
+
+| 选项 | 是否成立 | 原因 |
+|---|---|---|
+| A. 触发阈值 | **是** | 代码实现即此 |
+| B. 预期损失 | 否 | 无统计定义 |
+| C. 最大允许损失 | **否** | 见下 |
+| D. 单市场止损价格距离 | 否 | 不以价格距离表达 |
+| E. 账户级 HALT 线 | 否 | 目前不存在 |
+
+**为什么 $60 不是最大损失上限**：① 跳空/快速行情下触发时浮亏可能已超 $60；② 市价平仓有滑点；③ 之前累计的**已实现亏损不计入**（10-30 那次 −$4.59 就完全绕过了它）；④ API/死手延迟期间仓位继续恶化。
+
+**理论最大浮亏 $67.18 的正确读法**：它是"满仓 0.0066 BTC + 价格走完整个区间"的极端估算，用来判断**参数是否会被击穿**，不是止损的保障范围。二者关系应表述为：*极端情形下浮亏可能超过 $60 触发线，因此止损不是硬上限。*
+
+**因此必须补一条真正上限**（列入 P3）：
+
+```
+账户级 HALT 线：equity ≤ startBalance − 80  →  HALTED
+  停止一切开仓、撤销非减仓订单、只允许人工恢复
+```
+
+$80 取在 $60 之上留 33% 余量，用于吸收跳空与滑点，使"策略累计亏损"有真正的天花板。
+
+### 4.2 与旧参数逐项对比
+
+| 项 | 旧（0.1% / 0.0002） | 新（0.2% / 0.0001） | 变化 |
+|---|---|---|---|
+| 格距 | $80.09 | $154.22 | ×1.93 |
+| 区间宽度 | $5,286（±3.3%）| $10,178（±6.6%）| **×1.93** |
+| 名义敞口 | $1,057.19 | $508.93 | **−52%** |
+| 保证金 | $105.72 | $50.89 | **−52%** |
+| 单格毛利 | $0.016018 | $0.015422 | −4% |
+| 单格净利 | $0.011200 | $0.013109 | **+17%** |
+| 满仓库存 | 0.0132 BTC | 0.0066 BTC | **−50%** |
+| 理论最大浮亏 | $69.83 | $67.18 | −4% |
+| 区间 / ATR($1,103) | 4.8× | **9.2×** | +92% |
+| 格距 / ATR | 13.8 格 | 7.2 格 | 穿格频率约减半 |
+
+**结论边界（按审核意见修正）**：
+
+- **成立的部分**：最大名义与保证金约减半；区间/ATR 从 4.8× 提到 9.2×，破界概率下降；**单格**净利从 $0.0112 升到 $0.0131。
+- **不成立的部分**：**不能说"收益反升"。** 总收益 = 单格净利 × 实际成交格数，而格距翻倍会让穿格频率约减半，两者相乘方向未知；再叠加单边停留时间变长、防守态主动减少成交、funding 与滑点。
+- **正确表述**：新参数的目标是**降低最大库存与破界概率，同时保持单格经济性**；总收益是否改善必须用 24–48 小时真实成交样本验证，不能用推算代替。
+
+### 4.3 资金占用
+
+equity 245.41，新方案保证金 $50.89，占用率 **20.7%**，可用余量 $194.52。远低于旧方案的 43%。
+
+---
+
+## 5. 需要修改的代码文件与函数
+
+| 文件 | 函数 / 位置 | 改动 | 估计行数 |
+|---|---|---|---|
+| `src/bot.js` | 新增 `_evalDefense()` | 四态判定核心，每轮 `_tick` 调用 | ~90 |
+| `src/bot.js` | 新增 `_enterState(state, reason)` | 状态迁移 + 结构化日志 + 告警 | ~40 |
+| `src/bot.js` | `_place` / `_placeBatch` 入口 | `DEFENSIVE`/`HALTED` 时拦截 `opening` 腿 | ~15 |
+| `src/bot.js` | `_refill` / `_replenish` / `seedOrders` | 同上，加状态守卫 | ~20 |
+| `src/bot.js` | `_tick` | 挂载 `_evalDefense()` | ~5 |
+| `src/bot.js` | `start()` | 初始化 `this.defense = { state:'RUNNING', ... }` | ~10 |
+| `src/bot.js` | `state()` | 暴露 `defense` 块 | ~8 |
+| `src/config.js` | `getConfig()` | 新增 `defense` 配置块（默认关闭，仅 Arcus 开） | ~15 |
+| `src/exchange/ar/arcus.js` | `placeOrder` catch | 捕获 `REDUCE_ONLY_WOULD_INCREASE`/`ReduceOnly` → 撤单 + 告警，不进重试队列 | ~20 |
+| `src/server.js` | `/api/<key>/state` | 透出 `defense` | ~3 |
+| `.env.example` | — | `AR_DEFENSE_ENABLED`、`AR_DEFENSE_INV_WARN=0.5`、`AR_DEFENSE_INV_STOP=0.75`、`AR_DEFENSE_INV_HALT=1.0` | ~6 |
+
+**总改动约 230 行，集中在 `bot.js`，默认关闭，不影响其他 6 个交易所。**
+
+---
+
+## 6. 测试计划
+
+### 6.1 单元测试（`test/defense.test.js`，新增）
+
+| # | 用例 | 断言 |
+|---|---|---|
+| 1 | 价格跌破下沿 | `state === 'DEFENSIVE'`，`opening` 腿被拦截 |
+| 2 | bias 0.49 → 0.51 | 不迁 / 迁移各一次，边界准确 |
+| 3 | bias 0.76 | 该方向开仓腿为 0，减仓腿照常 |
+| 4 | bias ≥ 1.0 | `HALTED` |
+| 5 | 成交偏置 75% + 库存同向增长 | `DEFENSIVE` |
+| 6 | 恢复条件缺一项 | 不进 `RECOVERY_PENDING` |
+| 7 | 恢复条件全满足 | 进 `RECOVERY_PENDING` 且**不发任何下单** |
+| 8 | 状态变化日志格式 | 含 `rule`/`bias`/`px`/`ts` 字段 |
+| 9 | `reduceOnly` 错误码 | 触发撤单，不进重试队列 |
+
+### 6.2 集成测试（本地 paper / testnet）
+
+| # | 场景 | 验收 |
+|---|---|---|
+| 1 | 0.2%/66/0.0001 在 paper 跑 1 小时 | 铺满 66 档、无空洞、无异常日志 |
+| 2 | 人工把价格推到区间外 | 60s 内进 `DEFENSIVE`，无常驻开仓腿 |
+| 3 | 人为制造 bias 0.8 | 该方向停开仓，减仓仍工作 |
+| 4 | 满足全部恢复条件 | 只发提醒，不自动铺格 |
+
+---
+
+## 7. 回滚方案
+
+| 层 | 回滚动作 | 耗时 |
+|---|---|---|
+| 代码 | `git revert` 到 `e65f266`（v1.6.42），`npm test` 全绿后部署 | 5 min |
+| 配置 | `AR_DEFENSE_ENABLED=false` 即回到旧行为（无需回滚代码） | 1 min |
+| 运行 | 任何时候 `POST /api/ar/stop {"closePosition":true}` → 撤单平仓 | 2 s |
+| 快照 | `~/halt-backup-1030-1034/.state.json` 覆盖回去可恢复停机前台账 | 1 min |
+| 服务启动 | 必须先 `mv .state.json .state.bak`（否则 supervisor 拒绝启动） | — |
+
+---
+
+## 8. 仍然存在的风险
+
+| # | 风险 | 等级 | 缓解 |
+|---|---|---|---|
+| R1 | ~~reduce-only 语义未实测~~ | **已关闭** | P1 实测通过：只减不翻、空仓即拒；顺带修掉 `REJECTED` 幽灵单 bug |
+| R8 | 先有仓挂出 reduce-only 单 → 仓位被平 → 单仍在簿 → 成交是否开仓 | 中低 | 下单时校验已确认，此类单只能来自"挂单后平仓"路径；P3 增加"reduce-only 单 ↔ 仓位一致性"巡检，仓位归零即撤掉全部 reduce-only 单 |
+| R2 | 0.2% 格距下成交量可能低到无法覆盖成本 | 中 | 24–48h 实测；若日成交 < 10 格则回看 0.15% |
+| R3 | 0.0001 恰等于 `minOrderSize`，部分成交后残余（0.000085）仍会低于最小量 | 中 | 已有 `_dustPromoted` 机制；本轮 54/377 笔部分成交已验证该路径 |
+| R4 | testnet 行情与主网脱节，防守逻辑只能在主网验 | 中 | 状态机为纯本地计算，不依赖行情质量 |
+| R5 | `.state.json` 闸门使服务无法重启，若忘记 `mv` 会误判"进程挂了" | 低 | 已写入本文档；巡检脚本应识别该状态 |
+| R6 | 资金费未计入网格收益核算 | 低 | 持仓 2.5 天资金费 < $0.05，量级可忽略，但应在台账里显式记录 |
+| R7 | 主网 API key 2027-04-25 到期 | 低 | 加入巡检清单到期提醒 |
+
+---
+
+## 9. 等待人工批准的操作清单
+
+> 在你明确回复之前，以下**全部不执行**。
+
+| # | 操作 | 需要批准的关键字 | 影响面 | 状态 |
+|---|---|---|---|---|
+| P1 | testnet 验证 reduce-only 语义 | 「批准测试网验证」 | 仅测试网，零主网风险 | ✅ **2026-10-30 10:46 完成，通过** |
+| P2 | 主网 reduce-only 验证 | 「批准主网验证」 | 主网 0.0002 BTC | ❌ **不再需要**（testnet 已验证） |
+| P3 | 部署防守状态机代码（不启动网格），含账户级 HALT 线 | 「批准部署防守逻辑」 | 代码上线但 `running=false` | ⏳ 待批 |
+| P4 | 以新参数 0.2%/66/0.0001 启动网格 | 「批准启动新参数」 | 主网实盘，保证金 $50.89 | ⏳ 待批（前置：P3 完成 + 价格回到区间内） |
+| P5 | 恢复 0.0002 BTC 单格 | 「批准升回 0.0002」 | — | ⏳ 待批（前置：P4 后 24–48h 数据） |
+
+### P4 放行前置条件（缺一不可）
+
+1. P1 reduce-only 通过 —— ✅ 已满足
+2. P3 防守状态机部署完毕并通过本地测试（含 §6 全部用例）
+3. 价格重新满足 §3.2-D 恢复条件（回到区间内 + 连续 2 根 1h K 线站稳下沿 + 无库存 + 无遗留单）
+4. 按届时实时价格重算区间与最大库存（本文 §4 的 77,110 基准已过期）
+5. 手续费、止损、保证金、账户级 HALT 线四项口径复核
+
+---
+
+## 10. 变更记录
+
+| 日期 | 变更 | 位置 |
+|---|---|---|
+| 2026-10-30 10:34 | 冻结：撤单 + 停机 + 备份 `~/halt-backup-1030-1034/` | 东京主机 |
+| 2026-10-30 10:46 | P1 执行：testnet 四段实验，13 笔成交，收尾 `position 0 / openOrders 0` | `scripts/verify-reduce-only.mjs` |
+| 2026-10-30 | 修复 `placeOrder` 把 `status=REJECTED` 当成功（幽灵单） | `src/exchange/ar/arcus.js` |
+| 2026-10-30 | 新增回归用例（41 passed / 0 failed） | `test/ar.test.js` |
+| 2026-10-30 | 按审核意见修正 §4.1（$60 定义）与 §4.2（收益边界） | 本文档 |
+
+### 当前状态声明
+
+```
+HALTED / FLAT / NO ORDERS
+equity 245.414  free 245.414  position 0  open_orders 0  running=false
+不自动重启、不自动铺单、不删除旧状态
+```

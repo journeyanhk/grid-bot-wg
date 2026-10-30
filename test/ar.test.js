@@ -503,3 +503,44 @@ test('createExchange 透传 maxMakerFeePpm（默认 200）', () => {
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
+test('HTTP 200 但 status=REJECTED 必须当失败，不许写进 _tracked（幽灵单源头）', async () => {
+  const mk = () => {
+    const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network: 'testnet' });
+    ex._key = privateKeyFromHex('aa'.repeat(32)); // 真实 init() 才派生私钥，测试里直接注入
+    return ex;
+  };
+  const markets = { markets: [{
+    marketId: 1, marketDisplayName: 'BTC-USD', symbol: 'BTC-USD',
+    effectiveMakerFeePpm: 150, effectiveTakerFeePpm: 450,
+    tickSize: '0.1', stepSize: '0.00000001', minOrderNotional: '5',
+    maxLeverage: 40, status: 'ONLINE',
+  }] };
+  const args = { marketId: 1, side: 'sell', price: 80000, sizeBase: 0.0002, reduceOnly: true, postOnly: false, levelIndex: 0 };
+
+  // 真机实测：空仓/错误方向的 reduceOnly 单，Arcus 回 HTTP 200 + status=REJECTED
+  const ex = mk();
+  ex._http = async (m, path) => (path.includes('placeOrder')
+    ? { orderId: 'rej-1', status: 'REJECTED', clientOrderId: 'c1' } : markets);
+  await ex._loadMarkets(true);
+  let err = null;
+  try { await ex.placeLimitOrder(args); } catch (e) { err = e; }
+  assert.ok(err, '被拒的单必须抛错');
+  assert.equal(err.rejected, true, `错误要带 rejected 标记供上层分流，实际抛出：${err.message}`);
+  assert.equal(ex._tracked.size, 0, '被拒的单不能进 _tracked，否则变幽灵单');
+
+  // 对照组：正常 ACK 必须进 _tracked
+  const ex2 = mk();
+  ex2._http = async (m, path) => (path.includes('placeOrder') ? { orderId: 'ok-1', status: 'ACK' } : markets);
+  await ex2._loadMarkets(true);
+  const r = await ex2.placeLimitOrder(args);
+  assert.equal(r.orderId, 'ok-1');
+  assert.equal(ex2._tracked.size, 1, '正常单必须进 _tracked');
+
+  // IOC 立即成交返回 FILLED，是合法返回，不能误判成拒绝
+  const ex3 = mk();
+  ex3._http = async (m, path) => (path.includes('placeOrder') ? { orderId: 'fill-1', status: 'FILLED' } : markets);
+  await ex3._loadMarkets(true);
+  const r3 = await ex3.placeLimitOrder(args);
+  assert.equal(r3.status, 'FILLED', 'FILLED 要原样透出');
+  assert.equal(ex3._tracked.size, 1);
+});

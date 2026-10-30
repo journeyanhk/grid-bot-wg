@@ -868,13 +868,24 @@ export class ArcusExchange extends EventEmitter {
     }
     const orderId = j?.orderId ? String(j.orderId) : (j?.result?.orderId ? String(j.result.orderId) : null);
     if (!orderId) throw new Error(`下单未返回 orderId：${JSON.stringify(j).slice(0, 160)}`);
+    // HTTP 200 不等于下单成功：Arcus 会把无法撮合的单改成 status=REJECTED 返回（典型场景：
+    // reduceOnly 单在无对应可减仓位时下单，语义由交易所在下单时强制校验）。
+    // 这类单根本没进撮合，必须当失败抛出——否则会写进 _tracked 变成幽灵单，
+    // 污染对账、触发 massVanish 误判，并让 recover 阶梯假装已挂好。
+    const st = String(j?.status ?? j?.result?.status ?? '').toUpperCase();
+    if (st === 'REJECTED' || st === 'CANCELED' || st === 'CANCELLED') {
+      throw Object.assign(
+        new Error(`下单被交易所拒绝：status=${st} orderId=${orderId} reduceOnly=${!!o.reduceOnly} ${JSON.stringify(j).slice(0, 200)}`),
+        { rejected: true, orderId, status: st },
+      );
+    }
     this._tracked.set(orderId, {
       marketId: mId, levelIndex: o.levelIndex, side: o.side, price: Number(px.text),
       sizeBase: Number(qty.text), reduceOnly: !!o.reduceOnly, placedAt: Date.now(), seen: false,
       clientOrderId: clientId || null,
     });
     this._watch.add(mId);
-    return { orderId, status: j?.status || 'ACK', clientOrderId: clientId || null };
+    return { orderId, status: st || 'ACK', clientOrderId: clientId || null };
   }
 
   async cancelOrder(marketId, orderId) {
