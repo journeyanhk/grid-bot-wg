@@ -778,3 +778,21 @@ inventoryBase = 0，guardState = RUNNING
 
 - 观察窗四组指标采集脚本（网格活动 / 成交与费用 / 库存与风控 / 账本与异常），24h 优先、样本不足延长到 48h
 - 附件要求的“管理认证 / 来源白名单”只做到「绑定 127.0.0.1 + origin 校验」，未做 token
+
+### 16.8 观察窗采集器（`/data/scripts/window_collect.py`）
+
+每 30s 采一次本地 state 写 jsonl，`--report` 出五组汇总（对应附件四组 + 收益拆分）：
+
+| 组 | 指标 |
+|---|---|
+| 网格活动 | 完成格数及 /h、买卖数、越界采样占比、空洞采样占比、价格高低点 |
+| 成交与费用 | MAKER/TAKER 数（**TAKER>0 直接标 ✗**）、部分成交数、手续费、实测 ppm、成交量 |
+| 库存与风控 | **actualInventoryPeak 与 projectedInventoryPeak 分开报**、4/6/8 格触发采样数、HALTED 次数与首个原因 |
+| 账本与异常 | operationalIssue 采样数、vanish 峰值、补腿冲突、死手触发、fills 游标最大延迟、时钟偏差 |
+| 收益拆分 | gridProfit、realized 增量、equity 变化、手续费 |
+
+末尾给**样本充分性**判定：完成格数 < 2×小时数 → 判定“样本不足，延长到 48h”，不允许拿“跑满 24h”当通过条件。
+
+已用 testnet 冒烟验证（13 条采样、五组输出正常；修了空价格/空 equity 的 None 崩溃）。
+
+**funding 暂未单独采集**——Arcus 账单接口还需扩展，观察窗报告里会显式标注这一项缺失，不用 0 冒充。
