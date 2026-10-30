@@ -644,6 +644,15 @@ export class GridBot {
     // handling and crash-safe persistence must already be active at that point.
     this.running = true;
     this._changed();
+    // P0 启动闸门：先建立风控态，再决定要不要铺第一批开仓单。
+    // 顺序很关键——区间外启动时，绝不能"先铺 66 张单、再等价格事件来拦"。
+    this._runRiskCycle('start');
+    const blocked = this._startBlockedReason();
+    if (blocked) {
+      this._alert(`⛔ 启动被风控拦截：${blocked}。本轮不铺任何开仓单，保持等待（无挂单、无持仓变化）。`);
+      this._changed();
+      return this.getState();
+    }
     await this._placeMany(seeds.map((s) => ({ ...s, opening: true, _placementId: placementId })));
     this._finishPlacementPass();
 
@@ -1004,7 +1013,7 @@ export class GridBot {
       price: Number(this.lastPrice) || 0,
       lower: Number(cfg.lower) || 0,
       upper: Number(cfg.upper) || 0,
-      outOfRange: !!this.outOfRange,
+      outOfRange: !!this.outOfRange || this._beyondHysteresis(),
       positionBase: pos,
       maxInventoryBase: this._maxInventoryBase(),
       equity: typeof this.ex.equity === 'number' ? this.ex.equity : null,
@@ -1020,7 +1029,19 @@ export class GridBot {
   _guardConsistency() {
     const cfg = this.config || {};
     let pos = null;
-    try { pos = Number(this.ex.getPosition?.(cfg.marketId)?.sizeBase); } catch { pos = null; }
+    let posErr = null;
+    try { pos = Number(this.ex.getPosition?.(cfg.marketId)?.sizeBase); } catch (e) { posErr = e; }
+    // 接口抛错与"无仓"是两件事：前者必须 fail-closed，绝不能当成 0 放行
+    if (posErr) return { ok: false, status: 'unknown', issues: [`读取仓位失败：${posErr.message}`] };
+    // P1 fail-closed：仓位读不出来 ≠ 空仓。适配器若跟踪同步时间戳，超过 2 分钟
+    // 没刷新成功就报「未知」，由 guard 升级为 DEFENSIVE/HALTED，绝不默认放行。
+    if (!Number.isFinite(pos)) {
+      const fetchedAt = Number(this.ex.positionsFetchedAt);
+      if (Number.isFinite(fetchedAt) && Date.now() - fetchedAt > 120_000) {
+        return { ok: false, status: 'unknown', issues: ['交易所仓位超过 2 分钟未同步成功'] };
+      }
+      pos = 0;   // 适配器不跟踪该字段，或刚同步过 → 空仓
+    }
     // P0-2 修正：本地预期仓位来自成交账本，绝不能把未成交挂单加总当持仓
     const localPos = this.posLedger.value;
     const unknown = Array.isArray(this._untrackedFills) ? this._untrackedFills.length : 0;
@@ -1046,11 +1067,27 @@ export class GridBot {
   /** 评估并应用风控状态；HALTED 一旦产生即写进持久化账本，重启不丢。 */
   _applyGuard() {
     if (!this.config || !this.grid || !this.running) return null;
+    // P1 fail-closed：拿不到一致性结果时，绝不能当成"一致"放行。
+    // 单次失败 → DEFENSIVE（禁开仓），连续 N 次 → HALTED（由 guard 判定）。
     let consistency = null;
-    try { consistency = this._guardConsistency(); } catch { consistency = null; }
+    try {
+      consistency = this._guardConsistency();
+      if (!consistency || consistency.status == null) {
+        consistency = { ok: false, status: 'unknown', issues: ['一致性检查未返回状态'] };
+      }
+    } catch (e) {
+      consistency = { ok: false, status: 'unknown', issues: [`一致性检查异常：${e.message}`] };
+    }
+    this._consistencyUnknownStreak = consistency.status === 'unknown'
+      ? (this._consistencyUnknownStreak || 0) + 1
+      : 0;
     let r = null;
     try {
-      r = evaluateRisk({ ...this._guardCtx(), consistency, haltReason: this.guard?.haltReason });
+      r = evaluateRisk({
+        ...this._guardCtx(), consistency,
+        consistencyUnknownStreak: this._consistencyUnknownStreak,
+        haltReason: this.guard?.haltReason,
+      });
     } catch (e) {
       this._alert(`风控评估异常（已跳过本轮）：${e.message}`);
       return null;
@@ -1102,6 +1139,16 @@ export class GridBot {
         this._enforceDefensive(r).catch(() => {});
       }
       return r;
+    } catch (e) {
+      // fail-closed：风控自己崩了，按最保守处理——禁止新增开仓，并留证据
+      this._alert(`⚠️ 风控评估异常，已按保守策略暂停开仓：${e.message}`);
+      if (this.guardState?.state !== STATES.HALTED) {
+        this.guardState = {
+          state: STATES.DEFENSIVE, reasons: [`风控异常：${e.message}`],
+          blockOpening: true, blockSide: 'both', haltReason: null, metrics: {},
+        };
+      }
+      return this.guardState;
     } finally {
       this._guardInFlight = false;
     }
@@ -1117,12 +1164,37 @@ export class GridBot {
     if (!this.config) return;
     this._haltEnforceInFlight = true;
     try {
-      const targets = [...this.active.entries()].filter(([, o]) => !o.reduceOnly && !o.recovery);
-      if (!targets.length) return;
-      for (const [id] of targets) {
+      // P1：安全目标是「交易所真实非减仓订单 = 0」，不是「本地 active = 0」。
+      // 重启残留、幽灵单、台账丢失都会让本地缺单，只遍历 active 会留下裸敞口。
+      let rows = null;
+      try { rows = await this.ex.fetchOpenOrders?.(this.config.marketId); } catch { rows = null; }
+
+      // 本地已知的减仓/回收单必须保留；交易所侧无法区分 reduceOnly，只能靠本地标记。
+      const keep = new Set();
+      for (const [id, o] of this.active.entries()) {
+        if (o.reduceOnly || o.recovery) keep.add(String(id));
+      }
+
+      const toCancel = new Set();
+      if (Array.isArray(rows)) {
+        for (const r of rows) {
+          const id = String(r.orderId ?? r.id ?? '');
+          if (!id) continue;
+          if (!keep.has(id)) toCancel.add(id);   // 本地没标记为减仓的一律撤（保守）
+        }
+      } else {
+        // 拿不到交易所快照：退回本地台账，同时明确告警（无法保证全清）
+        this._alert('⚠️ 熔断撤单拿不到交易所挂单快照，只能按本地台账撤，实际可能仍有残留单。');
+        for (const [id, o] of this.active.entries()) {
+          if (!o.reduceOnly && !o.recovery) toCancel.add(String(id));
+        }
+      }
+
+      if (!toCancel.size) return;
+      for (const id of toCancel) {
         try { await this.ex.cancelOrder?.(this.config.marketId, id); } catch { /* 由快照确认兜底 */ }
       }
-      await this._confirmNonReduceGone();
+      await this._confirmNonReduceGone(keep);
     } finally {
       this._haltEnforceInFlight = false;
     }
@@ -1140,7 +1212,7 @@ export class GridBot {
   }
 
   /** 两轮真实快照确认：只删除「交易所已不存在」的本地非减仓记录，绝不整表清空。 */
-  async _confirmNonReduceGone() {
+  async _confirmNonReduceGone(keep = null) {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     let removedTotal = 0;
     for (let i = 0; i < 2; i++) {
@@ -1155,9 +1227,21 @@ export class GridBot {
       }
       if (removedTotal > 0) this._changed();
     }
-    const left = [...this.active.values()].filter((o) => !o.reduceOnly && !o.recovery).length;
-    if (left > 0) {
-      this._alert(`⚠️ 熔断撤单未确认：本地仍有 ${left} 张非减仓单，连续两轮快照均未见其消失。`);
+    // 以交易所真实挂单为准做最终判定
+    let realLeft = null;
+    try {
+      const rows = await this.ex.fetchOpenOrders?.(this.config.marketId);
+      if (Array.isArray(rows)) {
+        const keepSet = keep || new Set();
+        realLeft = rows.filter((r) => !keepSet.has(String(r.orderId ?? r.id ?? ''))).length;
+      }
+    } catch { /* 取不到就是未知，下面按未知告警 */ }
+
+    const localLeft = [...this.active.values()].filter((o) => !o.reduceOnly && !o.recovery).length;
+    if (realLeft === null) {
+      this._alert(`⚠️ 熔断撤单未确认：取不到交易所快照，本地仍有 ${localLeft} 张非减仓单。`);
+    } else if (realLeft > 0) {
+      this._alert(`⚠️ 熔断撤单未确认：交易所仍有 ${realLeft} 张非减仓单（本地剩 ${localLeft} 张），连续两轮快照未清干净，请人工核查。`);
     }
   }
 
@@ -1181,6 +1265,43 @@ export class GridBot {
     this._alert(`🔁 新风险周期：基准 $${equity}（原 $${prev.startBalance}），仓位基线 ${this.posLedger.value}（原 ${prev.position}）。原因：${reason || '未说明'}，操作者：${operator}`);
     this._changed();
     return { ok: true, startBalance: equity, positionBase: this.posLedger.value, previous: prev };
+  }
+
+  /**
+   * P0 启动闸门判定。返回 null = 允许铺第一批开仓单，否则返回拦截原因。
+   * 刻意不只看 guardState：初始化顺序、异常、未来重构都可能让缓存状态为空，
+   * 所以「价格在区间外」「已有熔断」都要单独再判一遍。
+   */
+  /**
+   * 价格是否已越过「外侧半格」迟滞带。
+   * 与 outOfRange 的区别：outOfRange 还要连续 2 拍 + 驻留时间（防抖，用于切换
+   * recovery/停机）；这里只要明显越界就成立，用于**禁止新增开仓**。
+   * 两个语义不能混：混了就会出现「价格已经破界、却还在补开仓单」。
+   */
+  _beyondHysteresis() {
+    if (!this.config) return false;
+    const sp = Number(this.grid?.spacing ?? this.config.spacing ?? 0);
+    if (!(sp > 0)) return false;
+    const px = Number(this.lastPrice);
+    if (!(px > 0)) return false;
+    const h = (this.config.recoverHystFrac ?? 0.5) * sp;
+    return px < this.config.lower - h || px > this.config.upper + h;
+  }
+
+  _startBlockedReason() {
+    if (!this.config || !this.grid) return '缺少网格配置';
+    const px = Number(this.lastPrice);
+    if (!Number.isFinite(px) || px <= 0) return '尚未取得有效的最新价';
+    const h = (this.config.recoverHystFrac ?? 0.5) * (Number(this.grid.spacing) || 0);
+    if (px < this.config.lower - h || px > this.config.upper + h) {
+      return `最新价 ${round2(px)} 在区间 [${round2(this.config.lower)}, ${round2(this.config.upper)}] 之外`;
+    }
+    if (this.outOfRange) return `价格处于破界状态（${round2(px)}）`;
+    if (this.guard?.isHalted) return `已有熔断记录：${this.guard.haltReason}`;
+    const st = this.guardState?.state;
+    if (!st) return '风控状态未建立（guardState 为空）';
+    if (st !== STATES.RUNNING) return `风控状态为 ${st}`;
+    return null;
   }
 
   /** 恢复提请：只判断条件是否齐备，不自动转 RUNNING。 */
@@ -1218,6 +1339,8 @@ export class GridBot {
     // P1-2：reduceOnly / recovery 单一律不是 opening，全流程共用这一处推导
     const opening = o.opening !== false && !reduceOnly && !o.recovery;
     if (!this._guardAllowsOrder({ ...o, reduceOnly, opening })) return;
+    // P0 硬门：破界期间任何开仓腿都不许发出，不依赖 guardState 缓存
+    if (opening && !this.recovery && (this.outOfRange || this._beyondHysteresis())) return;
     // Back-off: while paused (after a burst of cancellations / collateral
     // rejections) do not place new OPENING orders. CLOSING / reduce-only /
     // recovery legs need no extra margin and are never blocked — dropping a
@@ -1704,7 +1827,8 @@ export class GridBot {
 
   _checkMaxLoss() {
     if (!this.running || !this.config) return;
-    const pos = this.ex.getPosition?.(this.config.marketId);
+    let pos = null;
+    try { pos = this.ex.getPosition?.(this.config.marketId); } catch { pos = null; }  // 适配器异常不得冒泡
     if (!pos || !pos.sizeBase) return;
     // 口径：优先用盘口价重算。交易所的 mark 在 Arcus 测试网能比盘口高 7%+，
     // 直接拿它止损会让风控凭空认定已亏一百多，反而不敢按真实亏损动作。

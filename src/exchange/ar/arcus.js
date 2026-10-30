@@ -775,6 +775,9 @@ export class ArcusExchange extends EventEmitter {
       }), { tag: 'positions' }).catch((e) => (e.status === 404 ? null : Promise.reject(e))),
     ]);
 
+    // 供 bot 判断"账户是否至少同步过一次"：getPosition 返回 null 既可能是无仓，
+    // 也可能是从未刷新成功，两者对风控的意义完全不同（后者必须 fail-closed）。
+    this.positionsFetchedAt = Date.now();
     if (acct) {
       const a = parseAccount(acct);
       if (a.equity != null) this.equity = a.equity;

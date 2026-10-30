@@ -10,7 +10,9 @@ const base = {
   price: 80000, lower: 77000, upper: 83000,
   positionBase: 0, maxInventoryBase: 0.0066,
   equity: 250, startBalance: 250,
-  outOfRange: false, now: 1_000_000,
+  // 刻意不写 outOfRange：默认走价格兜底。
+  // bot 传布尔值时以它为准（它带「外侧半格 + 2 拍 + 驻留」三重迟滞）。
+  now: 1_000_000,
 };
 
 // ---------- 1. 状态机转移 ----------
@@ -51,6 +53,18 @@ test('破界 → DEFENSIVE 且停止全部开仓', () => {
   }
   const flagged = evaluateRisk({ ...base, outOfRange: true });
   assert.equal(flagged.blockOpening, true, '适配器标记破界也要封开仓');
+});
+
+test('outOfRange=false 时尊重 bot 的迟滞：贴边价不算破界', () => {
+  // 边界外 10 块（半格以内），bot 认为还没确认破界，guard 不能抢先封盘
+  const near = evaluateRisk({ ...base, price: 76990, outOfRange: false });
+  assert.equal(near.state, STATES.RUNNING, '贴边未确认破界时不应降级');
+  assert.equal(near.blockOpening, false);
+
+  // 真正的破界：bot 已确认
+  const real = evaluateRisk({ ...base, price: 76000, outOfRange: true });
+  assert.equal(real.state, STATES.DEFENSIVE);
+  assert.equal(real.blockOpening, true);
 });
 
 test('账户 -40 / -60 / -80 三档递进', () => {

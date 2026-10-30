@@ -36,6 +36,7 @@ export const GUARD_DEFAULTS = Object.freeze({
   biasShare: 0.8,
   // 一致性容差
   positionDeltaTol: 1e-8,
+  consistencyUnknownHaltStreak: 2,   // 连续 N 轮一致性检查失败 → HALTED（单次 → DEFENSIVE）
   // 恢复条件
   recoveryMaxInventoryFrac: 0.1,
   recoveryMinBarsAboveLower: 2,
@@ -85,7 +86,8 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   }
 
   // 1) 一致性异常 → 直接熔断（账本都不可信了，谈不上继续交易）
-  if (ctx.consistency && ctx.consistency.ok === false) {
+  // status='unknown' 是「没查明」，交给下面的分级处理；这里只处理「查明了不一致」
+  if (ctx.consistency && ctx.consistency.ok === false && ctx.consistency.status !== 'unknown') {
     return {
       state: STATES.HALTED,
       reasons: ctx.consistency.issues.slice(0, 6),
@@ -94,6 +96,26 @@ export function evaluateRisk(ctx = {}, limits = {}) {
       haltReason: `账本不一致：${ctx.consistency.issues[0]}`,
       metrics,
     };
+  }
+
+  // 1b) 一致性「未知」（接口失败、账本读不出、适配器异常）→ fail-closed
+  //     单次失败：禁止新增开仓（DEFENSIVE）；连续 N 次：熔断。
+  let consistencyUnknown = false;
+  if (ctx.consistency && ctx.consistency.status === 'unknown') {
+    const streak = num(ctx.consistencyUnknownStreak);
+    const why = (ctx.consistency.issues && ctx.consistency.issues[0]) || '未知原因';
+    if (streak >= L.consistencyUnknownHaltStreak) {
+      return {
+        state: STATES.HALTED,
+        reasons: [`一致性检查连续 ${streak} 次无法完成：${why}`],
+        blockOpening: true,
+        blockSide: 'both',
+        haltReason: `一致性检查连续 ${streak} 次失败：${why}`,
+        metrics,
+      };
+    }
+    consistencyUnknown = true;
+    reasons.push(`一致性无法确认（${why}），暂停新增开仓`);
   }
 
   const equity = Number.isFinite(Number(ctx.equity)) ? Number(ctx.equity) : null;
@@ -149,8 +171,12 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   const price = num(ctx.price);
   const lower = num(ctx.lower);
   const upper = num(ctx.upper);
-  const brokeLow = ctx.outOfRange === true || (lower > 0 && price > 0 && price < lower);
-  const brokeHigh = ctx.outOfRange === true || (upper > 0 && price > 0 && price > upper);
+  // bot 传来的 outOfRange 已经过「外侧半格 + 连续 2 拍 + 驻留时间」三重迟滞，
+  // 那才是权威值。只有当调用方完全没给这个标记时，才退回严格价兜底，
+  // 否则贴边启动（边界外侧半格内）会被误判成破界、直接拦掉正常开仓。
+  const hasFlag = typeof ctx.outOfRange === 'boolean';
+  const brokeLow = ctx.outOfRange === true || (!hasFlag && lower > 0 && price > 0 && price < lower);
+  const brokeHigh = ctx.outOfRange === true || (!hasFlag && upper > 0 && price > 0 && price > upper);
   if (lower > 0 && upper > 0 && price > 0 && (price < lower || price > upper)) {
     metrics.brokeLow = price < lower;
     metrics.brokeHigh = price > upper;
@@ -194,6 +220,12 @@ export function evaluateRisk(ctx = {}, limits = {}) {
     reasons.push(`账户累计亏损 $${loss} ≥ 预警线 $${L.warnLossUsd}（禁止升量）`);
   }
 
+  if (consistencyUnknown) {
+    blockOpening = true;
+    if (!blockSide) blockSide = 'both';
+    // 评审要求：单次读取失败也必须降级到 DEFENSIVE，不能停在 RUNNING
+    if (state === STATES.RUNNING) state = STATES.DEFENSIVE;
+  }
   return { state, reasons, blockOpening, blockSide, haltReason: null, metrics };
 }
 
@@ -230,7 +262,7 @@ export function checkConsistency(ctx = {}, limits = {}) {
     }
   }
 
-  return { ok: issues.length === 0, issues };
+  return { ok: issues.length === 0, status: issues.length === 0 ? 'ok' : 'mismatch', issues };
 }
 
 /**
