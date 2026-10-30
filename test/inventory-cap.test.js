@@ -104,13 +104,13 @@ test('projectedInventory：空仓不按挂单投影，有持仓才累加同向�
   setPos(ex, bot, 5);
   // 同向（多头 → buy）3 张未成交
   for (let i = 0; i < 3; i++) {
-    ex.orders.set(`b${i}`, { orderId: `b${i}`, side: 'buy', price: 140 - i, sizeBase: 1, reduceOnly: false });
-    bot.active.set(`b${i}`, { levelIndex: i, side: 'buy', price: 140 - i, sizeBase: 1, opening: true, placedAt: Date.now() });
+    ex.orders.set(`b${i}`, { orderId: `b${i}`, side: 'buy', price: 149 - i * 0.5, sizeBase: 1, reduceOnly: false });
+    bot.active.set(`b${i}`, { levelIndex: i, side: 'buy', price: 149 - i * 0.5, sizeBase: 1, opening: true, placedAt: Date.now() });
   }
   // 反向（sell）5 张：只会在减仓方向成交，不算暴露
   for (let i = 0; i < 5; i++) {
-    ex.orders.set(`s${i}`, { orderId: `s${i}`, side: 'sell', price: 160 + i, sizeBase: 1, reduceOnly: false });
-    bot.active.set(`s${i}`, { levelIndex: 10 + i, side: 'sell', price: 160 + i, sizeBase: 1, opening: true, placedAt: Date.now() });
+    ex.orders.set(`s${i}`, { orderId: `s${i}`, side: 'sell', price: 151 + i * 0.5, sizeBase: 1, reduceOnly: false });
+    bot.active.set(`s${i}`, { levelIndex: 10 + i, side: 'sell', price: 151 + i * 0.5, sizeBase: 1, opening: true, placedAt: Date.now() });
   }
   const p = bot._projectedInventory();
   assert.equal(p.pending, 3, '只累加同向开仓单');
@@ -131,8 +131,8 @@ test('持仓 5 格 + 同向 3 张挂单 = projected 8 → 停同向开仓（不�
   const { ex, bot } = await boot();
   setPos(ex, bot, 5);
   for (let i = 0; i < 3; i++) {
-    ex.orders.set(`b${i}`, { orderId: `b${i}`, side: 'buy', price: 140 - i, sizeBase: 1, reduceOnly: false });
-    bot.active.set(`b${i}`, { levelIndex: i, side: 'buy', price: 140 - i, sizeBase: 1, opening: true, placedAt: Date.now() });
+    ex.orders.set(`b${i}`, { orderId: `b${i}`, side: 'buy', price: 149 - i * 0.5, sizeBase: 1, reduceOnly: false });
+    bot.active.set(`b${i}`, { levelIndex: i, side: 'buy', price: 149 - i * 0.5, sizeBase: 1, opening: true, placedAt: Date.now() });
   }
   bot._runRiskCycle('timer');
   // projected 到顶但真实持仓没到顶 → 停开仓，不熔断

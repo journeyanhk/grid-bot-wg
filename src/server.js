@@ -384,6 +384,21 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
+    // 人工解除熔断。HALTED 是粘滞的（只能人工清），但没有端点等于「只能改文件重启」——
+    // 那不是安全，那是把一次误熔断变成一次停机。要求显式确认 + 记录操作人。
+    if (subPath === '/clear-halt' && req.method === 'POST') {
+      try {
+        const body = await readBody(req);
+        if (body?.confirm !== true) {
+          return send(res, 400, { error: '必须显式 confirm:true —— 解除熔断会恢复开仓' });
+        }
+        const by = String(body?.by || 'operator').slice(0, 64);
+        const r = bot.clearHalt(by);
+        logger.warn('server', `[${key}] 人工解除熔断 by=${by} prev=${r?.prev || '-'}`);
+        return send(res, 200, r);
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
     // 重新与交易所建立连接：重建客户端/解卡轮询/重启轮询循环。
     // 不撤单、不平仓、不动网格状态 —— 挂单照常被跟踪；重连成功后立刻对账一次。
     // 若该所启动时未连上导致续跑被跳过（快照仍为运行状态），重连成功后自动续跑接管挂单。

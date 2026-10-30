@@ -565,6 +565,12 @@ export class GridBot {
         : null;
     }
     // P3：策略起点余额一旦锁定就进持久化账本；亏钱重启不会被改写成当前 equity。
+    // 启动 = 新风险周期：以交易所真实持仓为基线。
+    // 否则上次会话遗留的台账（比如人工平过仓）会让新周期一开局就「仓位不一致」→ 熔断。
+    try {
+      const baseNow = Number(this.ex.getPosition?.(market.marketId)?.sizeBase) || 0;
+      this.posLedger.reset(baseNow);
+    } catch { /* 读不到就不动基线，交给一致性检查判 unknown */ }
     if (this.guard) {
       this.guard.lockStartBalance(this.startBalance);
       if (this.startBalance == null) this.startBalance = this.guard.startBalance;
@@ -1043,13 +1049,26 @@ export class GridBot {
       return { pos, projected: absPos, side: null, pending: 0 };
     }
     const side = pos > 0 ? 'buy' : 'sell';
+
+    // 只统计「近处」同向挂单：66 格网格任意时刻都有约 33 张同向挂单，
+    // 全算进来等于一有持仓就顶到上限 37 格 → 第一次成交就自锁。
+    // 远处的挂单要价格先走过来才成交，那是问题逐格暴露的过程，
+    // 由「4 格预警 → 6 格封锁」逐步兜住；这里只负责「马上可能成交的」。
+    const px = Number(this.lastPrice) || 0;
+    const sp = Number(this.grid?.spacing) || 0;
+    const NEAR_GRIDS = 3;
+    const near = sp > 0 ? sp * NEAR_GRIDS : Infinity;
     let pending = 0;
+    let counted = 0;
     for (const o of this.active.values()) {
       if (o.reduceOnly || o.recovery || o.opening === false) continue;
       if (String(o.side).toLowerCase() !== side) continue;
+      const op = Number(o.price);
+      if (near !== Infinity && px > 0 && Number.isFinite(op) && Math.abs(op - px) > near) continue;
       pending += Number(o.sizeBase) || 0;
+      counted += 1;
     }
-    return { pos, projected: absPos + pending, side, pending };
+    return { pos, projected: absPos + pending, side, pending, nearOrders: counted };
   }
 
   /** 组装风控上下文。缺项按"未知"跳过，绝不猜。 */
@@ -1090,6 +1109,13 @@ export class GridBot {
         return { ok: false, status: 'unknown', issues: ['交易所仓位超过 2 分钟未同步成功'] };
       }
       pos = 0;   // 适配器不跟踪该字段，或刚同步过 → 空仓
+    }
+    // 成交刚发生时，交易所仓位缓存（默认 5s 轮询）必然落后于账本，
+    // 这窗口内比对只会稳定误报「仓位不一致」→ 熔断。等缓存追上再比。
+    const lastFillMs = Number(this._lastFillAtMs) || 0;
+    const sinceFill = Date.now() - lastFillMs;
+    if (lastFillMs && sinceFill < 10_000) {
+      return { ok: true, status: 'ok', issues: [], skipped: `成交后 ${Math.round(sinceFill / 1000)}s 内跳过仓位比对` };
     }
     // P0-2 修正：本地预期仓位来自成交账本，绝不能把未成交挂单加总当持仓
     const localPos = this.posLedger.value;
@@ -1673,6 +1699,7 @@ export class GridBot {
 
   _handleFill(f) {
     this._touch();
+    this._lastFillAtMs = Date.now();   // 供一致性检查判断「缓存是否可能还在追」
     if (!this.running || f.marketId !== this.config.marketId) return;
     const id = String(f.orderId);
     const act = this.active.get(id);
@@ -2705,6 +2732,9 @@ export class GridBot {
 
   getState() {
     const pos = this.running || this.config ? this.ex.getPosition?.(this.config?.marketId) : null;
+    // 风控状态必须对外可见：状态机在跑但外部看不见，等于没有（巡检/面板都读不到）。
+    const guard = this.guard?.toJSON?.() || null;
+    const proj = this.running && this.config ? this._projectedInventory() : { projected: 0, pending: 0, side: null };
     const openByLevel = {};
     for (const o of this.active.values()) openByLevel[o.levelIndex] = o.side;
 
@@ -2773,6 +2803,14 @@ export class GridBot {
           ? roundPrice(Number(pos.liquidationPrice)) : null,
       } : null,
       operationalIssue: this._operationalIssue ?? this.ex.operationalIssue ?? null,
+      // 风控面（v1.6.48）：巡检与面板据此判断「该不该继续开仓」
+      guardState: this.guardState?.state || null,
+      guardReason: this.guardState?.haltReason || null,
+      guardBlockSide: this.guardState?.blockSide || null,
+      maxInventoryBase: this.config ? this._maxInventoryBase() : 0,
+      inventoryBase: Number(proj.projected) || 0,
+      inventoryPendingBase: Number(proj.pending) || 0,
+      inventoryCapGrids: Number(this.config?.maxInventoryGrids) || null,
       apiWalletAddress: this.ex.apiWalletAddress ?? null,
       realizedPnl: realized,
       unrealizedPnl: unrealized,
