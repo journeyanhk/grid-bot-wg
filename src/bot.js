@@ -5,6 +5,7 @@
 // alerts (optional auto-stop), periodic open-order reconciliation, crash-safe
 // persistence with resume-on-restart, live range adjustment, and a health probe.
 import { buildGrid, seedOrders, replacementFor, isReduceOnly } from './grid.js';
+import { STATES, evaluateRisk, checkConsistency, canEnterRecovery, HaltLedger } from './guard.js';
 import { logger } from './log.js';
 
 const RECONCILE_MS = 30000;   // periodic open-order reconciliation cadence
@@ -44,7 +45,11 @@ export class GridBot {
     this.active = new Map();        // orderId -> {levelIndex, side, price, opening, placedAt}
     this._replQueue = [];           // 待补挂的对腿（同一批成交先出栈、再统一补挂）
     this._replFlushScheduled = false;
-    this._lastActivityAt = Date.now();  // 看门狗用：任何真实活动（行情/成交/对账/状态变更）都刷新
+    this._lastActivityAt = Date.now();
+    // --- P3 风控状态机：HALTED 是粘滞状态，只能人工清除 ---
+    this.guard = new HaltLedger(opts.guardState || {});
+    this.guardState = null;      // evaluateRisk 最新结果
+    this._guardLastState = null;  // 看门狗用：任何真实活动（行情/成交/对账/状态变更）都刷新
     this._replConflicts = 0;        // 补挂时目标档仍被判占用的次数（"一格一单"被违反的证据）
     this._lastReplConflict = null;
     this._replConflictAlertAt = 0;
@@ -164,6 +169,8 @@ export class GridBot {
       running: this.running, config: this.config, stats: this.stats,
       recovery: this.recovery, pnlBase: this._pnlBase,
       startBalance: this.startBalance, outOfRange: this.outOfRange, lastPrice: this.lastPrice,
+      guard: this.guard.toJSON(),        // 熔断原因 + 策略起点余额（重启不清）
+      guardState: this.guardState,
       gridProfitRaw: this._gridProfitRaw,
       active: [...this.active.entries()],
       placementProgress: this._placementProgress,
@@ -188,6 +195,8 @@ export class GridBot {
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this._gridProfitRaw = Number(snap.gridProfitRaw ?? this.stats.gridProfit ?? 0) || 0;
     this.startBalance = snap.startBalance ?? null;
+    if (snap.guard) this.guard = new HaltLedger(snap.guard);
+    if (snap.guardState) this.guardState = snap.guardState;
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
@@ -539,6 +548,11 @@ export class GridBot {
         : typeof this.ex.balance === 'number' ? this.ex.balance
         : null;
     }
+    // P3：策略起点余额一旦锁定就进持久化账本；亏钱重启不会被改写成当前 equity。
+    if (this.guard) {
+      this.guard.lockStartBalance(this.startBalance);
+      if (this.startBalance == null) this.startBalance = this.guard.startBalance;
+    }
 
     // ---- margin pre-check ----
     const requiredMargin = this.risk.requiredMargin;
@@ -850,6 +864,7 @@ export class GridBot {
       sizeBase: this.config.sizeBase,
       spacingPct: round2((this.grid.spacing / mid) * 100),
     };
+    this._applyGuard();
   }
 
   _beginPlacementProgress(action, orders) {
@@ -957,7 +972,108 @@ export class GridBot {
     };
   }
 
+  /** 最大允许库存（绝对值）：整条梯子全部朝一个方向成交时的持仓。 */
+  _maxInventoryBase() {
+    if (!this.grid || !this.config) return 0;
+    return Math.abs(Number(this.grid.count) * Number(this.config.sizeBase)) || 0;
+  }
+
+  /** 组装风控上下文。缺项按"未知"跳过，绝不猜。 */
+  _guardCtx() {
+    const cfg = this.config || {};
+    let pos = 0;
+    try { pos = Number(this.ex.getPosition?.(cfg.marketId)?.sizeBase) || 0; } catch { pos = 0; }
+    return {
+      price: Number(this.lastPrice) || 0,
+      lower: Number(cfg.lower) || 0,
+      upper: Number(cfg.upper) || 0,
+      outOfRange: !!this.outOfRange,
+      positionBase: pos,
+      maxInventoryBase: this._maxInventoryBase(),
+      equity: typeof this.ex.equity === 'number' ? this.ex.equity : null,
+      startBalance: this.guard?.startBalance ?? this.startBalance,
+      fills: Array.isArray(this.fills)
+        ? this.fills.map((f) => ({ side: f.side, opening: f.opening !== false, ts: f.t }))
+        : [],
+      now: Date.now(),
+    };
+  }
+
+  /** 交易所真值 vs 本地台账的一致性巡检。 */
+  _guardConsistency() {
+    const cfg = this.config || {};
+    let pos = null;
+    try { pos = Number(this.ex.getPosition?.(cfg.marketId)?.sizeBase); } catch { pos = null; }
+    const localPos = [...this.active.values()]
+      .reduce((acc, o) => acc + (Number(o.sizeBase) || 0) * (o.side === 'buy' ? 1 : -1), 0);
+    const unknown = Array.isArray(this._untrackedFills) ? this._untrackedFills.length : 0;
+    return checkConsistency({
+      positionBase: Number.isFinite(pos) ? pos : undefined,
+      localPositionBase: Number.isFinite(localPos) ? localPos : undefined,
+      unknownFills: unknown,
+    });
+  }
+
+  /** 该不该放这张单。减仓/回收腿永远放行——风控只拦"增加风险"的动作。 */
+  _guardAllowsOrder(o) {
+    const g = this.guardState;
+    if (!g) return true;
+    const opening = o.opening !== false && !o.reduceOnly && !o.recovery;
+    if (!opening) return true;
+    if (g.state === STATES.HALTED) return false;
+    if (g.blockOpening) return false;
+    if (g.blockSide && g.blockSide === o.side) return false;
+    return true;
+  }
+
+  /** 评估并应用风控状态；HALTED 一旦产生即写进持久化账本，重启不丢。 */
+  _applyGuard() {
+    if (!this.config || !this.grid || !this.running) return null;
+    let consistency = null;
+    try { consistency = this._guardConsistency(); } catch { consistency = null; }
+    let r = null;
+    try {
+      r = evaluateRisk({ ...this._guardCtx(), consistency, haltReason: this.guard?.haltReason });
+    } catch (e) {
+      this._alert(`风控评估异常（已跳过本轮）：${e.message}`);
+      return null;
+    }
+    const prev = this._guardLastState;
+    this.guardState = r;
+    this._guardLastState = r.state;
+
+    if (r.haltReason && this.guard && !this.guard.isHalted) {
+      this.guard.halt(r.haltReason);
+      this._alert(`🛑 风控熔断：${r.haltReason}。已停止全部开仓，请核查后手动恢复。`);
+      this._changed();
+    }
+    if (prev !== r.state) {
+      const tail = r.reasons.length ? `：${r.reasons[0]}` : '';
+      this._alert(`风控状态 ${prev || '—'} → ${r.state}${tail}`);
+      this._changed();
+    }
+    return r;
+  }
+
+  /** 人工清除熔断。风控层不会自己把 HALTED 改回去。 */
+  clearHalt(by = '人工') {
+    const prev = this.guard?.clearHalt();
+    if (!prev) return { ok: false, message: '当前不在熔断状态' };
+    this.guardState = null;
+    this._guardLastState = null;
+    this._alert(`✅ 熔断已解除（原原因：${prev}，操作者：${by}）`);
+    this._changed();
+    return { ok: true, cleared: prev };
+  }
+
+  /** 恢复提请：只判断条件是否齐备，不自动转 RUNNING。 */
+  recoveryChecklist() {
+    const ctx = { ...this._guardCtx(), openOrderCount: this.active.size };
+    return canEnterRecovery(ctx);
+  }
+
   async _place(o) {
+    if (!this._guardAllowsOrder(o)) return;
     const opening = o.opening !== false;
     const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
     // Back-off: while paused (after a burst of cancellations / collateral
@@ -1122,6 +1238,14 @@ export class GridBot {
    * that opt into the two-snapshot, level-de-duplicated retry path below.
    */
   _queueRetry(o, error = null) {
+    // 交易所语义性拒绝（如 reduceOnly 在无对应可减仓位时下单）重试无意义：
+    // 条件不变就会一直被拒，只会刷告警并长期占住档位。直接记失败，不进重试队列。
+    if (error?.rejected) {
+      const kind = (o.opening !== false && !o.reduceOnly && !o.recovery) ? '开仓' : '平仓/回收';
+      this._markPlacementFailed(o);
+      this._alert(`❌ ${kind}单被交易所拒绝（level ${o.levelIndex} @ ${o.price}）：${error.message}。已放弃，不重试。`);
+      return;
+    }
     const opening = o.opening !== false && !o.reduceOnly && !o.recovery;
     if (opening && !this.ex.supportsSafeOpeningRetry) return;
     const tries = (o._tries || 0) + 1;
@@ -1251,6 +1375,7 @@ export class GridBot {
     const closing = isRecovery ? true
       : (act ? act.opening === false
              : ((this.config.mode === 'short') ? f.side === 'buy' : f.side === 'sell'));
+    if (this.fills[0]) this.fills[0].opening = !closing;   // 供风控的「成交偏置」判定
     if (closing) {
       this.stats.completedRungs++;
       // Incremental accumulation with the ACTUAL fill size: adjustRange no longer

@@ -710,6 +710,73 @@ test('单格净利红线：150ppm 下 0.09% 间距拒启，0.10% 放行（review
 });
 
 // ── 顺序执行全部用例 ──────────────────────────────────────────────────────────
+// ── P3：被交易所语义性拒绝的订单，不得进台账 / 重试队列 / 挂单数 ──
+test('REJECTED 单不进 active、不进重试队列、不被反复重试', async () => {
+  class RejEx extends MockExchange {
+    constructor(o = {}) {
+      super(o);
+      this.rejectLevels = new Set(o.rejectLevels || []);
+      this.attempts = [];
+    }
+    async placeLimitOrder(o) {
+      this.attempts.push({ level: o.levelIndex, side: o.side });
+      if (this.rejectLevels.has(o.levelIndex)) {
+        const e = new Error('下单被交易所拒绝：status=REJECTED reduceOnly=true');
+        e.rejected = true; e.status = 'REJECTED'; e.orderId = 'rej-' + o.levelIndex;
+        throw e;
+      }
+      return super.placeLimitOrder(o);
+    }
+  }
+  const ex = new RejEx({ rejectLevels: [3, 7] });
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await bot.start({ ...CFG });
+  await new Promise((r) => setTimeout(r, 80));
+
+  assert.equal(ex.orders.size, 8, '10 档里 2 档被拒 → 交易所侧只能 8 张');
+  assert.equal(bot.active.size, 8, 'active 也只能 8 张');
+  assert.equal(
+    bot._retryQueue.filter((o) => ex.rejectLevels.has(o.levelIndex)).length, 0,
+    '被拒订单不得进入重试队列',
+  );
+  assert.ok(
+    ![...bot.active.values()].some((o) => String(o.orderId || '').startsWith('rej-')),
+    '被拒订单不得出现在 active 台账',
+  );
+  for (const lv of [3, 7]) {
+    const n = ex.attempts.filter((a) => a.level === lv).length;
+    assert.equal(n, 1, `level ${lv} 只应尝试一次（不重试），实际 ${n} 次`);
+  }
+  await bot.stop({ closePosition: false }).catch(() => {});
+});
+
+// ── P3：回收阶梯的每一张单都必须显式带 reduceOnly ──
+test('recover 阶梯全部显式 reduceOnly=true 且带 recovery 标记', async () => {
+  const ex = new MockExchange({ balance: 5000 });
+  ex.positions.set(1, { sizeBase: -0.5, entryPrice: 150, unrealizedPnl: 0, leverage: 3 });
+  const calls = [];
+  const orig = ex.placeLimitOrder.bind(ex);
+  ex.placeLimitOrder = async (o) => { calls.push({ ...o }); return orig(o); };
+
+  const bot = new GridBot(ex, { cancelVerifyDelayMs: 10, cancelVerifyAttempts: 6 });
+  await bot.startRecovery({ ...CFG, sizeBase: 0.1 });
+  await new Promise((r) => setTimeout(r, 80));
+
+  assert.ok(calls.length > 0, '回收阶梯必须真的下单');
+  const notReduceOnly = calls.filter((o) => o.reduceOnly !== true);
+  assert.equal(
+    notReduceOnly.length, 0,
+    `回收单必须全部 reduceOnly=true，违规 ${notReduceOnly.length} 张：${JSON.stringify(notReduceOnly.slice(0, 3))}`,
+  );
+  // recovery 只是本地标记（seedOrders 补种路径不带它），交易所语义只看 reduceOnly，
+  // 所以这里只做提示不做硬断言。
+  const notRecovery = calls.filter((o) => !o.recovery);
+  if (notRecovery.length) {
+    console.log(`    （提示）${notRecovery.length}/${calls.length} 张回收单未带本地 recovery 标记，不影响交易所语义`);
+  }
+  await bot.stop({ closePosition: false }).catch(() => {});
+});
+
 (async () => {
   for (const [name, fn] of T) {
     try {

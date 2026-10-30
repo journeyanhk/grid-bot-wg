@@ -382,3 +382,90 @@ HALTED / FLAT / NO ORDERS
 equity 245.414  free 245.414  position 0  open_orders 0  running=false
 不自动重启、不自动铺单、不删除旧状态
 ```
+---
+
+## 11. P3 执行结果（2026-10-30 11:0x，仅代码/测试/文档）
+
+**范围**：改本地代码 + 测试 + 文档；测试网跑过验证；**未启动网格、未连主网写、主网仍 `HALTED / FLAT / NO ORDERS`**。
+
+### 11.1 `_placeBatch` 透传审计：**不存在批量下单接口，批量丢失假设不成立**
+
+| 检查项 | 结论 |
+|---|---|
+| `arcus.js` 是否有批量下单 | **没有**。只有单笔 `placeLimitOrder` + `batchCancelOrders`（撤单） |
+| `bot.js:1043` 的 `batchSize = Math.min(15, orderBatchSize)` | 只是**并发分片节奏**，循环体是 `for (const order of orders) await this._place(order)` |
+| 每笔单的 `reduceOnly` 来源 | ① 显式传（recover 阶梯 4 处硬写 `reduceOnly: true`）；② `o.reduceOnly ?? isReduceOnly(side, mode)` |
+| `isReduceOnly`（`src/grid.js:19`） | long→sell 减仓、short→buy 减仓、neutral→false（开仓）；recover 腿显式 true，不会被推导覆盖 |
+| 部分成功/部分拒绝的响应处理 | 逐笔 `placeLimitOrder` 各自返回/抛错，**天然逐笔**——不存在"批量整体成功"的假象 |
+
+**所以 08:23 那 66 张单不能用"批量丢标志"解释。** 按 P1 结论（空仓下单即拒），最可能路径是：**先有仓 → 挂 reduce-only 卖单（合法）→ 成交把仓平掉 → 单仍在簿**。这条路径下单时是合法的，风控抓不到；因此新增 §11.4 的"reduce-only 单 ↔ 仓位一致性"巡检（仓位归零即撤掉全部 reduce-only 单）。
+
+### 11.2 审计发现的第二个问题（已修）：被拒订单会进重试队列
+
+`bot.js:_queueRetry(o, error)` 原本对**任何**错误都排队重试。对 `REJECTED` 而言：条件不变就会被一直拒绝，结果是反复刷告警 + 长期占住档位。
+
+修复：`_queueRetry` 开头判 `error.rejected` → 记失败、发一次告警、**不排队**。
+
+### 11.3 状态机转移图
+
+```
+                         ┌──────────────────────────────────────────┐
+                         │ 账户亏损 ≥ $80                            │
+                         │ 库存 ≥ 100% 最大允许库存                  │
+                         │ 账本一致性巡检不通过                       │
+                         │ 已有持久化 haltReason（重启也不清）        │
+                         ▼                                          │
+  RUNNING ──────────► DEFENSIVE ───────────────────────────────► HALTED
+     ▲                    │                                        │
+     │                    │ 破界（价格在区间外）                    │
+     │                    │ 库存 ≥ 50%（降级）/ ≥ 75%（封锁加仓方向）│
+     │                    │ 成交偏置（20 笔/60 分钟内单边开仓且库存同向）
+     │                    │ 账户亏损 ≥ $60                          │
+     │                    └────────────────────────────────────────┘
+     │
+     │  ⚠ 没有任何自动路径能从 HALTED/DEFENSIVE 回到 RUNNING
+     │
+     └──(人工批准)── RECOVERY_PENDING ◄──(全部恢复条件满足，只提醒不自动进)
+```
+
+**恢复条件（缺一不可）**：价格回到区间内 · 连续 2 根 1h 收盘站稳下沿 · 持仓 ≤ 最大库存 10% · 无未撤订单 · `outOfRange=false` · 账本一致。
+
+**防守态允许什么**：减仓、平仓、已验证的 `reduceOnly` 回收腿。**禁止什么**：任何新增开仓腿、自动重锚、自动恢复普通网格。
+
+### 11.4 三条风险线的职责划分
+
+| 线 | 触发 | 语义 | 是否最大损失 |
+|---|---|---|---|
+| `$60` | 当前持仓按盘口价的未实现亏损 | **持仓级止损触发阈值** | ❌ 不是 |
+| 亏损 ≥ $40 | `equity < startBalance−40` | WARN，禁止升量 | ❌ |
+| 亏损 ≥ $60 | `equity < startBalance−60` | 进 DEFENSIVE，停新增风险 | ❌ |
+| 亏损 ≥ $80 | `equity < startBalance−80` | **HALTED（账户级最终熔断）** | 作为策略硬停线，仍不等于绝对损失保证 |
+
+跳空、滑点、API 延迟、累计已实现亏损都可能让实际损失越过任何一条线。
+
+### 11.5 HALT 线持久化位置
+
+- 文件：`<repo>/.state.json` → `ar.guard`（与 `ar.running`、`ar.config` 同级）
+- 字段：`haltReason`（粘滞，不被后续原因覆盖）、`haltedAt`、`startBalance`、`startBalanceAt`
+- **`startBalance` 一旦写入永不覆盖**——亏钱重启不会把它改写成当前 equity，否则"重启即重置亏损"就等于没有熔断线
+- 恢复：只能 `bot.clearHalt()`（人工），没有任何定时器/对账路径会清除它
+
+### 11.6 订单—仓位一致性巡检（每次风控评估都跑）
+
+任一成立即 HALTED：仓位与本地预期不符 · 未识别成交 > 0 · 未跟踪成交 > 0 · 被拒订单出现在台账 · reduceOnly 单被当开仓 · 挂单数交易所 ≠ 本地 · 订单状态无法确认 · 账户熔断线触发。
+
+### 11.7 测试结果
+
+| 套件 | 结果 |
+|---|---|
+| `test/guard.test.js`（新增 18 项：状态转移 / HALTED 粘滞 / startBalance 不覆盖 / position_delta / unknown_fill / 恢复条件 / 幂等 / 乱序成交） | **18 passed, 0 failed** |
+| `test/bot.test.js`（新增 2 项：REJECTED 不进台账不重试；recover 全部 reduceOnly） | **37 passed, 0 failed** |
+| `test/ar.test.js`（新增 CANCELED 分支） | **41 passed, 0 failed** |
+| 全量 `npm test` | **EXIT 0** |
+
+### 11.8 仍未解决
+
+1. **"挂单后仓位归零、单仍在簿、成交是否开仓"未实测**——只有降低暴露（一致性巡检 + 归零即撤），没有拿到反例或正例。
+2. `recovery` 本地标记在 `seedOrders` 补种路径上不带（只影响本地分类，不影响交易所 `reduceOnly`）。
+3. 主网 `accountIndex` 与资金账户仍需人工确认（0 号账户持有 $250）。
+4. 08:23 事件无当日仓位的逐秒快照，无法 100% 复原。

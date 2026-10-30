@@ -543,4 +543,13 @@ test('HTTP 200 但 status=REJECTED 必须当失败，不许写进 _tracked（幽
   const r3 = await ex3.placeLimitOrder(args);
   assert.equal(r3.status, 'FILLED', 'FILLED 要原样透出');
   assert.equal(ex3._tracked.size, 1);
+
+  // CANCELED 与 REJECTED 同等对待：订单没在簿上，就不能记成"已挂出"
+  const ex4 = mk();
+  ex4._http = async (m, path) => (path.includes('placeOrder') ? { orderId: 'cx-1', status: 'CANCELED' } : markets);
+  await ex4._loadMarkets(true);
+  let err4 = null;
+  try { await ex4.placeLimitOrder(args); } catch (e) { err4 = e; }
+  assert.ok(err4 && err4.rejected === true, 'CANCELED 也必须当失败');
+  assert.equal(ex4._tracked.size, 0, 'CANCELED 不许进台账');
 });

@@ -4,6 +4,31 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.44] - 2026-10-30
+
+### P3：风控状态机 / 账户级熔断线 / 订单-仓位一致性巡检
+
+**新增 `src/guard.js`**（纯逻辑，无 IO，全部可由 ctx 注入测试）：
+- `evaluateRisk()` 四态状态机：`RUNNING / DEFENSIVE / HALTED / RECOVERY_PENDING`
+- 库存偏置：50% 降级、75% 封锁加仓方向、100% 熔断
+- 破界：停止全部新增开仓腿（减仓/回收照常放行）
+- 成交偏置：20 笔 / 60 分钟内单边开仓且库存同向累积 → DEFENSIVE
+- 账户三条线：`-$40` 预警、`-$60` 防守、`-$80` 熔断
+- `checkConsistency()`：仓位不符 / 未识别成交 / 被拒订单在台账 / reduceOnly 误判 / 挂单数不符 → HALTED
+- `canEnterRecovery()`：六项条件全满足也只到 `RECOVERY_PENDING`，需人工批准
+- `HaltLedger`：熔断原因粘滞、`startBalance` 只锁一次（亏钱重启不改写起点）
+
+**`bot.js` 接线**：
+- `_place()` 前置 `_guardAllowsOrder()`：HALTED/破界/库存封锁时拦掉开仓腿，减仓腿永远放行
+- `_recomputeRisk()` 末尾 `_applyGuard()`；HALTED 立即写入持久化账本并告警
+- `_queueRetry()` 遇到 `error.rejected` **不再重试**（此前被交易所拒绝的单会被反复排队，条件不变就会一直失败）
+- 快照新增 `guard` / `guardState`，`.state.json` 的 `ar.guard` 即熔断持久化位置
+- 新增 `clearHalt()` / `recoveryChecklist()`
+
+**审计结论**：`arcus.js` **没有批量下单接口**，`bot.js` 的 `batchSize` 只是并发分片、实际逐笔 `_place` 调用，因此"批量路径丢失 reduceOnly"不可能发生；08:23 那 66 张单应按"先有仓挂单 → 成交平仓 → 单仍在簿"解释，已加仓位归零即撤 reduce-only 单的巡检方向。
+
+**测试**：新增 `test/guard.test.js` 18 项；`test/bot.test.js` 加 REJECTED 不重试 / recover 全 reduceOnly 两项（37 项）；`test/ar.test.js` 加 CANCELED 分支（41 项）。全量 `npm test` EXIT 0。
+
 ## [Unreleased]
 
 ## [1.6.42] - 2026-10-27
