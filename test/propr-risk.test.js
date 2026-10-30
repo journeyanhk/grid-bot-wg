@@ -86,6 +86,22 @@ const good = {
 }
 
 {
+  // 没有风控快照 → 不允许开仓
+  const g = evaluateWriteGate({ ...good, risk: null });
+  assert.equal(g.allowOpen, false);
+  assert.ok(g.reasons.some((r) => r.includes('未知')));
+}
+
+{
+  // gross 库存上限
+  const g = evaluateWriteGate({ ...good, inventoryBtc: 0.0055, newQty: 0.001, maxInventoryBtc: 0.006 });
+  assert.equal(g.allowOpen, false);
+  assert.ok(g.reasons.some((r) => r.includes('库存超限')));
+  const ok = evaluateWriteGate({ ...good, inventoryBtc: 0.004, newQty: 0.001, maxInventoryBtc: 0.006 });
+  assert.equal(ok.allowOpen, true);
+}
+
+{
   // 双边策略：默认 freeze；cap 需要人工 ack，且每侧有上限
   const dual = { long: { size: 0.002 }, short: { size: 0.002 } };
   const f = evaluateDualSide({ positions: dual, policy: 'freeze' });

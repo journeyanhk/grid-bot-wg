@@ -84,9 +84,13 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   // sim-write 的线上 payload 必须带 positionSide 与 GTX
   const posted = [];
   const fake = { writeAttemptCount: 0, post: async (route, args, body) => { posted.push(body.orders[0]); return { data: [{ orderId: 'o1' }] }; } };
-  const ex = new ProprExchange({ mode: 'sim-write', accountId: 'urn:prp-account:x', apiKey: 'k', timeInForce: 'GTX' });
+  const ex = new ProprExchange({ mode: 'sim-write', accountId: 'urn:prp-account:x', apiKey: 'k', timeInForce: 'GTX', allowLive: true, maxInvUsd: 700, maxInvBtc: 0.006 });
   ex.client = fake;
   ex.writer = new (await import('../src/exchange/pr/write.js')).ProprWriter({ client: fake, accountId: 'urn:prp-account:x', asset: 'BTC' });
+  ex.attempt = { status: 'active' };
+  ex.lastOkAt = Date.now();
+  ex._risk = { allowOpen: true, state: 'NORMAL' };
+  ex._positions = { long: null, short: null, dualSide: false, netSize: 0 };
   await ex.placeLimitOrder({ side: 'buy', price: 76000, sizeBase: 0.001, reduceOnly: false, levelIndex: 0 });
   await ex.placeLimitOrder({ side: 'sell', price: 80000, sizeBase: 0.001, reduceOnly: true, levelIndex: 5 });
   assert.equal(posted[0].positionSide, 'long');
@@ -94,6 +98,54 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   assert.equal(posted[1].positionSide, 'long', 'reduceOnly 卖单平的是多仓');
   assert.equal(posted[1].reduceOnly, true);
   ex.stop();
+}
+
+{
+  // P0：写门必须挡在真实写路径上（开仓才挡；reduceOnly 永远放行）
+  const { ProprOpeningBlockedError } = await import('../src/exchange/pr/errors.js');
+  const mkEx = async (over = {}) => {
+    const posted = [];
+    const fake = { writeAttemptCount: 0, post: async (r, a, body) => { posted.push(body.orders[0]); return { data: [{ orderId: 'o' + posted.length }] }; } };
+    const ex = new ProprExchange({ mode: 'sim-write', accountId: 'urn:prp-account:x', apiKey: 'k', allowLive: true, maxInvUsd: 700, maxInvBtc: 0.006, ...over.cfg });
+    ex.client = fake;
+    ex.writer = new (await import('../src/exchange/pr/write.js')).ProprWriter({ client: fake, accountId: 'urn:prp-account:x', asset: 'BTC' });
+    ex.attempt = { status: 'active' };
+    ex.lastOkAt = Date.now();
+    ex._risk = { allowOpen: true, state: 'NORMAL' };
+    ex._positions = { long: null, short: null, dualSide: false, netSize: 0 };
+    Object.assign(ex, over.state || {});
+    return { ex, posted };
+  };
+  const open = { side: 'buy', price: 76000, sizeBase: 0.001, reduceOnly: false };
+
+  // 正常放行
+  let t = await mkEx();
+  await t.ex.placeLimitOrder(open);
+  assert.equal(t.posted.length, 1);
+
+  // 五类拒绝
+  const cases = [
+    ['stale', { lastOkAt: Date.now() - 60_000 }],
+    ['attempt', { attempt: { status: 'failed' } }],
+    ['dual', { _positions: { long: { size: 0.001 }, short: { size: 0.001 }, dualSide: true, netSize: 0 } }],
+    ['risk', { _risk: { allowOpen: false, state: 'HALT_NEW' } }],
+    ['inventory', { _tracked: new Map([['a', { price: 76000, sizeBase: 0.006, reduceOnly: false }]]) }],
+  ];
+  for (const [name, state] of cases) {
+    const c = await mkEx({ state });
+    const err = await c.ex.placeLimitOrder(open).then(() => null, (e) => e);
+    assert.ok(err instanceof ProprOpeningBlockedError, name + ' 应被写门拒绝');
+    assert.equal(err.benign, true, name + ' 必须标 benign（不进重试队列）');
+    assert.equal(c.posted.length, 0, name + ' 不得发出请求');
+  }
+
+  // 同样的状态下，reduceOnly 仍然允许
+  for (const [, state] of cases) {
+    const c = await mkEx({ state });
+    c.ex._positions = { long: { size: 0.001 }, short: null, dualSide: false, netSize: 0.001 };
+    await c.ex.placeLimitOrder({ side: 'sell', price: 80000, sizeBase: 0.001, reduceOnly: true });
+    assert.equal(c.posted.length, 1, 'reduceOnly 必须放行');
+  }
 }
 
 console.log('✓ propr-adapter.test.js 全部通过');

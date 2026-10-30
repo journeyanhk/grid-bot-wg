@@ -24,6 +24,20 @@ export class ProprReadOnlyError extends Error {
   }
 }
 
+/**
+ * 开仓被风控拒绝。**benign=true**：这不是网络/交易所故障，不能被放进重试队列，
+ * 否则会每 30s 重试一次、把闸门当成故障刷屏。
+ */
+export class ProprOpeningBlockedError extends Error {
+  constructor(reasons = []) {
+    super('开仓被风控拒绝：' + (reasons.join('；') || '未知原因'));
+    this.name = 'ProprOpeningBlockedError';
+    this.benign = true;          // GridBot 的 _place/_placeMany 见 benign 只告警、不重试
+    this.riskBlocked = true;
+    this.reasons = reasons;
+  }
+}
+
 export class ProprStaleError extends Error {
   constructor(ageMs, limitMs) {
     super(`Propr 快照过期 ${Math.round(ageMs / 1000)}s（上限 ${Math.round(limitMs / 1000)}s）`);
@@ -50,6 +64,7 @@ export const CODES = Object.freeze({
  */
 export function classify(e) {
   if (e instanceof ProprReadOnlyError) return { retryable: false, terminal: true, benign: false, mayExist: false };
+  if (e instanceof ProprOpeningBlockedError) return { retryable: false, terminal: true, benign: true, mayExist: false };
   if (e instanceof ProprStaleError) return { retryable: true, terminal: false, benign: false, mayExist: false };
 
   const status = Number(e?.status) || 0;

@@ -10,8 +10,8 @@ import { ProprWriter } from './write.js';
 import { ProprPaper } from './paper.js';
 import { HlMarketData, BTC_MARKET, roundPrice, roundSize } from './market.js';
 import { parseAccount, splitPositions, openOrders, parseTrade, closeSide } from './mapper.js';
-import { computeRiskState } from './risk.js';
-import { ProprReadOnlyError } from './errors.js';
+import { computeRiskState, evaluateWriteGate } from './risk.js';
+import { ProprReadOnlyError, ProprOpeningBlockedError } from './errors.js';
 
 const MODES = new Set(['paper', 'shadow', 'sim-write']);
 
@@ -24,7 +24,8 @@ export class ProprExchange extends EventEmitter {
     this.cfg = cfg;
     this.market = BTC_MARKET;
     this.feeRate = cfg.feeMaker ?? 0.00015;
-    this.displayFeeRate = this.feeRate * 100;
+    // bot 的间距校验里 displayFeeRate 按「费率」用（再 ×2×100 转 %），必须是 0.00015，不能是 0.015
+    this.displayFeeRate = this.feeRate;
     this.balance = null;
     this.equity = null;
     this.realizedPnl = 0;
@@ -251,6 +252,26 @@ export class ProprExchange extends EventEmitter {
       this._tracked.set(r.orderId, { ...o });
       return r;
     }
+    // 写门（P0）：只有「开仓」需要过闸；reduceOnly / 平仓永远放行。
+    if (this.mode === 'sim-write' && !o.reduceOnly) {
+      const px = Number(o.price) || 0;
+      const qty = Number(o.sizeBase) || 0;
+      const gate = evaluateWriteGate({
+        mode: this.mode,
+        allowLive: !!this.cfg.allowLive,
+        attemptStatus: this.attempt?.status,
+        accountAgeMs: Date.now() - (this.lastOkAt || 0),
+        positions: this.getPositions(),
+        risk: this._risk,
+        notional: this._exposureNotional(px),
+        maxOpenNotional: this.cfg.maxInvUsd,
+        newNotional: px * qty,
+        inventoryBtc: this._inventoryBtc(),
+        maxInventoryBtc: this.cfg.maxInvBtc,
+        newQty: qty,
+      });
+      if (!gate.allowOpen) throw new ProprOpeningBlockedError(gate.reasons);
+    }
     if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset, paceMs: 120 });
     let row;
     try {
@@ -315,6 +336,29 @@ export class ProprExchange extends EventEmitter {
     return this.writer.closePosition(this.market.asset);
   }
 
+  /** 当前敞口：持仓名义 + 所有未成交 opening 挂单名义（含 reduceOnly? 不含）。 */
+  _exposureNotional(px = 0) {
+    const p = this.getPositions();
+    const price = px || this._lastPrice || 0;
+    const posN = ((p.long?.size || 0) + (p.short?.size || 0)) * price;
+    let ordN = 0;
+    for (const t of this._tracked.values()) {
+      if (t.reduceOnly) continue;
+      ordN += (Number(t.price) || 0) * (Number(t.sizeBase) || 0);
+    }
+    return posN + ordN;
+  }
+
+  /** gross 库存（long+short）＋ 在途 opening 挂单，不是 net。 */
+  _inventoryBtc() {
+    const p = this.getPositions();
+    let q = (p.long?.size || 0) + (p.short?.size || 0);
+    for (const t of this._tracked.values()) {
+      if (!t.reduceOnly) q += Number(t.sizeBase) || 0;
+    }
+    return q;
+  }
+
   /** 面板用状态：账户脱敏、双侧持仓、双边冻结、写尝试次数。 */
   getState() {
     const p = this.getPositions();
@@ -327,6 +371,8 @@ export class ProprExchange extends EventEmitter {
       short: p.short?.size ?? 0,
       dualSide: !!p.dualSide,
       net: roundSize(p.netSize ?? 0),
+      gross: roundSize((p.long?.size ?? 0) + (p.short?.size ?? 0)),
+      inventoryCapBtc: this.cfg.maxInvBtc ?? null,
       openOrders: this.mode === 'paper' ? this._paper.orders.size : (this._openOrders?.length ?? 0),
       equity: typeof this.equity === 'number' ? Math.round(this.equity * 100) / 100 : null,
       balance: typeof this.balance === 'number' ? Math.round(this.balance * 100) / 100 : null,

@@ -62,6 +62,7 @@ export function computeRiskState({
 export function evaluateWriteGate({
   mode, allowLive, attemptStatus, accountAgeMs, staleMs = DEFAULT_LIMITS.staleMs,
   positions, risk, notional = 0, maxOpenNotional = 0, newNotional = 0,
+  inventoryBtc = 0, maxInventoryBtc = 0, newQty = 0,
 }) {
   const reasons = [];
   const allowReduce = true;   // 降风险永远允许
@@ -71,9 +72,16 @@ export function evaluateWriteGate({
   if (String(attemptStatus).toLowerCase() !== 'active') reasons.push(`attempt 状态 ${attemptStatus} ≠ active`);
   if (!Number.isFinite(accountAgeMs) || accountAgeMs > staleMs) reasons.push(`账户快照过期 ${Math.round((accountAgeMs || 0) / 1000)}s`);
   if (positions?.dualSide) reasons.push('双边持仓：只允许减仓');
-  if (risk && !risk.allowOpen) reasons.push(`风控状态 ${risk.state}`);
+  if (!risk) reasons.push('风控状态未知（尚无快照）');
+  else if (!risk.allowOpen) reasons.push(`风控状态 ${risk.state}`);
   if (Number(notional) + Number(newNotional) > Number(maxOpenNotional) + 1e-9) {
     reasons.push(`名义超限 ${(Number(notional) + Number(newNotional)).toFixed(2)} > ${Number(maxOpenNotional).toFixed(2)}`);
+  }
+  if (Number(maxInventoryBtc) > 0) {
+    const gross = Number(inventoryBtc) + Number(newQty);
+    if (gross > Number(maxInventoryBtc) + 1e-12) {
+      reasons.push(`库存超限 ${gross.toFixed(4)} > ${Number(maxInventoryBtc).toFixed(4)} BTC（gross）`);
+    }
   }
   return { allowOpen: reasons.length === 0, allowReduce, reasons };
 }
