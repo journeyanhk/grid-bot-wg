@@ -148,4 +148,21 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   }
 }
 
+{
+  // tracked 生命周期：成交即删、快照缺失且过期才清（否则库存虚高会误挡补挂）
+  const ex = new ProprExchange({ mode: 'sim-write', accountId: 'urn:prp-account:x', apiKey: 'k' });
+  ex._positions = { long: null, short: null, dualSide: false };
+  ex._tracked = new Map([
+    ['live', { placedAt: Date.now() - 120_000, sizeBase: 0.001, reduceOnly: false }],
+    ['fresh', { placedAt: Date.now(), sizeBase: 0.001, reduceOnly: false }],
+    ['stale', { placedAt: Date.now() - 120_000, sizeBase: 0.001, reduceOnly: false }],
+  ]);
+  const n = ex._pruneTracked(new Set(['live']), Date.now(), 60_000);
+  assert.equal(n, 1);
+  assert.ok(ex._tracked.has('live'), '仍在挂单快照里的必须保留');
+  assert.ok(ex._tracked.has('fresh'), '宽限期内不得清');
+  assert.ok(!ex._tracked.has('stale'), '过期且不在快照的必须清');
+  assert.equal(ex._inventoryBtc(), 0.002);
+}
+
 console.log('✓ propr-adapter.test.js 全部通过');

@@ -136,6 +136,7 @@ export class ProprExchange extends EventEmitter {
       this.client.getOrders(this.cfg.accountId, { status: 'open' }),
       this.client.getTradesPage(this.cfg.accountId, { limit: 100, offset: 0 }),
     ]);
+    this._pruneTracked(new Set(openOrders(ord.rows).map((o) => String(o.orderId))));
     const a = parseAccount(acct);
     this.balance = a.balance;
     this.equity = a.equity;
@@ -159,7 +160,7 @@ export class ProprExchange extends EventEmitter {
         orderId: String(t.orderId), marketId: 0, side: t.side,
         price: t.price, sizeBase: t.qty, levelIndex: known.levelIndex,
       });
-      if (known.reduceOnly) this._tracked.delete(String(t.orderId));
+      this._tracked.delete(String(t.orderId));   // 成交即离场：不论开/平，都不能再算作在途挂单
     }
     // 双边持仓：进入时告警一次；退出时复位
     if (this._positions?.dualSide && !this._dualSideActive) {
@@ -173,6 +174,16 @@ export class ProprExchange extends EventEmitter {
   }
 
   _dayKey(now = Date.now()) { return Math.floor(now / 86_400_000); }
+
+  /** 快照里已不存在、且已过宽限期的挂单 → 从 tracked 清掉（否则库存虚高、补挂被误挡）。 */
+  _pruneTracked(liveIds, now = Date.now(), graceMs = 60_000) {
+    let n = 0;
+    for (const [id, t] of this._tracked) {
+      if (liveIds.has(id)) continue;
+      if (now - (t.placedAt || 0) > graceMs) { this._tracked.delete(id); n++; }
+    }
+    return n;
+  }
 
   _emitPrice(px) {
     if (px === this._lastPrice) return;
@@ -287,7 +298,7 @@ export class ProprExchange extends EventEmitter {
       }
       throw e;
     }
-    this._tracked.set(String(row.orderId), { levelIndex: o.levelIndex, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: !!o.reduceOnly, opening: o.opening !== false });
+    this._tracked.set(String(row.orderId), { levelIndex: o.levelIndex, side: o.side, price: o.price, sizeBase: o.sizeBase, reduceOnly: !!o.reduceOnly, opening: o.opening !== false, placedAt: Date.now() });
     return { orderId: row.orderId, price: o.price, sizeBase: o.sizeBase };
   }
 
