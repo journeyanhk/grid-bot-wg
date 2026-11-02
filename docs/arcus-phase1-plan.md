@@ -898,3 +898,52 @@ spacingPct  0.2   perRungNet $0.0132
 **若 projectedPeak 停在 30–50 格，即使实际库存没超 8 格，也判投影模型未修好。**
 
 24h 到 **10-31 17:31**；完成格 < 2×小时数则只写“运行稳定、样本不足”，延长到 48h。
+
+## 19. 观察窗期的三次崩溃与两条安全修复（v1.6.52）
+
+### 19.1 事故时间线（均为 testnet A，PORT 8097，HALTED 态）
+
+| 时间（CST） | 现象 | 判读 |
+|---|---|---|
+| 10-31 04:22 | `账本不一致：交易所 -0.0002 vs 本地 0` → HALTED | 熔断**正确**；根因是空仓滞留 2 张 reduceOnly SELL 成交后开出反向仓 |
+| 11-02 08:49 | 429 风暴（openOrders/fills 重试）后进程消失、API=000，日志无 FATAL/OOM | 首轮用 `setsid nohup` 直起，无 supervisor，死了没人拉 |
+| 11-02 12:02 | `[watchdog] ar 活动停滞 96s（阈值 90s），主动退出等待 supervisor 重启` | **误判**：行情断流被当成机器人卡死 |
+
+### 19.2 根因：活动水位只由三条外部路径驱动
+
+`process.exit(1)` 由 server 端 watchdog 发起，判据是 `bot._lastActivityAt` 超过 90s 未推进。
+而 `_touch()` 原来只有三个调用点：`_handlePrice`（WS 帧）、`_handleFill`（成交）、
+`reconcileOpenOrders`（30s 定时器）。任一条断掉，水位就归零：
+
+- WS 半开（socket open、30s 零帧）时，`_wsReady` 在 **open 事件**里就被置 true，
+  `_pollPrices` 的 `if (this._wsReady) return` 于是永久短路 REST 兜底 → 价格冻结 →
+  `_handlePrice` 永不触发。这正是 2026-10-25「价格冻结 1141s」的同源缺陷：当时只修了
+  「按最近收帧判活」，没修「就绪判定」。
+- 429 限流下 reconcile 卡在重试里，30s 节拍被拉长，水位随之停滞。
+
+即：**watchdog 把「行情源故障」判成了「机器人卡死」，等于给行情抖动装了自杀开关。**
+
+### 19.3 修复（三处 + 一处巡检）
+
+1. **`_wsReady` 语义收紧**（`exchange/ar/arcus.js`）：open 只记连接时刻，收到带 bid/ask 的
+   真帧才置 ready。半开期间 REST 兜底持续工作，价格不再冻结（实测重启后 `priceStale=False`、
+   `lastOkAgeMs≈110ms`，而 WS 仍在半开状态）。
+2. **风控心跳兜底水位**（`_runRiskCycle` 入口 `_touch()`）：5s 一次、无条件触发，
+   与外部行情路径彻底解耦。watchdog 从此只在事件循环真卡死时生效。
+3. **暂停态豁免**（`_pausedRuntime` + server watchdog `continue`）：撤单确认期间定时器被
+   刻意摘掉，本来没有刷新源；429 下可持续数分钟，不能当成停滞。恢复路径（含 running=false
+   的提前 return）必定清标记。
+4. **空仓孤儿减仓腿巡检**（`_auditOrphanReduceOnly`，挂 reconcile 尾部）：台账里有
+   reduceOnly/recovery 腿、且真实持仓连续 2 轮为 0 → 撤销。reduce-only 的「只减不翻」
+   只在下单时校验，已挂出的单在持仓消失后成交会直接开反向仓——必须由巡检兜住。
+
+### 19.4 监督：`/data/run_window_supervisor.sh`
+
+只负责「node 退出后 10s 拉起」，不改参数、不重置 `.state.json`、没有 `.state.json` 闸门
+（观察窗需要 resume 语义）。日志里以 `[supervisor] start` / `[supervisor] exit code=N`
+留痕，巡检可据此区分「进程自杀」与「外部重启」。
+
+### 19.5 对验收的影响
+
+三次崩溃全部计入观察窗「错误自动重启」项，第二窗结论仍为**未通过 / 样本不足**
+（有效窗口仅 27 分钟、完成 6 格 vs 期望 43）。第三窗必须在 v1.6.52 上重开。
