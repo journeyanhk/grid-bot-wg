@@ -171,6 +171,9 @@ export class ProprExchange extends EventEmitter {
     }
     const px = await this._marketData.getPrice(this.market.symbol).catch(() => null);
     if (px) this._emitPrice(px);
+
+    // 孤儿仓位守卫：持仓存在但没有任何 reduceOnly 平仓腿 → 自动补一条（只在 sim-write）
+    this._ensureExits().catch((e) => this.emit('error', e));
   }
 
   _dayKey(now = Date.now()) { return Math.floor(now / 86_400_000); }
@@ -345,6 +348,60 @@ export class ProprExchange extends EventEmitter {
     }
     if (!this.writer) this.writer = new ProprWriter({ client: this.client, accountId: this.cfg.accountId, asset: this.market.asset });
     return this.writer.closePosition(this.market.asset);
+  }
+
+  /**
+   * 孤儿仓位守卫：每个非零持仓必须至少有一条同方向的 reduceOnly 挂单。
+   * 没有就补一条在「均价 ∓ exitOffsetPct」的位置（默认一格 0.67%），锁住利润并给出退出。
+   * 幂等：已有 reduceOnly 腿就跳过；失败后 60s 内不重试，避免刷单。
+   */
+  async _ensureExits() {
+    if (this.mode !== 'sim-write') return 0;
+    if (Date.now() < (this._exitCooldownUntil || 0)) return 0;   // 刚补过：给快照一轮时间，防重复
+    const p = this.getPositions();
+    // 退出腿数量 = 交易所快照 ∪ 本地 tracked（按 orderId 去重，否则刚挂的看不到）
+    const map = new Map();
+    for (const o of this._openOrders || []) map.set(o.orderId, { side: o.side, ro: o.reduceOnly, qty: Number(o.qty) || 0 });
+    for (const [id, t] of this._tracked) {
+      if (map.has(id)) continue;
+      map.set(id, { side: t.side, ro: !!t.reduceOnly, qty: Number(t.sizeBase) || 0 });
+    }
+    const exitQty = (side) => {
+      const want = closeSide(side);
+      let q = 0;
+      for (const o of map.values()) if (o.ro && o.side === want) q += o.qty;
+      return Math.round(q * 1e8) / 1e8;
+    };
+
+    let placed = 0;
+    for (const side of ['long', 'short']) {
+      const pos = p[side];
+      if (!pos || pos.size <= 0) continue;
+      const have = exitQty(side);
+      if (have + 1e-9 >= pos.size) {
+        if (have > pos.size * 1.2 + 1e-9) {
+          this.emit('error', new Error(`退出腿过量：${side} 仓位 ${pos.size}，退出单合计 ${have}`));
+        }
+        continue;
+      }
+      const off = Number(this.cfg.exitOffsetPct) > 0 ? Number(this.cfg.exitOffsetPct) : 0.0067;
+      const px = roundPrice(side === 'short' ? pos.entryPrice * (1 - off) : pos.entryPrice * (1 + off));
+      const qty = roundSize(pos.size - have);      // 只补缺口
+      if (!(qty > 0) || !(px > 0)) continue;
+      try {
+        await this.placeLimitOrder({
+          side: closeSide(side), positionSide: side, qty, price: px,
+          reduceOnly: true, opening: false, levelIndex: -1,
+        });
+        this._exitCooldownUntil = Date.now() + 30_000;
+        placed++;
+        this.emit('exits-placed', { side, qty, price: px });
+      } catch (e) {
+        this._exitCooldownUntil = Date.now() + 60_000;
+        this.emit('error', new Error(`孤儿仓位补腿失败（${side} ${qty}）：${e.message}`));
+      }
+    }
+    return placed;
   }
 
   /** 当前敞口：持仓名义 + 所有未成交 opening 挂单名义（含 reduceOnly? 不含）。 */

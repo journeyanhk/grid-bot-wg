@@ -165,4 +165,48 @@ import { ProprReadOnlyError } from '../src/exchange/pr/errors.js';
   assert.equal(ex._inventoryBtc(), 0.002);
 }
 
+{
+  // 孤儿仓位守卫：补缺口、按数量判重、冷却期内不重复
+  const posted = [];
+  const fake = { writeAttemptCount: 0, post: async (r, a, body) => { posted.push(body.orders[0]); return { data: [{ orderId: 'x' + posted.length }] }; } };
+  const ex = new ProprExchange({ mode: 'sim-write', accountId: 'urn:prp-account:x', apiKey: 'k', allowLive: true, maxInvUsd: 700, maxInvBtc: 0.006, exitOffsetPct: 0.0067 });
+  ex.client = fake;
+  ex.writer = new (await import('../src/exchange/pr/write.js')).ProprWriter({ client: fake, accountId: 'urn:prp-account:x', asset: 'BTC' });
+  ex.attempt = { status: 'active' };
+  ex.lastOkAt = Date.now();
+  ex._risk = { allowOpen: true, state: 'NORMAL' };
+  ex._openOrders = [];
+  ex._positions = { long: null, short: { side: 'short', size: 0.002, entryPrice: 78219.5 }, dualSide: false };
+
+  assert.equal(await ex._ensureExits(), 1);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].side, 'buy');
+  assert.equal(posted[0].positionSide, 'short');
+  assert.equal(posted[0].reduceOnly, true);
+  assert.equal(posted[0].quantity, '0.002');
+  assert.ok(Math.abs(Number(posted[0].price) - 78219.5 * (1 - 0.0067)) < 1);
+
+  // 立刻再跑一次：本地 tracked 已记，冷却期内不得重复
+  assert.equal(await ex._ensureExits(), 0);
+  assert.equal(posted.length, 1);
+
+  // 快照里已有同等数量退出腿 → 跳过（清掉本地态模拟"重启后"）
+  ex._tracked.clear();
+  ex._exitCooldownUntil = 0;
+  ex._openOrders = [{ orderId: 'y', reduceOnly: true, positionSide: 'short', side: 'buy', qty: 0.002 }];
+  assert.equal(await ex._ensureExits(), 0);
+
+  // 快照只有一半 → 只补缺口 0.001
+  ex._openOrders = [{ orderId: 'y', reduceOnly: true, positionSide: 'short', side: 'buy', qty: 0.001 }];
+  assert.equal(await ex._ensureExits(), 1);
+  assert.equal(posted[1].quantity, '0.001');
+
+  // 多头同理
+  ex._tracked.clear(); ex._exitCooldownUntil = 0; ex._openOrders = [];
+  ex._positions = { long: { side: 'long', size: 0.001, entryPrice: 76000 }, short: null, dualSide: false };
+  assert.equal(await ex._ensureExits(), 1);
+  assert.equal(posted[2].side, 'sell');
+  assert.equal(posted[2].positionSide, 'long');
+}
+
 console.log('✓ propr-adapter.test.js 全部通过');

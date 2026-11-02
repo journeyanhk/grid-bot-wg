@@ -205,6 +205,7 @@ export function getConfig() {
     dualAckFile: process.env.PR_DUAL_ACK_FILE || '.runtime/pr-dual-ack',
     maxInvUsd: Number(process.env.PR_MAX_INV_USD || 1500),
     maxInvBtc: Number(process.env.PR_MAX_INV_BTC || 0.02),
+    exitOffsetPct: Number(process.env.PR_EXIT_OFFSET_PCT || 0.0067),
     capacityLeverage: Number(process.env.PR_CAPACITY_LEVERAGE || 1),
     feeMaker: Number(process.env.PR_FEE_MAKER || 0.00015),
     feeTaker: Number(process.env.PR_FEE_TAKER || 0.00045),
