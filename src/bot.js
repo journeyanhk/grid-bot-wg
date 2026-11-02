@@ -2561,6 +2561,44 @@ export class GridBot {
     }
     this._drainRetryQueue().catch(() => {});
     this._auditInventoryDrift();
+    this._auditOrphanReduceOnly().catch(() => {});
+  }
+
+  /**
+   * 孤儿减仓腿巡检：真实持仓为 0，但本地台账里还留着 reduce-only / 回收阶梯单。
+   *
+   * reduce-only 的「只减不翻」只在【下单那一刻】校验方向：已经挂在盘上的 reduce-only
+   * 单，在持仓消失后成交不会拒单，而是直接开出反向仓。2026-10-31 testnet 实测——空仓
+   * 状态滞留 2 张 reduceOnly SELL @75,587.3 / @75,742.2，价格从 70.1k 回升到 75.6k 后
+   * 成交，交易所持仓变成 −0.0002，与两张单均价 75,664.75 完全吻合，随即触发
+   * 「仓位不一致」熔断（这次熔断本身是对的，但根因是腿该撤没撤）。
+   *
+   * 判据用「连续 2 轮 0 持仓」抵御持仓接口的瞬时空响应，避免误撤真正的减仓腿。
+   */
+  async _auditOrphanReduceOnly() {
+    if (!this.running || !this.config) return;
+    const legs = [...this.active.entries()].filter(([, o]) => o.reduceOnly || o.recovery);
+    if (!legs.length) { this._orphanNoPosStreak = 0; return; }
+    const pos = this.ex.getPosition?.(this.config.marketId);
+    const size = pos && Number.isFinite(Number(pos.sizeBase)) ? Number(pos.sizeBase) : NaN;
+    if (!Number.isFinite(size)) return;              // 拿不到真实持仓就不动，宁可少做
+    const eps = (Number(this.config.sizeBase) || 0) * 0.01;
+    if (Math.abs(size) > eps) { this._orphanNoPosStreak = 0; return; }
+    this._orphanNoPosStreak = (this._orphanNoPosStreak || 0) + 1;
+    if (this._orphanNoPosStreak < 2) return;
+    this._orphanNoPosStreak = 0;
+    let gone = 0;
+    for (const [id] of legs) {
+      try {
+        await this.ex.cancelOrder?.(this.config.marketId, id);
+        this.active.delete(id);
+        gone += 1;
+      } catch { /* 撤不掉的留到下一轮 */ }
+    }
+    if (gone) {
+      this._alert(`⚠️ 空仓但盘上仍有 ${legs.length} 张减仓腿，已撤销 ${gone} 张：reduce-only 只在成交时校验方向，持仓归零后成交会开出反向仓。`);
+      this._changed();
+    }
   }
 
   /**
