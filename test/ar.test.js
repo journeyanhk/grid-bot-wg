@@ -452,6 +452,27 @@ test('isDustFill: 测试网碎单按名义额过滤，正常成交不误杀', ()
   assert.equal(isDustFill({ sizeBase: 0.00001, price: 82000 }), true, '0.82 USDC 仍低于阈值');
 });
 
+// 回归：TCP open 不等于有行情。2026-11-02 实测半开连接（socket open、零帧）若在 open 事件里
+// 就置 _wsReady=true，`_pollPrices` 的 `if (this._wsReady) return` 会永久短路 REST 兜底：
+// 价格冻结 → bot 收不到 price 事件 → 活动水位停滞 → watchdog 判「停滞 96s」自杀。
+test('WS 收到带价格的帧才算就绪，订阅确认帧不得置 ready', () => {
+  const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network: 'testnet' });
+  ex.markets.set('m1', { marketId: 'm1', symbol: 'BTC-USD', stepPrice: 0.1 });
+  ex._wsReady = false;
+
+  ex._onWsMessage(JSON.stringify({ type: 'subscribed', channel: 'bbo', id: 'BTC-USD', contents: {} }));
+  assert.equal(ex._wsReady, false, '订阅确认不含价格，不得把 WS 标记为就绪（否则 REST 兜底被短路）');
+
+  const prices = [];
+  ex.on('price', (p) => prices.push(p));
+  ex._onWsMessage(JSON.stringify({
+    type: 'channel_data', channel: 'bbo', id: 'BTC-USD',
+    contents: { bestBid: { price: 100 }, bestAsk: { price: 100.2 } },
+  }));
+  assert.equal(ex._wsReady, true, '收到带价格的帧后置为就绪');
+  assert.equal(prices.length, 1, '必须下发 price 事件给 bot');
+});
+
 // WS 半开：30 秒没有任何帧必须强断重连并切 REST 兜底（2026-10-25 价格冻结 1141s 回归）
 test('WS 静默超过阈值时强制断开并走 REST 兜底', () => {
   const ex = new ArcusExchange({ address: '0x' + '1'.repeat(40), keyHex: 'aa'.repeat(32), network: 'testnet' });

@@ -356,6 +356,9 @@ export class GridBot {
 
   /** Temporarily stop bot-side fill/price handling while cancellation is verified. */
   _pauseTradingRuntime() {
+    // 暂停期间对账/风控定时器都被摘掉，活动水位没有任何刷新源；429 或交易所抖动下
+    // 撤单确认可能持续数分钟，watchdog 会把这段时间当成「停滞」。显式标记让 watchdog 豁免。
+    this._pausedRuntime = true;
     this._stopReconcileTimer();
     this.ex.off('fill', this._onFill);
     this.ex.off('price', this._onPrice);
@@ -363,7 +366,9 @@ export class GridBot {
 
   /** Restore tracking after a failed cancellation without duplicating listeners. */
   _resumeTradingRuntime() {
+    this._pausedRuntime = false;   // 先清标记：running=false 时也要解除豁免，否则会长期屏蔽 watchdog
     if (!this.running || !this.config) return;
+    this._pausedRuntime = false;
     for (const [orderId, info] of this.active) {
       try {
         this.ex.adoptOrder?.({
@@ -1355,6 +1360,11 @@ export class GridBot {
    * 带并发锁与最小间隔，避免重入与每 tick 重算。
    */
   _runRiskCycle(reason = 'timer') {
+    // 活动水位兜底刷新：原来只有 price / fill / reconcile 三条外部路径会 _touch()，
+    // 任一条断掉（WS 半开零帧、429 让对账卡在重试里）都会让 server 端 watchdog 把
+    // 「行情源故障」误判成「机器人停滞」而 process.exit(1)。风控心跳 5s 一次且无条件
+    // 触发，用它兜底后 watchdog 才真正只在事件循环卡死时生效。
+    this._touch();
     if (!this.running) return this.guardState;
     if (this._guardInFlight) return this.guardState;
     const now = Date.now();

@@ -538,8 +538,12 @@ export class ArcusExchange extends EventEmitter {
     this._ws = ws;
     this._wsOpenedAt = Date.now();
     ws.addEventListener('open', () => {
-      this._wsReady = true;
-    this._lastWsMsgAt = Date.now();
+      // 2026-11-02 实测：半开连接（socket open、但一帧都不来）下这里置 true，会让
+      // `_pollPrices` 的 `if (this._wsReady) return` 永久短路 REST 兜底——价格冻结、
+      // bot 收不到 price 事件、活动水位只靠对账定时器，最终被 watchdog 判「停滞 96s」
+      // 自杀。TCP open 只代表连上，不代表有行情：改为「收到首帧才算 ready」。
+      this._wsConnectedAt = Date.now();
+      this._lastWsMsgAt = Date.now();
       this._wsRetryMs = 1000;
       this._wsDegraded = null;
       this._wsSubscribed.clear();
@@ -626,7 +630,11 @@ export class ArcusExchange extends EventEmitter {
     if (!m) return;
     const bid = Number(contents.bestBid?.price ?? contents.bid?.price ?? contents.bid);
     const ask = Number(contents.bestAsk?.price ?? contents.ask?.price ?? contents.ask);
-    if (bid > 0 && ask > 0) this._setPrice(m.marketId, (bid + ask) / 2, { source: 'ws' });
+    if (bid > 0 && ask > 0) {
+      // 收到带价格的真帧才算 WS 就绪——只有这个状态才允许短路 REST 兜底。
+      this._wsReady = true;
+      this._setPrice(m.marketId, (bid + ask) / 2, { source: 'ws' });
+    }
   }
 
   // ── 成交真值（REST 游标 + 去重）────────────────────────────────────────

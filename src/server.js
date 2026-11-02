@@ -1076,6 +1076,9 @@ const watchdog = setInterval(() => {
   const now = Date.now();
   for (const [key, bot] of Object.entries({ de: deBot, ex: exBot, rs: rsBot, ar: arBot, lr: lrBot, hl: hlBot, va: vaBot })) {
     if (!bot?.running) continue;
+    // 暂停运行态（撤单确认进行中）刻意摘掉了对账/风控定时器，没有任何刷新源，
+    // 这段时间的「停滞」是设计内状态，不是故障。
+    if (bot._pausedRuntime) continue;
     const last = Number(bot._lastActivityAt) || 0;
     if (!last) continue;
     const stale = now - last;
