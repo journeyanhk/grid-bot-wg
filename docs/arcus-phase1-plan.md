@@ -947,3 +947,53 @@ spacingPct  0.2   perRungNet $0.0132
 
 三次崩溃全部计入观察窗「错误自动重启」项，第二窗结论仍为**未通过 / 样本不足**
 （有效窗口仅 27 分钟、完成 6 格 vs 期望 43）。第三窗必须在 v1.6.52 上重开。
+
+---
+
+## 20. 第三观察窗：清账重开（2026-11-02 19:03 CST）
+
+第二窗判「未通过 / 样本不足」后，用户 19:00 批准「平掉后再开」。处置：
+
+### 20.1 清账
+
+| 动作 | 结果 |
+|---|---|
+| `closePosition(1)` IOC reduceOnly 平空 | `-0.0002 → 0`，一轮轮询确认 |
+| 交易所核对 | `positions={} total=0`、`openOrders=0` |
+| 实例停机 | supervisor 先停（否则会拉起），再停 node；`/api/ar/state` 返回 000 才算干净 |
+| `.state.json` 归档 | `/data/arcus-window-archive-w3-20261102-1901/`（含 `.state.halted-backup.json` + README） |
+
+归档而非原地清空，是因为第二窗的 `rungs=6 / gridProfit=+0.09 / equity 837.34→834.76`
+是唯一一份「真实成交但无效」的样本，后面复盘「为什么 27 分钟就熔断」要用。
+
+### 20.2 第三窗参数（与第二窗完全一致，不可改）
+
+```
+spacing 0.20% / sizeBase 0.0001 / activeWindowGrids 4
+maxInventory 8 / warn 4 / block 6 / halt 8 / recover / stopLoss 60
+区间 72334.6 – 82557.4（66 格，等分 155.0 ≈ 0.1995%）
+```
+
+`POST /api/ar/start` 后由服务端强制回填 `maxInventoryGrids` 等运维级参数（请求体不能覆盖），
+回执中的 `config` 即为实际生效值。
+
+### 20.3 启动回执（19:03）
+
+`running=true`、`guard=RUNNING`（不再是 HALTED）、`open=8`（B4/S4）、
+`position` 空、`actualInv=0`、`projInv=3` 格、`gaps=0`；
+交易所侧核对 8 单，价格 78,065.6 – 79,149.8（现价 78,590.5）。
+
+### 20.4 观测口径调整
+
+- 采样文件分代：第二窗末 4,353 行另存 `arcus-window-w2-final.jsonl`，`arcus-window.jsonl` 从 0 起。
+- `scripts/arcus_mainnet_check.py` 升 **v3**，新增 `--network testnet`：自动读本机
+  `127.0.0.1:8097/api/ar/state`，把 guard/投影库存纳入判定，并新增 `guard-halt` 模式——
+  熔断撤光挂单不再被误报成「疑似停机 level=2」，而是 level=1 + 透传熔断原因；
+  同时校验本地与交易所挂单视图一致性。主网行为不变（默认 `mainnet`）。
+
+### 20.5 第三窗看点
+
+1. 能否稳定跨过 30 分钟（第二窗只活了 27 分钟就因 `-0.0002` 熔断）。
+2. `projInv` 是否会顶到 6 格封锁线——`activeWindowGrids=4` 的设计意图就是让它碰不到。
+3. 无 WS 帧 + REST 兜底下的取价连续性（`priceStale` 应恒 false）。
+4. 30 分钟无新挂单、真空洞、并行补腿冲突是否复发。
