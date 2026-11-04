@@ -379,8 +379,11 @@ export class ProprExchange extends EventEmitter {
       if (!pos || pos.size <= 0) continue;
       const have = exitQty(side);
       if (have + 1e-9 >= pos.size) {
-        if (have > pos.size * 1.2 + 1e-9) {
-          this.emit('error', new Error(`退出腿过量：${side} 仓位 ${pos.size}，退出单合计 ${have}`));
+        // 过量退出腿（bot 的配对腿与守卫腿叠加）是良性的：reduceOnly 最多平到 0。
+        // 只做低频提示，避免每 5 秒一条 error 刷屏。
+        if (have > pos.size * 1.2 + 1e-9 && Date.now() - (this._exitOverAlertAt || 0) > 600_000) {
+          this._exitOverAlertAt = Date.now();
+          this.emit('error', new Error(`退出腿过量（提示，非故障）：${side} 仓位 ${pos.size}，退出单合计 ${have}`));
         }
         continue;
       }
