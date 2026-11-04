@@ -1684,7 +1684,53 @@ export class GridBot {
       this._changed();
     }
     this._drainRetryQueue().catch(() => {});
+    this.refillEmptyLevels().catch(() => {});
     this._auditInventoryDrift();
+  }
+
+
+  /**
+   * 空档列表（纯函数）：给定网格档位、已占用档位、现价，返回需要补开的档。
+   * 只补「离现价超过 1/4 格」的档，避免贴价单立即成交；顺序按离现价由近到远。
+   */
+  static emptyLevels(levels, occupied, price, spacing) {
+    const band = (Number(spacing) || 0) * 0.25;
+    const out = [];
+    for (let i = 0; i < levels.length; i++) {
+      if (occupied.has(i)) continue;
+      const lvl = levels[i];
+      if (!(lvl > 0) || !(price > 0)) continue;
+      if (Math.abs(lvl - price) < band) continue;
+      out.push({ levelIndex: i, price: lvl, side: lvl < price ? 'buy' : 'sell' });
+    }
+    out.sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price));
+    return out;
+  }
+
+  /**
+   * 补齐空档：**只在空仓时**执行，因此不可能造成库存堆积。
+   * 解决「成交→对侧一档」链条走完后、价格离开导致档位永久空缺（阶梯变稀）的问题。
+   */
+  async refillEmptyLevels({ cooldownMs = 60_000, force = false } = {}) {
+    if (!this.running || !this.grid || this.recovery) return 0;
+    if (this.outOfRange) return 0;
+    const now = Date.now();
+    if (!force && now - (this._lastEmptyRefillAt || 0) < cooldownMs) return 0;
+    const pos = this.ex.getPosition?.(this.config.marketId);
+    if (pos && Math.abs(Number(pos.sizeBase) || 0) > 1e-12) return 0;   // 有仓不补
+    const price = Number(this.lastPrice) || Number(this.ex.getPosition?.(this.config.marketId)?.markPrice) || 0;
+    if (!(price > 0)) return 0;
+    const occupied = new Set([...this.active.values()].map((a) => a.levelIndex));
+    for (const p of this._pendingLevels) occupied.add(p);
+    const todo = GridBot.emptyLevels(this.grid.levels, occupied, price, this.grid.spacing);
+    if (!todo.length) return 0;
+    this._lastEmptyRefillAt = now;
+    let n = 0;
+    for (const t of todo) {
+      try { await this._place({ ...t, opening: true, reduceOnly: false }); n++; } catch { /* 下一轮对账再补 */ }
+    }
+    if (n) this._alert(`补齐空档：${n} 档（空仓状态，按现价 ${Math.round(price)} 重铺）`);
+    return n;
   }
 
   /**
