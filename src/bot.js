@@ -1664,6 +1664,9 @@ export class GridBot {
         }
         continue;
       }
+      // reduceOnly 腿（守卫补的退出单/对腿）可能与某张网格单价格落在同一档：
+      // 它不是"重复开仓单"，撤掉会让仓位失去退出腿，因此豁免去重。
+      if (o.reduceOnly) continue;
       // Do not clear local tracking on an accepted cancellation request. The
       // next exchange snapshot will confirm disappearance and normal pruning
       // will remove it; if cancellation failed, it remains tracked and retries.
@@ -1722,6 +1725,19 @@ export class GridBot {
     if (!(price > 0)) return 0;
     const occupied = new Set([...this.active.values()].map((a) => a.levelIndex));
     for (const p of this._pendingLevels) occupied.add(p);
+    // 交易所真实挂单也要占档：守卫补的 reduceOnly 腿不在 active 里，
+    // 但它按价格折算会落在某个档上，refill 必须避开，否则出现"同档两张单"→对账反复撤。
+    try {
+      const real = await this.ex.fetchOpenOrders?.(this.config.marketId);
+      if (Array.isArray(real)) {
+        const lvl0 = this.grid.levels[0];
+        const sp = this.grid.spacing;
+        for (const o of real) {
+          const idx = Math.round((Number(o.price) - lvl0) / sp);
+          if (Number.isInteger(idx)) occupied.add(idx);
+        }
+      }
+    } catch { /* 快照拿不到就按本地判断，下一轮再补 */ }
     const todo = GridBot.emptyLevels(this.grid.levels, occupied, price, this.grid.spacing);
     if (!todo.length) return 0;
     this._lastEmptyRefillAt = now;
