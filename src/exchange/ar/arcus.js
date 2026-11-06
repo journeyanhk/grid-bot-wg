@@ -681,7 +681,12 @@ export class ArcusExchange extends EventEmitter {
       const t = this._tracked.get(String(f.orderId));
       if (t) {
         f.levelIndex = t.levelIndex;
-        this._tracked.delete(String(f.orderId));
+        // 部分成交必须保留跟踪：同一订单会分多笔成交推送，第一笔就 delete 会让
+        // 后续成交被判成「未跟踪订单」，既误报成外部手动下单，又把 health 钉死在 error。
+        // 2026-11-06 实测：0.0002 的买单先成交 0.00015103、40ms 后再成交 0.00004897。
+        t.filledBase = (Number(t.filledBase) || 0) + Math.abs(Number(f.sizeBase) || 0);
+        const remain = Number(t.sizeBase) - t.filledBase;
+        if (remain <= Number(t.sizeBase) * 1e-9 + 1e-12) this._tracked.delete(String(f.orderId));
       } else {
         f.levelIndex = null;
         // 测试网会打出 1e-8 量级的碎单成交（远小于最小下单量 0.0001），它们既不可能
