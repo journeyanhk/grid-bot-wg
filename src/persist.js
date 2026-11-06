@@ -14,7 +14,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from './config.js';
 
-const STATE_FILE = path.join(ROOT, '.state.json');
+// 允许覆盖：同一台机器上并行跑 paper 演练与实盘实例时，两者绝不能共用状态文件
+// （否则 paper 的模拟持仓会污染实盘账本，反之亦然）。
+const STATE_FILE = process.env.GRIDBOT_STATE_FILE
+  ? path.resolve(process.env.GRIDBOT_STATE_FILE)
+  : path.join(ROOT, '.state.json');
 
 let cache = null;
 let saveTimer = null;

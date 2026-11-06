@@ -155,6 +155,10 @@ export class ArcusPaperExchange extends EventEmitter {
   forgetOrder(orderId) { this.orders.delete(String(orderId)); }
 
   getPosition(marketId) {
+    // 模拟盘持仓是本地即时值，读到就是最新的——把时间戳打在这里，
+    // 让 bot 的「缓存是否追平成交」判据在 paper 下也成立（否则该字段为 NaN，
+    // 判据失效，将来 paper 若引入延迟就测不出来）。
+    this.positionsFetchedAt = Date.now();
     const p = this.positions.get(Number(marketId));
     if (!p || !p.sizeBase) return null;
     const last = this.prices.get(Number(marketId)) ?? p.entryPrice;
