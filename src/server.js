@@ -393,7 +393,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
           return send(res, 400, { error: '必须显式 confirm:true —— 解除熔断会恢复开仓' });
         }
         const r = await bot.clearHaltSafe({ by: body?.by || 'operator', reason: body?.reason || '' });
-        logger.warn('server', `[${key}] 人工解除熔断 by=${r.by} reason=${r.reason}`);
+        logger.warn('server', `[${name}] 人工解除熔断 by=${r.by} reason=${r.reason}`);
         return send(res, 200, r);
       } catch (e) { return send(res, 400, { error: e.message }); }
     }
@@ -406,7 +406,7 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
           return send(res, 400, { error: '必须显式 confirm:true —— 重锚会覆盖仓位账本基线' });
         }
         const r = await bot.beginNewRiskEpoch({ by: body?.by || 'operator', reason: body?.reason || '' });
-        logger.warn('server', `[${key}] 新风险周期 by=${r.by} ${r.prevExpected}→${r.exchangeBase}`);
+        logger.warn('server', `[${name}] 新风险周期 by=${r.by} ${r.prevExpected}→${r.exchangeBase}`);
         return send(res, 200, r);
       } catch (e) { return send(res, 400, { error: e.message }); }
     }
