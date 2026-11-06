@@ -37,3 +37,9 @@ probe_*.json
 .state.paper-dry.json
 .state.json
 .state.*.json
+
+# 运行时状态与备份：含地址、仓位、账本基线 —— 绝不进版本库
+.state*.json
+*.state.json
+*.bak
+*.bak.*

@@ -2415,6 +2415,11 @@ export class GridBot {
   async reconcileOpenOrders() {
     this._touch();
     if (!this.running || !this.config) return;
+    // HALTED 期间熔断已经把挂单全撤了，书架是空的 —— reconcile 没有对象，
+    // 却还在以 weight 20 × 重试 3 次的频率制造纯浪费。
+    // 2026-11-06 21:30 实测：openOrders 429 达 12 次/分钟 = 240/min，
+    // 与 fills 的 400/min 叠加把预算吃穿，形成「限流→重试→更限流」的循环。
+    if (this.guardState?.state === 'HALTED') return;
     if (typeof this.ex.fetchOpenOrders !== 'function') return;
     // Keep the adapter's price watch warm so a long-running market is never
     // pruned as "idle" (adapters drop unwatched markets after 10 min).
