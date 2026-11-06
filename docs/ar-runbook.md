@@ -80,6 +80,34 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 **不要在有挂单时重试 `new-epoch`**——会被第一道检查挡掉（`active.size > 0`）。
 
+### 3.1 先分辨「抢跑」还是「真错账」（Δ 恰好一格时必做）
+
+2026-11-06 21:29 的事故形态：WS 重连后交易所先推来一份**新鲜仓位快照**（−0.0002），
+而 REST 的 fills 轮询还没把 2 秒前那笔 0.0002 的卖单送到 —— `positionsFetchedAt`
+刚更新，stale 守卫判定"不 stale"，于是一路走到"账本不一致"直接熔断。
+**2 秒后成交到达，`expected` 自己就对齐了。**
+
+判据：**Δ 恰好等于一格（`sizeBase`，本例 0.0002）时，先等 60 秒再判断。**
+
+```bash
+# 1) 等 60 秒（不要立刻停进程、不要立刻 new-epoch）
+sleep 60
+# 2) 单发查两边（间隔 2s，避免叠加限流）
+curl -s "https://api.arcus.xyz/v1/positions?address=$AR_ACCOUNT_ADDRESS&accountIndex=$AR_ACCOUNT_INDEX" | jq '.positions["1"] | {side,size}'
+curl -s http://127.0.0.1:8098/api/ar/state | jq '{pos:.position.sizeBase, guard:.guardState}'
+# 3) 读磁盘账本（API 不暴露这个字段）
+jq '.ar.positionLedger | {startBase,expected,resetCount}' ~/repos/gridbot/.state.json
+```
+
+- **已对齐**（`expected == 交易所 size`）→ 抢跑，属"已自愈"。仍要 `new-epoch` 解除
+  粘滞熔断，但**不必走停机 + 等 DMS**：先 `stop`（挂单会被撤，本来也是空的）→
+  `new-epoch` → `start`，全程 2 分钟。
+- **仍不一致** → 真错账，走完整的 `stop` → 等 DMS → 取证三份 → `new-epoch` 流程。
+
+**为什么不能靠"连续 N 轮"解决**：那是又一层计时器。真正该用的是"两本账不一致"
+这个事实本身 —— 明早的修复形态是「一旦观测到 mismatch，先强制拉一次 fills +
+一次新鲜仓位，重跑一轮；强制拉取后仍不一致才熔断」（见第 7 节末尾）。
+
 ---
 
 ## 4. DMS（死手开关）：只撤单，不平仓
@@ -150,6 +178,27 @@ GET /v1/positions   → SHORT -0.0008  avgEntry=76026.5 # 仓位原样保留
 修复在 `bc03c0f`：改为累计 `filledBase`，只有完全成交才移除跟踪。**重启后生效。**
 
 **在那之前**，看到「未跟踪成交」先查 `posLedger.seenOrder`——如果 orderId 在里面，就是自己的部分成交，不是外部下单。
+
+---
+
+## 7.1 明早待交付：mismatch 强制拉取（不要今天写）
+
+```js
+// 风控周期内，判定 mismatch 之前：
+if (mismatch && !this._mismatchRefetched) {
+  this._mismatchRefetched = true;
+  await this.ex.pollFillsNow?.();        // 强制拉一次（复用游标，不额外花权重）
+  await this.ex.getPositionFresh?.(mid); // 再读一次仓位
+  return this._runRiskCycle('mismatch-refetch');  // 用新数据重跑一轮
+}
+if (mismatch) → HALT
+```
+
+三条约束：① 每次 mismatch 只强制拉一次（防风暴）；② 用游标增量拉，不重复花权重；
+③ 强制拉取后仍不一致 = 真不一致，照样熔断，fail-closed 不放松。
+
+**为什么不在当天改**：它动的是"什么时候熔断"这条线，2026-11-06 这条线已经付了
+三次学费（stale 分支、openOrders 重试、null+1），日终不改安全路径。
 
 ---
 
