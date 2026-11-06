@@ -1928,6 +1928,15 @@ export class GridBot {
     // Recovery-ladder fills are pure reduce-only EXITS of stranded inventory —
     // never re-quote a replacement for them.
     if (!isRecovery && this.grid) {
+      // 兜底：levelIndex 非法（未跟踪成交）时只记账、不补腿。
+      // replacementFor 内部已有同样的守卫，这里再拦一次是为了留下可观测的告警——
+      // 静默返回 null 会让「有一笔成交没有对应档位」这件事永远不出现在日志里。
+      if (!Number.isInteger(levelIndex) || levelIndex < 0) {
+        this._alert(
+          `成交缺少有效档位（levelIndex=${levelIndex}），已记账但不补腿：${f.side} ${fillSize} @ ${fillPrice}`,
+          { key: 'fill-no-level', level: 'warn' },
+        );
+      }
       const repl = replacementFor({ side: f.side, levelIndex }, this.grid.levels, this.config.mode);
       if (repl && !this.outOfRange && this.running) {
         repl.opening = closing; // replacement is the opposite leg

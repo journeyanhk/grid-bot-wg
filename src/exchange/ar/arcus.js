@@ -915,6 +915,9 @@ export class ArcusExchange extends EventEmitter {
       const j = await this._http('POST', `/v1/cancelOrder?address=${this.address}`, {
         body, headers: this._headers(payload, ts), timeoutMs: 15_000,
       });
+      // 部分成交后撤单：_tracked 只在完全成交时删除，若不在这里同步摘掉，
+      // 这条跟踪会永远留在 map 里，并把「很久以前那笔单的后到成交」归到旧 levelIndex。
+      this._tracked.delete(String(orderId));
       return j;
     } catch (e) {
       // 已消失/已成交的撤单不算失败：下一轮对账会确认

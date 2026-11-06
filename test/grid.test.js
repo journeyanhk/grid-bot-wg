@@ -72,6 +72,20 @@ test('replacementFor: buy@i -> sell@i+1, sell@i -> buy@i-1, edges -> null', () =
   assert.equal(replacementFor({ side: 'sell', levelIndex: 0 }, g.levels, 'neutral'), null);
 });
 
+test('replacementFor: levelIndex 非法时不产生补腿（null 曾算出「下界第一格」幽灵单）', () => {
+  const g = buildGrid({ lower: 100, upper: 200, gridCount: 10 });
+  // 2026-11-06 主网实测：未跟踪成交的 levelIndex 是 null，`null + 1 === 1`
+  // 于是补腿被算成 levels[1]，挂出一张离现价 6% 的幽灵单（0.0001 @ 70783.3）。
+  // 卖单侧同理：`-1 + 1 === 0` 会算成 levels[0]。
+  for (const bad of [null, undefined, -1, 1.5, NaN, '3']) {
+    assert.equal(replacementFor({ side: 'buy', levelIndex: bad }, g.levels, 'neutral'), null, `buy/${bad}`);
+    assert.equal(replacementFor({ side: 'sell', levelIndex: bad }, g.levels, 'neutral'), null, `sell/${bad}`);
+  }
+  // 合法的 0 和末位仍然必须能用（边界不能被守卫误伤）
+  assert.equal(replacementFor({ side: 'buy', levelIndex: 0 }, g.levels, 'neutral').levelIndex, 1);
+  assert.equal(replacementFor({ side: 'sell', levelIndex: 10 }, g.levels, 'neutral').levelIndex, 9);
+});
+
 test('replacementFor: long-mode sell replacement is reduce-only', () => {
   const g = buildGrid({ lower: 100, upper: 200, gridCount: 10 });
   const r = replacementFor({ side: 'buy', levelIndex: 3 }, g.levels, 'long');

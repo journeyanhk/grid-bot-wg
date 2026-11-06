@@ -63,6 +63,11 @@ export function seedOrders({ levels, price, mode, skipBand = 0.25, spacing, wind
  * Sell filled at i -> Buy  at i-1.
  */
 export function replacementFor(filled, levels, mode) {
+  // levelIndex 必须是非负整数。未跟踪成交（外部下单/游标窗口外/重复推送）的
+  // levelIndex 是 null，而 `null + 1 === 1` —— 会算出一张「下界第一格」的幽灵单。
+  // 2026-11-06 实测：0.0001 @ 70783.3（$7.08）就是这样被挂出去并被交易所拒绝的。
+  // 类型没守住，下游所有算术都会变成静默的错误答案。
+  if (!Number.isInteger(filled.levelIndex) || filled.levelIndex < 0) return null;
   if (filled.side === 'buy') {
     const j = filled.levelIndex + 1;
     if (j > levels.length - 1) return null;
