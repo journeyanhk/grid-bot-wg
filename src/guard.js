@@ -37,6 +37,7 @@ export const GUARD_DEFAULTS = Object.freeze({
   // 一致性容差
   positionDeltaTol: 1e-8,
   consistencyUnknownHaltStreak: 2,   // 连续 N 轮一致性检查失败 → HALTED（单次 → DEFENSIVE）
+  consistencyStaleHaltStreak: 12,    // 连续 N 轮「仓位缓存落后成交」→ HALTED（5s/轮 ≈ 60s 仍追不上=真故障）
   // 恢复条件
   recoveryMaxInventoryFrac: 0.1,
   recoveryMinBarsAboveLower: 2,
@@ -86,8 +87,12 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   }
 
   // 1) 一致性异常 → 直接熔断（账本都不可信了，谈不上继续交易）
-  // status='unknown' 是「没查明」，交给下面的分级处理；这里只处理「查明了不一致」
-  if (ctx.consistency && ctx.consistency.ok === false && ctx.consistency.status !== 'unknown') {
+  // 只有「查明了不一致」（mismatch）走这里。'unknown'（查不明）与 'stale'
+  // （缓存尚未追平成交）都交给下面的分级处理——否则 stale 会被这里一把熔断，
+  // 等于把刚修掉的误熔断换个入口再来一次（2026-11-06 单测当场抓到）。
+  const cStatus = ctx.consistency && ctx.consistency.status;
+  if (ctx.consistency && ctx.consistency.ok === false
+      && cStatus !== 'unknown' && cStatus !== 'stale') {
     return {
       state: STATES.HALTED,
       reasons: ctx.consistency.issues.slice(0, 6),
@@ -116,6 +121,27 @@ export function evaluateRisk(ctx = {}, limits = {}) {
     }
     consistencyUnknown = true;
     reasons.push(`一致性无法确认（${why}），暂停新增开仓`);
+  }
+
+  // 1c) 一致性「滞后」：交易所仓位缓存的时间戳还没追平最后一笔成交。
+  //     这是「已知有界」的滞后，不是「查不明」——禁开仓，但不计 unknown streak。
+  //     持续到 consistencyStaleHaltStreak 仍追不上，才说明缓存真的坏了 → 熔断。
+  let consistencyStale = false;
+  if (ctx.consistency && ctx.consistency.status === 'stale') {
+    const sstreak = num(ctx.consistencyStaleStreak);
+    const why = (ctx.consistency.issues && ctx.consistency.issues[0]) || '缓存落后成交';
+    if (sstreak >= L.consistencyStaleHaltStreak) {
+      return {
+        state: STATES.HALTED,
+        reasons: [`仓位缓存连续 ${sstreak} 轮追不上成交：${why}`],
+        blockOpening: true,
+        blockSide: 'both',
+        haltReason: `仓位缓存连续 ${sstreak} 轮落后于成交（${why}）`,
+        metrics,
+      };
+    }
+    consistencyStale = true;
+    reasons.push(`仓位缓存滞后（${why}），暂停新增开仓`);
   }
 
   const equity = Number.isFinite(Number(ctx.equity)) ? Number(ctx.equity) : null;
@@ -232,7 +258,10 @@ export function evaluateRisk(ctx = {}, limits = {}) {
     reasons.push(`账户累计亏损 $${loss} ≥ 预警线 $${L.warnLossUsd}（禁止升量）`);
   }
 
-  if (consistencyUnknown) {
+  // unknown（查不明）与 stale（缓存滞后）都禁开仓：账本此刻不可验证，就不该加风险。
+  // 区别只在熔断门槛：unknown 连续 2 轮即熔断，stale 给到 12 轮（≈60s）——
+  // 后者是「已知有界的等待」，前者是「状态坏了」。
+  if (consistencyUnknown || consistencyStale) {
     blockOpening = true;
     if (!blockSide) blockSide = 'both';
     // 评审要求：单次读取失败也必须降级到 DEFENSIVE，不能停在 RUNNING

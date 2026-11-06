@@ -1126,11 +1126,24 @@ export class GridBot {
       pos = 0;   // 适配器不跟踪该字段，或刚同步过 → 空仓
     }
     // 成交刚发生时，交易所仓位缓存（默认 5s 轮询）必然落后于账本，
-    // 这窗口内比对只会稳定误报「仓位不一致」→ 熔断。等缓存追上再比。
+    // 这窗口内比对只会稳定误报「仓位不一致」→ 熔断。
+    //
+    // 2026-11-06 修（第三观察窗 21 分钟误熔断的根因）：原判据是「成交后 10 秒内跳过」，
+    // 即拿「经过了 N 秒」赌「缓存已经追上」。但缓存能否追上取决于轮询周期、429 退避
+    // 与网络，10 秒既可能远远不够（→ 误熔断），也可能早就够了（→ 白等 10 秒）。
+    // 适配器本来就记录了 positionsFetchedAt，正确判据是「缓存时间戳是否已追平最后一笔成交」。
+    //
+    // 语义一并纠正：跳过不是「一致」，是「此刻无法验证」。返回 status='stale'，
+    // 由 guard 禁开仓但不计入 unknown streak——已知有界的滞后不等于查不明。
     const lastFillMs = Number(this._lastFillAtMs) || 0;
-    const sinceFill = Date.now() - lastFillMs;
-    if (lastFillMs && sinceFill < 10_000) {
-      return { ok: true, status: 'ok', issues: [], skipped: `成交后 ${Math.round(sinceFill / 1000)}s 内跳过仓位比对` };
+    const fetchedAt = Number(this.ex.positionsFetchedAt);
+    if (lastFillMs && Number.isFinite(fetchedAt) && fetchedAt < lastFillMs) {
+      const lagMs = lastFillMs - fetchedAt;
+      return {
+        ok: false,
+        status: 'stale',
+        issues: [`交易所仓位缓存落后最后成交 ${(lagMs / 1000).toFixed(1)}s`],
+      };
     }
     // P0-2 修正：本地预期仓位来自成交账本，绝不能把未成交挂单加总当持仓
     const localPos = this.posLedger.value;
@@ -1233,11 +1246,17 @@ export class GridBot {
     this._consistencyUnknownStreak = consistency.status === 'unknown'
       ? (this._consistencyUnknownStreak || 0) + 1
       : 0;
+    // stale（缓存滞后）单独计数：它是「已知有界」，混进 unknown 会让一次 5s 的
+    // 缓存滞后直接凑满 2 轮熔断线，等于把刚修掉的误熔断换个入口再来一次。
+    this._consistencyStaleStreak = consistency.status === 'stale'
+      ? (this._consistencyStaleStreak || 0) + 1
+      : 0;
     let r = null;
     try {
       r = evaluateRisk({
         ...this._guardCtx(), consistency,
         consistencyUnknownStreak: this._consistencyUnknownStreak,
+        consistencyStaleStreak: this._consistencyStaleStreak,
         haltReason: this.guard?.haltReason,
       }, this._inventoryLimits());
     } catch (e) {
@@ -1335,6 +1354,7 @@ export class GridBot {
       this.guardState = { ...(this.guardState || {}), state: 'RUNNING', haltReason: null, blockSide: null };
     }
     this._consistencyUnknownStreak = 0;
+    this._consistencyStaleStreak = 0;
     const rec = {
       at: new Date().toISOString(), by: String(by).slice(0, 64), reason: String(reason).slice(0, 200),
       prevExpected, exchangeBase: s1, delta: Number((s1 - prevExpected).toFixed(10)),
@@ -2579,7 +2599,14 @@ export class GridBot {
     if (!this.running || !this.config) return;
     const legs = [...this.active.entries()].filter(([, o]) => o.reduceOnly || o.recovery);
     if (!legs.length) { this._orphanNoPosStreak = 0; return; }
-    const pos = this.ex.getPosition?.(this.config.marketId);
+    // 撤腿不可逆，判据必须是新鲜持仓：缓存读到 0 而实际有仓时，这里会把正在保护
+    // 你的减仓腿撤掉——孤儿腿的反面事故（2026-11-06 review 指出）。原则：
+    // 凡是要撤单/熔断的判断，不许只信缓存。
+    let pos = null;
+    try {
+      pos = await this.ex.getPositionFresh?.(this.config.marketId);
+    } catch { return; }                              // 现读失败 → 本轮不动
+    if (!pos) pos = this.ex.getPosition?.(this.config.marketId);
     const size = pos && Number.isFinite(Number(pos.sizeBase)) ? Number(pos.sizeBase) : NaN;
     if (!Number.isFinite(size)) return;              // 拿不到真实持仓就不动，宁可少做
     const eps = (Number(this.config.sizeBase) || 0) * 0.01;
