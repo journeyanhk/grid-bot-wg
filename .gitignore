@@ -32,3 +32,8 @@ __pycache__/
 .runtime/
 # VA 探针产物
 probe_*.json
+
+# 运行时状态文件不进版本库（含账本基线）
+.state.paper-dry.json
+.state.json
+.state.*.json
