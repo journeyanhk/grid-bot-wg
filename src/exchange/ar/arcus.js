@@ -36,7 +36,7 @@ const SIDE_BUY = 0;
 const SIDE_SELL = 1;
 
 const GOOD_TIL_MS = 35 * 24 * 3600 * 1000;   // ≥1 个月，留 5 天余量
-const FILL_POLL_MS = 3000;                    // /v1/fills（权重 20）→ 400 权重/分钟，2026-11-06 限流事故后从 1000 降速
+const FILL_POLL_MS = 5000;                    // /v1/fills（权重 20）→ 240 权重/分钟。2026-11-06 二次限流后按既定升级规则 3000→5000（占预算 40%），给重试与整点巡检留余量
 const ACCOUNT_POLL_MS = 5000;                 // /v1/account + /v1/positions（权重 2+2）
 const PRICE_POLL_MS = 2000;                   // WS 掉线时的 bbo 兜底（权重 2）
 const WS_SILENCE_MS = 30_000;                 // WS 30 秒没有任何帧 = 半开连接，必须强断重连
