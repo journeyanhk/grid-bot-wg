@@ -847,8 +847,25 @@ export class GridBot {
     // 先对账：拿到真实占用情况（交易所上已有的挂单会被接管而不是重复补）
     await this.reconcileOpenOrders().catch(() => {});
     const occupied = new Set([...this.active.values()].map((o) => o.levelIndex));
-    const seeds = seedOrders({ levels: this.grid.levels, price, mode: this.config.mode, spacing: this.grid.spacing, windowGrids: this.config.activeWindowGrids })
-      .filter((s) => !occupied.has(s.levelIndex));
+    const win = Number(this.config.activeWindowGrids);
+    const seeds = seedOrders({
+      levels: this.grid.levels, price, mode: this.config.mode, spacing: this.grid.spacing,
+      // 窗口未配置时保持旧行为（win = Infinity）。真正该拦的不是「没配窗口」，
+      // 而是「这次补格要铺出的档数超过库存熔断线」——见下面那道检查。
+      windowGrids: win > 0 ? win : undefined,
+    }).filter((s) => !occupied.has(s.levelIndex));
+    // 2026-11-07 加固（巡检 review 提出的 refill 风险，换一种更准的判据）：
+    // 危险的不是「有没有传 windowGrids」（v1.6.49 起四个调用点都传了），
+    // 而是**任何一次 refill 都可能一次铺出整条阶梯**——窗口没配、配置漂移、
+    // 或者以后有人改坏了传参。用「结果 vs 库存熔断线」来判，比检查传参更可靠：
+    // 要铺的档数一旦超过 halt 线，这一单出去就是必熔断。
+    const haltGrids = Number(this.config.inventoryHaltGrids);
+    if (haltGrids > 0 && seeds.length > haltGrids) {
+      throw new Error(
+        `补格将一次铺出 ${seeds.length} 档，超过库存熔断线 ${haltGrids} 档（阶梯 ${this.grid.levels.length} 档，`
+        + `活跃窗口 ${win > 0 ? `${win} 格` : '未配置'}）；已拒绝。请先确认为何需要一次铺这么多档。`,
+      );
+    }
     if (!seeds.length) {
       this._placementProgress = null;
       this._alert('补格检查：所有格位都已有挂单，无需补格。');
