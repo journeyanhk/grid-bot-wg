@@ -1308,6 +1308,19 @@ export class GridBot {
       this._changed();
     }
     if (prev !== r.state) {
+      // 2026-11-07 P2-1（代码 review 发现的安全回归）：熔断执行节流的复位必须放在
+      // 「刚进入熔断」这一刻，只有这里能可靠地看到 prev。
+      //
+      // 之前把它写在 _enforceHalt 里的 `guardState !== HALTED` 分支，而 _enforceHalt
+      // 的唯一调用点已经判过 `r.state === HALTED` —— 那条分支是死代码，于是
+      // _haltSatisfied 一旦置 true 就再也不复位，后果是：解除熔断后 5 分钟内若再次熔断，
+      // gap 仍按「已确认清空」的 5 分钟算，_haltEnforceLastAt 又没清，
+      // 于是**一次撤单都不发**，交易所上的非减仓单继续挂着跑。
+      // 这个 bug 只在「刚熔断过、又很快熔断」时咬人，而那恰恰是事故期间。
+      if (r.state === STATES.HALTED) {
+        this._haltSatisfied = false;
+        this._haltEnforceLastAt = 0;
+      }
       const tail = r.reasons.length ? `：${r.reasons[0]}` : '';
       this._alert(`风控状态 ${prev || '—'} → ${r.state}${tail}`);
       this._changed();
@@ -1449,7 +1462,15 @@ export class GridBot {
     // 触发，用它兜底后 watchdog 才真正只在事件循环卡死时生效。
     this._touch();
     if (!this.running) return this.guardState;
-    if (this._guardInFlight) return this.guardState;
+    if (this._guardInFlight) {
+      // P3-1（代码 review）：复跑被并发锁丢掉时不能静默。
+      // _mismatchRefetched 已经置位，下一轮不会再强制拉取，只会按原判据熔断——
+      // 这是 fail-closed 的正确结局，但操作员必须看得见「为什么会熔断」。
+      if (reason === 'mismatch-refetch') {
+        logger.warn('bot', '账本不一致的强制复跑撞上正在执行的风控周期，本轮重判被丢弃；下一轮按原判据熔断。');
+      }
+      return this.guardState;
+    }
     const now = Date.now();
     // 'mismatch-refetch' 是「刚拿到新数据、必须立刻重判」的复跑，不能被最小间隔吞掉。
     if (reason !== 'timer' && reason !== 'mismatch-refetch'
@@ -1485,12 +1506,7 @@ export class GridBot {
    */
   async _enforceHalt(reason = '') {
     if (this._haltEnforceInFlight) return;
-    if (this.guardState?.state !== STATES.HALTED) {
-      // 已离开熔断：清掉「已确认清空」标记，下次熔断要重新确认一遍。
-      this._haltSatisfied = false;
-      this._haltEnforceLastAt = 0;
-      return;
-    }
+    if (this.guardState?.state !== STATES.HALTED) return;
     if (!this.config) return;
     // 2026-11-07：熔断执行节流。
     //

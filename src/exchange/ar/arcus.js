@@ -158,6 +158,7 @@ export class ArcusExchange extends EventEmitter {
 
     this._timers = {};
     this._loops = { fills: false, account: false, price: false, dms: false, markets: false };
+    this._pollFillsPromise = null;   // _pollFills 单飞句柄（见 _pollFills 注释）
   }
 
   // ── 生命周期 ────────────────────────────────────────────────────────────
@@ -652,6 +653,18 @@ export class ArcusExchange extends EventEmitter {
    * —— 与 TrackA 资金费水位的教训同源：水位不能用 now，只能用已入账的最后一条。
    */
   async _pollFills() {
+    // P2-2（代码 review 发现）：_pollFills 自身没有重入保护——防重入原来只靠
+    // _startLoop 里的 this._loops.fills 标志，而 pollFillsNow() 直接调 _pollFills()，
+    // 等于绕过那道锁。强制拉取恰好发生在风控最紧张的时刻，两个并发 = 权重 ×2，
+    // 而我们刚为限流预算打过两场仗（11-06 两次 429 事故都是「预算没有余量」）。
+    // 去重靠 _fillsSeen，所以不会重复记账；但权重会实打实翻倍，这里把口子堵死。
+    if (this._pollFillsPromise) return this._pollFillsPromise;
+    this._pollFillsPromise = this._pollFillsOnce()
+      .finally(() => { this._pollFillsPromise = null; });
+    return this._pollFillsPromise;
+  }
+
+  async _pollFillsOnce() {
     const from = Math.max(0, Math.floor((this._fillsFromMs - FILLS_OVERLAP_MS) * 1000));
     const rows = await this._fetchFillRows(from);
     // 心跳先打，再判空：空轮直接 return 会让 lastFillPollAgeMs 在平静期永远是 null，
