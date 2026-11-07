@@ -366,7 +366,14 @@ export class ArcusExchange extends EventEmitter {
         lastErr = e;
         const safe = !e.engineRejected && (e.transient || e.rateLimited || e.status === 408 || e.status >= 500);
         if (!safe) throw e;
-        const wait = Math.min(5000, e.retryAfterMs || 400 * 2 ** i);
+        // 2026-11-07：限流必须长退避。旧实现把 429 和普通网络错误一样按
+        // 400ms→800ms 重试，只会把配额烧得更狠——11-06 两次限流事故都是这么放大的
+        // （openOrders 30s 一次 × 失败重试 3 次 → 实际 12 次/分钟）。
+        // 现在 429 单独走 30s→60s→300s→900s，并尊重服务端 Retry-After（取较大）。
+        const rateBackoff = [30_000, 60_000, 300_000, 900_000][Math.min(i, 3)];
+        const wait = e.rateLimited
+          ? Math.max(rateBackoff, Number(e.retryAfterMs) || 0)
+          : Math.min(5000, e.retryAfterMs || 400 * 2 ** i);
         logger.warn('ar', `${tag} 重试 ${i + 1}/${tries}：${e.message}（${wait}ms）`);
         await new Promise((r) => setTimeout(r, wait));
       }
@@ -707,6 +714,19 @@ export class ArcusExchange extends EventEmitter {
       }
       this.emit('fill', f);
     }
+  }
+
+  /**
+   * 立即拉一次成交（供风控在「账本不一致」时强制对账用）。
+   *
+   * 与定时轮询共用游标 `_fillsFromMs` 和去重集 `_fillsSeen`，所以是**增量**拉取：
+   * 同一笔成交不会被重复下发，权重只花一次。这正是「强制拉取」不能改成
+   * 「重新拉全量」的原因——后者在限流边缘等于自杀。
+   *
+   * 失败向上抛：调用方（风控）必须知道「没拉到」，不能把失败当「没有新成交」。
+   */
+  async pollFillsNow() {
+    return this._pollFills();
   }
 
   /**

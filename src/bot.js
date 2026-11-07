@@ -12,6 +12,10 @@ import { logger } from './log.js';
 const RECONCILE_MS = 30000;   // periodic open-order reconciliation cadence
 const RISK_TICK_MS = 5000;    // P0-1：风控独立节拍，不依赖价格/成交/对账事件
 const RISK_MIN_GAP_MS = 200;  // 事件驱动最小间隔：只聚合同一瞬间的重复事件，不吞掉首个 tick
+// 熔断执行的重查节拍。2026-11-07 之前是「每轮风控（5s）都拉一次 openOrders（权重 20）」，
+// 14 小时熔断累计 1404 次 429 全部由它产生——为了确认一个早已确定、且不会自己变回去的答案。
+const HALT_RECHECK_MS = 5 * 60 * 1000;      // 已确认清空后：5 分钟复查一次
+const HALT_RECHECK_PENDING_MS = 15 * 1000;  // 尚未确认清空：15 秒重试一次（仍需快，但不要 5 秒）
 const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 
 // 挂单"全撤"确认门：连续多少轮对账都拿到 0 单才认定是真的没了（对账约 30 秒一轮）。
@@ -81,6 +85,13 @@ export class GridBot {
     this._lastFailAt = 0;
     this._exchangeOpenOrders = null; // last reconciled real open-order count
     this._exchangeOpenOrdersVerifiedAt = null; // authoritative REST snapshot time
+    // 2026-11-07：mismatch 先强制拉取再判（runbook 7.1）。
+    // 每次 mismatch 只强制一次，防风暴；一致性恢复后自动重置。
+    this._mismatchRefetched = false;
+    // 2026-11-07：熔断执行节流。撤单是幂等的，一旦确认「交易所非减仓单 = 0」，
+    // 答案不会自己变回去（HALTED 禁开仓，不产生新单），不必每轮再拉一次快照。
+    this._haltSatisfied = false;
+    this._haltEnforceLastAt = 0;
     this._pendingLevels = new Set(); // levels with a placement in flight (dedup guard)
     this._recoveryOccupied = new Set(); // recovery: real exchange-occupied levels (from reconcile)
     this._reconTimer = null;
@@ -1251,6 +1262,30 @@ export class GridBot {
     this._consistencyStaleStreak = consistency.status === 'stale'
       ? (this._consistencyStaleStreak || 0) + 1
       : 0;
+    // 2026-11-07：mismatch 先强制拉取，再判。
+    //
+    // 11-06 的两次熔断（21:29 / 22:36）同形：WS 先推来新鲜仓位快照，成交推送晚到几秒，
+    // 于是「快照时间戳 > 最后成交时间」成立（stale 判据失效），读出差一格 → 立即熔断；
+    // 成交到达后账本自己对齐了，熔断却粘滞 14 小时。
+    //
+    // 根因和 stale 判据那次一样：**用「某一瞬间的差」代替「差是否真的存在」**。
+    // 正确判据是「强制拉取之后仍然差」——拉取是增量的（共用游标），不重复花权重。
+    //
+    // 三约束（缺一不可）：
+    //   ① 每次 mismatch 只强制一次（防风暴）
+    //   ② 强制拉取失败也照样往下熔断（fail-closed 不放松）
+    //   ③ 强制拉取后仍不一致 → 本轮真的熔断
+    if (consistency.status === 'mismatch' && !this._mismatchRefetched) {
+      const canRefetch = typeof this.ex?.pollFillsNow === 'function'
+        || typeof this.ex?.getPositionFresh === 'function';
+      if (canRefetch) {
+        this._mismatchRefetched = true;
+        this._forceMismatchRefetch(consistency).catch(() => {});
+        // 本轮不动 guardState：数据其实是旧的，此刻任何结论都不成立。
+        return this.guardState;
+      }
+    }
+    if (consistency.ok) this._mismatchRefetched = false;
     let r = null;
     try {
       r = evaluateRisk({
@@ -1376,6 +1411,34 @@ export class GridBot {
   }
 
   /**
+   * 强制拉取一次真值，然后用新数据重跑风控。
+   *
+   * 只做两件事：增量拉成交（找出那笔还没到的）、刷新仓位快照。
+   * 不重试、不循环——失败就交给下一轮 _runRiskCycle，那时 _mismatchRefetched 仍为 true，
+   * 会直接在「数据没拉到」的状态下按原判据熔断（fail-closed）。
+   */
+  async _forceMismatchRefetch(consistency) {
+    const mid = this.config?.marketId;
+    const detail = Array.isArray(consistency?.issues) ? consistency.issues.join('；') : '';
+    let ok = true;
+    try {
+      await this.ex.pollFillsNow?.();
+    } catch (e) {
+      ok = false;
+      logger.warn('bot', `mismatch 强制拉成交失败：${e.message}`);
+    }
+    try {
+      await this.ex.getPositionFresh?.(mid);
+    } catch (e) {
+      ok = false;
+      logger.warn('bot', `mismatch 刷新仓位失败：${e.message}`);
+    }
+    if (!ok) this._alert(`⚠️ 账本不一致但强制拉取失败（${detail}），下一轮将按原判据熔断`);
+    // 用新数据重跑；若仍不一致，这一轮就会真的熔断。
+    this._runRiskCycle('mismatch-refetch');
+  }
+
+  /**
    * P0-1：统一风控周期。所有事件（价格/成交/对账/定时）都走这里，
    * 带并发锁与最小间隔，避免重入与每 tick 重算。
    */
@@ -1388,7 +1451,9 @@ export class GridBot {
     if (!this.running) return this.guardState;
     if (this._guardInFlight) return this.guardState;
     const now = Date.now();
-    if (reason !== 'timer' && now - (this._lastRiskAt || 0) < RISK_MIN_GAP_MS) return this.guardState;
+    // 'mismatch-refetch' 是「刚拿到新数据、必须立刻重判」的复跑，不能被最小间隔吞掉。
+    if (reason !== 'timer' && reason !== 'mismatch-refetch'
+      && now - (this._lastRiskAt || 0) < RISK_MIN_GAP_MS) return this.guardState;
     this._lastRiskAt = now;
     this._guardInFlight = true;
     try {
@@ -1420,8 +1485,24 @@ export class GridBot {
    */
   async _enforceHalt(reason = '') {
     if (this._haltEnforceInFlight) return;
-    if (this.guardState?.state !== STATES.HALTED) return;
+    if (this.guardState?.state !== STATES.HALTED) {
+      // 已离开熔断：清掉「已确认清空」标记，下次熔断要重新确认一遍。
+      this._haltSatisfied = false;
+      this._haltEnforceLastAt = 0;
+      return;
+    }
     if (!this.config) return;
+    // 2026-11-07：熔断执行节流。
+    //
+    // 撤单是幂等的，而且一旦确认「交易所非减仓单 = 0」，这个答案不会自己变回去：
+    // HALTED 状态下禁开仓，不产生新的非减仓单。旧实现每轮风控（5s）都拉一次
+    // openOrders（权重 20）去确认一件早已确定的事——11-06 那 14 小时熔断里
+    // 累计 1404 次 429 全部由此产生，同时把 IP 预算吃到连巡检都跑不动。
+    //
+    // 现在：未确认清空时 15 秒重试（撤单本来就该快），确认清空后 5 分钟复查一次。
+    const gap = this._haltSatisfied ? HALT_RECHECK_MS : HALT_RECHECK_PENDING_MS;
+    if (this._haltEnforceLastAt && Date.now() - this._haltEnforceLastAt < gap) return;
+    this._haltEnforceLastAt = Date.now();
     this._haltEnforceInFlight = true;
     try {
       // P1：安全目标是「交易所真实非减仓订单 = 0」，不是「本地 active = 0」。
@@ -1450,7 +1531,11 @@ export class GridBot {
         }
       }
 
-      if (!toCancel.size) return;
+      if (!toCancel.size) {
+        // 交易所本来就没有非减仓单可撤：这本身即「已确认清空」，直接降频。
+        if (Array.isArray(rows)) this._haltSatisfied = true;
+        return;
+      }
       for (const id of toCancel) {
         try {
           await this.ex.cancelOrder?.(this.config.marketId, id);
@@ -1505,9 +1590,14 @@ export class GridBot {
 
     const localLeft = [...this.active.values()].filter((o) => !o.reduceOnly && !o.recovery).length;
     if (realLeft === null) {
+      this._haltSatisfied = false;
       this._alert(`⚠️ 熔断撤单未确认：取不到交易所快照，本地仍有 ${localLeft} 张非减仓单。`);
     } else if (realLeft > 0) {
+      this._haltSatisfied = false;
       this._alert(`⚠️ 熔断撤单未确认：交易所仍有 ${realLeft} 张非减仓单（本地剩 ${localLeft} 张），连续两轮快照未清干净，请人工核查。`);
+    } else {
+      // 交易所非减仓单 = 0：这是唯一能降低复查频率的机械证据。
+      this._haltSatisfied = true;
     }
   }
 
@@ -2979,6 +3069,11 @@ export class GridBot {
       placeFails: this._placeFails,
       exchangeOpenOrders: this._exchangeOpenOrders,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
+      // 2026-11-07：这是**缓存**字段，不是交易所实时真值。熔断/对账停摆时会一直冻着
+      // （11-06 就冻了 14 小时，被当成「8 张脱管单」报了一整夜）。
+      // 消费方必须先看这个 age，超过 2 分钟就不要再把它当交易所事实。
+      exchangeOpenOrdersAgeMs: this._exchangeOpenOrdersVerifiedAt
+        ? Date.now() - this._exchangeOpenOrdersVerifiedAt : null,
       // 空快照率（Review14）：>30% 即抖动降级——降级状态必须可见
       snapshotEmptyRatePct: (typeof ex.snapshotEmptyRatePct === 'function') ? ex.snapshotEmptyRatePct() : null,
     };
@@ -3044,6 +3139,8 @@ export class GridBot {
       lastReplConflict: this._lastReplConflict || null,
       ladderGapIdx: Array.isArray(this._ladderGaps) ? this._ladderGaps.slice(0, 40) : [],
       exchangeOpenOrders: this._exchangeOpenOrders,
+      exchangeOpenOrdersAgeMs: this._exchangeOpenOrdersVerifiedAt
+        ? Date.now() - this._exchangeOpenOrdersVerifiedAt : null,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
       placementProgress: this._placementProgressView(),
       openByLevel,
