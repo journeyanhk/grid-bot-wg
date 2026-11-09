@@ -274,7 +274,9 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
-    this._restorePendingPlacementRetries();
+    // 注意：`_restorePendingPlacementRetries()` 必须等 active 重建之后再调，
+    // 否则它看到的 active 是空的，「已在簿的档位」剔不掉，僵尸 progress 会被当成
+    // 8 个待补档位重新排进重试队列（2026-11-09 10:20 实测踩到）。真正的调用在下面。
     this._invBase = Number.isFinite(Number(snap.invBase)) ? Number(snap.invBase) : 0; // 库存基线（跨重启保留）
     this._lastDriftGrids = Number.isFinite(Number(snap.lastDriftGrids)) ? Number(snap.lastDriftGrids) : 0; // 漂移播报基线（跨重启保留）
     // 审计锚点：旧快照缺省时取当前 stats（等效"从现在起重新对账"，跨重启不双重计数）
@@ -305,6 +307,7 @@ export class GridBot {
         } catch { /* best effort */ }
       }
     }
+    this._restorePendingPlacementRetries();   // active 已就绪，此时过滤才有效
 
     // 防重复附着（Review23 P2）：看门狗对 resume 失败做每分钟重试，附着后若
     // ex.start() 抛错则 running 未置位、下轮重试会再挂一遍 -> 事件双倍处理。
@@ -349,6 +352,7 @@ export class GridBot {
         });
       } catch { /* best effort */ }
     }
+    this._restorePendingPlacementRetries();   // 同 resume()：必须在 active 重建之后
     // 防重复附着（Review23 P2）：同 resume()——看门狗重试前先 off 再 on
     this.ex.off('fill', this._onFill);
     this.ex.off('price', this._onPrice);
