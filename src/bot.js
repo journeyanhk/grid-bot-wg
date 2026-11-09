@@ -208,6 +208,9 @@ export class GridBot {
       active: [...this.active.entries()],
       placementProgress: this._placementProgress,
       retryQueue: this._retryQueue,
+      // 「上一轮为什么没铺单」是事实，必须跨重启保留：只活在内存里的话，重启后
+      // `running=true` 会被恢复、`startBlocked` 却消失，巡检看到的是一个「正常在跑的空机器人」。
+      startBlocked: this._startBlocked ?? null,
       autoStopped: this._autoStopped,   // 动态网格：自动停机→冷静门重启状态
       invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
       auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
@@ -235,6 +238,7 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
+    this._startBlocked = snap.startBlocked ?? null; // 上一轮为什么没铺单（跨重启保留）
     this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : []; // 动态动作记录（毕业评审）
     this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
       ? { inventory: 0, calm: 0, cooldown: 0, ...snap.dynGateBlocked } : { inventory: 0, calm: 0, cooldown: 0 };
@@ -267,6 +271,7 @@ export class GridBot {
     if (snap.recovery || snap.config.mode === 'recovery') return this._resumeRecovery(snap);
     if (!Array.isArray(snap.active)) throw new Error('无可恢复的运行中网格快照');
     this.config = snap.config;
+    this._startBlocked = snap.startBlocked ?? null;   // 「上一轮为什么没铺单」跨重启保留
     this.stats = { buys: 0, sells: 0, completedRungs: 0, gridProfit: 0, volume: 0, recenters: 0, autoRestarts: 0, ...(snap.stats || {}) };
     this._gridProfitRaw = Number(snap.gridProfitRaw ?? this.stats.gridProfit ?? 0) || 0;
     this.startBalance = snap.startBalance ?? null;
@@ -338,6 +343,7 @@ export class GridBot {
     this.recovery = true; this.outOfRange = false;
     this.lastPrice = snap.lastPrice ?? null;
     this._noPosStreak = 0;
+    this._startBlocked = snap.startBlocked ?? null; // 同 resume()：事实跨重启保留
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
@@ -388,6 +394,7 @@ export class GridBot {
     // 撤单确认可能持续数分钟，watchdog 会把这段时间当成「停滞」。显式标记让 watchdog 豁免。
     this._pausedRuntime = true;
     this._stopReconcileTimer();
+    this._stopRiskTimer();   // 暂停期间没有价格/成交源，风控心跳也必须显式停（不再借 _stopReconcileTimer 的手）
     this.ex.off('fill', this._onFill);
     this.ex.off('price', this._onPrice);
   }
@@ -688,13 +695,22 @@ export class GridBot {
     // handling and crash-safe persistence must already be active at that point.
     this.running = true;
     this._changed();
+    // 2026-11-09 架构级规则（先写代码再写注释，因为这条比具体 bug 重要）：
+    // **监护资源的获取必须发生在任何「决定要不要交易」的闸门之前。**
+    // 闸门只决定「铺不铺单」，永不决定「进程是否在监护」。
+    // 反例就在下面四行之后：09:19 那次「已有熔断记录」早退，一次带走三具尸体
+    // （对账定时器、风控心跳、铺单进度），日志只留一行「启动被风控拦截」——
+    // 那行字读起来还像一个正确的决定。两个调用都是幂等的：HALTED 时
+    // reconcile 自己会以 skipReason='halted' 早退，_dynCheck 在铺单期间也会自己让路。
+    this._startReconcileTimer();
+    this._startDynTimer();
     // P0 启动闸门：先建立风控态，再决定要不要铺第一批开仓单。
     // 顺序很关键——区间外启动时，绝不能"先铺 66 张单、再等价格事件来拦"。
     this._runRiskCycle('start');
     const blocked = this._startBlockedReason();
     if (blocked) {
       // 2026-11-09：这条早退以前直接 return，后果有两个，都踩过：
-      //  ① 跳过了下面第 691 行的 `_startReconcileTimer()`/`_startDynTimer()` ——
+      //  ① 跳过了 `_startReconcileTimer()`/`_startDynTimer()` ——
       //     熔断记录未清就重启时，对账与风控心跳**一次都不会启动**（09:19 实测：
       //     `exchangeOpenOrdersVerifiedAt` 冻在启动那一秒，age 一路涨到 500s+，
       //     只有手工 POST /api/ar/reconnect 才刷新一次），风控从此只靠成交事件驱动。
@@ -702,11 +718,10 @@ export class GridBot {
       //     早退让 `_finishPlacementPass()` 永不执行 —— progress 永久停在 `placing`，
       //     而 `_canEnterRecovery()`（bot.js 1709）要求它必须是 `complete`，
       //     于是「未完成的铺单批次」会一直挡住回收路径。
-      // 现在：闸门照旧不铺单，但必须收尾 + 把心跳拉起来。
+      // 现在：心跳在闸门之前就起来了（见上），这里只负责收尾 + 记录原因。
       this._startBlocked = String(blocked);
       this._placementProgress = null;   // 一张都没铺，这批 progress 没有意义
-      this._alert(`⛔ 启动被风控拦截：${blocked}。本轮不铺任何开仓单，保持等待（无挂单、无持仓变化）。对账/风控心跳已启动，后续按常规巡检。`);
-      this._startReconcileTimer();      // 幂等；HALTED 时 reconcile 自己会以 'halted' 早退
+      this._alert(`⛔ 启动被风控拦截：${blocked}。本轮不铺任何开仓单，保持等待（无挂单、无持仓变化）。对账/风控心跳不受影响，后续按常规巡检。`);
       this._changed();
       return this.getState();
     }
@@ -719,8 +734,6 @@ export class GridBot {
     if (this.startBalance == null && typeof this.ex.balance === 'number') this.startBalance = this.ex.balance;
     // 手动/普通启动：视为人工介入，清空"自动停机→冷静门重启"状态；动态监督器常驻
     this._autoStopped = null;
-    this._startReconcileTimer();
-    this._startDynTimer();
     this._runRiskCycle('start');   // P0-1：进入运行态后立即建立 guardState，别等下一个 tick
     const progress = this._placementProgressView();
     if (progress?.status === 'complete') {
@@ -2891,7 +2904,12 @@ export class GridBot {
     this._reconTimer = setInterval(() => { this.reconcileOpenOrders().catch(() => {}); }, RECONCILE_MS);
     this._reconTimer.unref?.();
   }
-  _stopReconcileTimer() { if (this._reconTimer) { clearInterval(this._reconTimer); this._reconTimer = null; } this._stopRiskTimer(); }
+  /**
+   * 只停对账。风控心跳的生命周期不属于对账——启动侧 2026-11-09 已解耦，停止侧同样
+   * 不许借道（否则任何「只想暂停对账」的路径都会静默掐掉风控心跳）。风控心跳只在
+   * `_pauseTradingRuntime()`（停机/暂停，此时确实没有数据源）与进程退出时停。
+   */
+  _stopReconcileTimer() { if (this._reconTimer) { clearInterval(this._reconTimer); this._reconTimer = null; } }
 
   /** P0-1：风控独立心跳。即使没有价格/成交/对账事件，也必须周期性评估。 */
   _startRiskTimer() {

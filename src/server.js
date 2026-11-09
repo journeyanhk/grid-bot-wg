@@ -356,10 +356,16 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
         // （以及我自己 09:19 那轮）会把「本来就已经在跑」误读成「启动失败」，
         // 接着去做多余的排查。同族问题还有 new-epoch 的 note 与实际行为不一致。
         if (/已在运行|正在启动/.test(e.message || '')) {
+          // 幂等成功必须携带足够的现场量：调用方要能区分「已经好好的」和
+          // 「在跑但是一张单都没有」（后者=启动被闸门拦下后空转，正是
+          // 「成功被报成失败」的镜像病）。两者都是 200，区别全在这两个字段里。
+          const snapshot = bot.getState?.() ?? null;
           return send(res, 200, {
             ok: true, alreadyRunning: true,
+            openOrders: snapshot?.openOrders ?? null,
+            startBlockedReason: snapshot?.startBlockedReason ?? null,
             note: '机器人已在运行（本次请求视为幂等成功，未做任何变更）',
-            state: bot.getState?.(),
+            state: snapshot,
           });
         }
         return send(res, 400, { error: e.message });

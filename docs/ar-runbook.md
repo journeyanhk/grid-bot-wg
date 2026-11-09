@@ -352,6 +352,68 @@ balance = equity + 借入 − uPnL
 `no-grid` / `fetch-failed: …` / `bad-snapshot`。看到 `halted` 且熔断其实已解除，
 说明 `guardState` 与熔断记录不同步；看到 `fetch-failed` 才轮到查限流/网络。
 
+### 11.4 架构级规则：监护先于意图（2026-11-09 11:40 评审定稿）
+
+> **资源获取（定时器、心跳、事件监听）必须发生在任何「决定要不要交易」的闸门之前。
+> 闸门只决定「铺不铺单」，永不决定「进程是否在监护」。**
+
+在闸门里补一次 `_startReconcileTimer()` 是**分支级**修复：它在已知的那条闸门上正确，
+在下一条还没人写的闸门上无效。所以这一条现在由**代码顺序**保证，而不是由注释保证：
+
+```js
+this.running = true;
+this._startReconcileTimer();   // 监护先起
+this._startDynTimer();
+this._runRiskCycle('start');
+const blocked = this._startBlockedReason();   // 意图后判
+```
+
+两道守卫（`test/start-gate-structure.test.js`）：
+
+1. **枚举**：`_startBlockedReason()` 的 8 种理由逐条跑一遍 `start()`，断言每种早退都
+   `_reconTimer && _riskTimer`、`active.size === 0`、`placementProgress === null`；
+2. **结构**：读源码断言 `_start()` 里 `_startReconcileTimer()` 的下标必须小于
+   `_startBlockedReason()` 的下标——新加闸门时这条会先红。
+
+**停止侧同样不许借道**：`_stopReconcileTimer()` 只停对账；风控心跳只在
+`_pauseTradingRuntime()`（停机/暂停，此时确实没有数据源）与进程退出时停。
+任何「只想暂停对账」的路径都不该静默掐掉监护。
+
+### 11.4.1 仪表报警：判活看**导数**，不看**年龄**
+
+`reconcile = {timerActive, lastOkAt, ageMs, skipReason, runs, fails}` 里，
+`ageMs` 是**年龄**（正常运行下也会周期性涨到 30s），HALTED 期间它**必然**单调涨
+（`reconcileOpenOrders()` 设计上就在熔断期早退）。所以：
+
+- ❌ `ageMs > 90s → BLOCKING`：每次熔断都误报，包括我们自己制造的那些。
+- ✅ **`skipReason !== 'halted'` 且 `Δruns(5min) < 8` → BLOCKING**（30s 一轮 ≈ 10 轮，留 20% 余量）。
+
+`runs` 是计数，计数不动就是死了，没有阈值可以糊弄。巡检每轮必须打印
+`reconcile={runs,ageMs,skipReason,timerActive}` **和** `placementProgress={status,pending,ageMs}`——
+一具僵尸摆在库里不显示，就等于没有这件事。
+
+### 11.4.2 幂等成功必须带现场量
+
+`POST /api/ar/start` 在「已在运行」时回 200，但返回体必须同时带
+`openOrders` 与 `startBlockedReason`：否则「已经好好的」和「在跑但一张单都没有」
+长得一模一样——**「空转被报成成功」是「成功被报成失败」的镜像病**。
+
+同理，`_startBlocked`（上一轮为什么没铺单）已进 state 快照，重启后仍可见。
+总纲：**该活的字段别持久化成化石（`placementProgress` 停在 `placing`、
+`exchangeOpenOrders` 冻 14 小时）；该记的事实别只活在内存里（`_startBlocked` 重启即失）。
+存错的会骗人，不存的会失忆。**
+
+### 11.4.3 `placementProgress` 僵尸的处置触发线
+
+`placementProgress.status !== 'complete'` 会挡住 `_canEnterRecovery()`（bot.js 1709）。
+纯记账僵尸不影响交易（`gaps=0`、local == exchange），但会在需要走回收时咬人。触发线：
+
+> **AR 价格跌破 73,500 而 `placementProgress` 仍非 `complete` → 回收路径被僵尸挡住，当场处置。**
+
+处置顺序：① 部署新版本后重启（重启会按 `active` 重建、自动清掉）；② 实在不能重启则
+`stop{closePosition:false}` + 停进程 + 重启。**绝不要手改 state 文件**——那是从可恢复
+走向不可恢复的路。
+
 ### 11.3.1 历史教训（保留）：`/reconnect` 是唯一「不撤单不平仓」的抢修口
 
 2026-11-09 09:19 维护窗实测：`ALLOW_STATE=1` 重启后进程正常（行情/W S/死手全绿、
@@ -366,6 +428,18 @@ balance = equity + 借入 − uPnL
 ---
 
 ## 12. 已知的观测债（下一维护窗处理）
+
+**2026-11-09 11:40 评审排定的下一窗顺序**（都是小改动，不用停、不用改参数）：
+
+| 序 | 项 | 为什么排这个位置 |
+|---|---|---|
+| 1 | `runs` 导数告警规则 + `skipReason !== 'halted'` 例外 | 仪表装了但报警规则会误报，等于没装（§11.4.1 已写规则，巡检脚本待接） |
+| 2 | `start` 200 补 `openOrders` / `startBlockedReason` | 两行，堵「空转被报成成功」（代码已改，随窗口部署） |
+| 3 | `_stopReconcileTimer` 停止侧解耦 | 对称性，防将来（代码已改+用例） |
+| 4 | `_startBlocked` 进 state 快照 | 该记的事实（代码已改+用例） |
+| 5 | 部署 `6300697`（顺带清僵尸） | 已推未部署 |
+| 6 | `grid_idle_since` / `exchangeHealth` / `opening` 错标 / 补腿冲突 30·33 | 观测与遗留 |
+
 
 日志已经被 `logrotate copytruncate` 写坏过：多个历史进程的 fd 各自在旧 offset 上继续写，
 文件里**时间不单调**（第 5999 行是 18:29，第 9699 行反而是 14:02 的 banner）。
