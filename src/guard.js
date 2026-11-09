@@ -37,7 +37,8 @@ export const GUARD_DEFAULTS = Object.freeze({
   // 一致性容差
   positionDeltaTol: 1e-8,
   consistencyUnknownHaltStreak: 2,   // 连续 N 轮一致性检查失败 → HALTED（单次 → DEFENSIVE）
-  consistencyStaleHaltStreak: 12,    // 连续 N 轮「仓位缓存落后成交」→ HALTED（5s/轮 ≈ 60s 仍追不上=真故障）
+  // consistencyStaleHaltStreak 已于 2026-11-09 退役：stale 不再单独熔断，只降级 DEFENSIVE。
+  // 见 evaluateRisk 1c) 的长注释（两条 5s 轮询的相位被当成故障）。
   // 恢复条件
   recoveryMaxInventoryFrac: 0.1,
   recoveryMinBarsAboveLower: 2,
@@ -124,24 +125,26 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   }
 
   // 1c) 一致性「滞后」：交易所仓位缓存的时间戳还没追平最后一笔成交。
-  //     这是「已知有界」的滞后，不是「查不明」——禁开仓，但不计 unknown streak。
-  //     持续到 consistencyStaleHaltStreak 仍追不上，才说明缓存真的坏了 → 熔断。
+  //     这是「已知有界」的滞后，不是「查不明」——禁开仓，但**绝不熔断**。
+  //
+  //     2026-11-09 修（主网 05:45 误熔断；这是第 5 次「拿时间当状态」）：
+  //     原判据是 positionsFetchedAt < lastFillAt 连续 12 轮（5s/轮 ≈ 60s）→ HALTED。
+  //     但 fills 轮询与 positions 轮询是两条 **~5s 的独立节拍**，谁先谁后随机；
+  //     成交密集期 lastFillAt 每几秒被刷新一次，于是「缓存落后最后成交」这句话会
+  //     连续成立几十秒，而真实滞后只有 1.8s——它测的是**两条轮询的相对相位**，
+  //     不是「缓存坏了」。平静期永不触发、剧烈期几乎必然触发，方向正好相反。
+  //     且 12 轮 × 5s = 60s 与两条轮询同量级：尺子和被测对象一样粗，测不出东西。
+  //
+  //     缓存真卡死仍有人兜：mismatch 路径会先强制拉取一次（25f2659：
+  //     getPositionFresh + pollFillsNow），用新鲜数据复核后仍不一致才熔断；
+  //     适配器彻底读不出仓位则落 unknown（2 轮即熔断）。stale 退回纯观测标签。
   let consistencyStale = false;
   if (ctx.consistency && ctx.consistency.status === 'stale') {
     const sstreak = num(ctx.consistencyStaleStreak);
     const why = (ctx.consistency.issues && ctx.consistency.issues[0]) || '缓存落后成交';
-    if (sstreak >= L.consistencyStaleHaltStreak) {
-      return {
-        state: STATES.HALTED,
-        reasons: [`仓位缓存连续 ${sstreak} 轮追不上成交：${why}`],
-        blockOpening: true,
-        blockSide: 'both',
-        haltReason: `仓位缓存连续 ${sstreak} 轮落后于成交（${why}）`,
-        metrics,
-      };
-    }
     consistencyStale = true;
-    reasons.push(`仓位缓存滞后（${why}），暂停新增开仓`);
+    metrics.consistencyStaleStreak = sstreak;
+    reasons.push(`仓位缓存滞后（${why}，连续 ${sstreak} 轮；仅观测，不熔断），暂停新增开仓`);
   }
 
   const equity = Number.isFinite(Number(ctx.equity)) ? Number(ctx.equity) : null;
@@ -259,8 +262,8 @@ export function evaluateRisk(ctx = {}, limits = {}) {
   }
 
   // unknown（查不明）与 stale（缓存滞后）都禁开仓：账本此刻不可验证，就不该加风险。
-  // 区别只在熔断门槛：unknown 连续 2 轮即熔断，stale 给到 12 轮（≈60s）——
-  // 后者是「已知有界的等待」，前者是「状态坏了」。
+  // 区别在熔断门槛：unknown 连续 2 轮即熔断（状态坏了），stale 永不熔断（已知有界的等待，
+  // 2026-11-09 起只降级禁开仓；缓存真坏由 mismatch 的强制重拉 + unknown 兜底）。
   if (consistencyUnknown || consistencyStale) {
     blockOpening = true;
     if (!blockSide) blockSide = 'both';

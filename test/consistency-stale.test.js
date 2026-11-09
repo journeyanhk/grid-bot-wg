@@ -68,16 +68,34 @@ test('单次 stale → DEFENSIVE 且禁开仓，但不熔断', () => {
   assert.equal(r.haltReason, null);
 });
 
-test('stale 连续 12 轮（≈60s 仍追不上）→ HALTED', () => {
+// 2026-11-09 主网 05:45 误熔断的回归用例。
+// 行情从 75,857 崩到 74,075 时成交密集，lastFillAt 每几秒被刷新一次，
+// positionsFetchedAt 只在它自己那条 5s 节拍上更新 → stale 连续 12 轮成立。
+// 真实滞后只有 1.8s，账本与交易所完全一致（单发核实 0.0012 == 0.0012），
+// 却熔断了 2 小时 15 分、错过一整段 2% 往返行情。
+test('stale 连续 12 轮也不熔断（2026-11-09 误熔断回归）', () => {
   const r = evaluateRisk({
-    consistency: { ok: false, status: 'stale', issues: ['交易所仓位缓存落后最后成交 61.0s'] },
+    consistency: { ok: false, status: 'stale', issues: ['交易所仓位缓存落后最后成交 1.8s'] },
     consistencyStaleStreak: 12,
     price: 78000, lower: 72000, upper: 84000,
-    positionBase: 0.0002, inventoryBase: 0.0002, maxInventoryBase: 0.0008,
+    positionBase: 0.0006, inventoryBase: 0.0006, maxInventoryBase: 0.0068,
     equity: 150, startBalance: 150, fills: [], now: Date.now(),
   }, {});
-  assert.equal(r.state, STATES.HALTED, '缓存真的坏了才熔断');
-  assert.match(r.haltReason, /仓位缓存连续 12 轮/);
+  assert.equal(r.state, STATES.DEFENSIVE, '两条 5s 轮询的相位差不是故障，只该降级');
+  assert.equal(r.haltReason, null, 'stale 不许再产生 haltReason');
+  assert.equal(r.blockOpening, true, '账本此刻不可验证 → 禁开仓');
+});
+
+test('stale 连续 50 轮仍不熔断，轮数只进观测字段', () => {
+  const r = evaluateRisk({
+    consistency: { ok: false, status: 'stale', issues: ['交易所仓位缓存落后最后成交 1.8s'] },
+    consistencyStaleStreak: 50,
+    price: 78000, lower: 72000, upper: 84000,
+    positionBase: 0.0006, inventoryBase: 0.0006, maxInventoryBase: 0.0068,
+    equity: 150, startBalance: 150, fills: [], now: Date.now(),
+  }, {});
+  assert.notEqual(r.state, STATES.HALTED, '轮数再多也不许熔断');
+  assert.equal(r.metrics.consistencyStaleStreak, 50, '轮数必须留痕，供巡检观测');
 });
 
 test('unknown（查不明）仍按原规则：连续 2 轮即熔断', () => {

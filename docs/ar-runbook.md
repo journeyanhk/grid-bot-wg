@@ -298,6 +298,27 @@ balance = equity + 借入 − uPnL
 - **`local openOrders != exchange openOrders` 持续 >30 分钟 → 直接升级为 BLOCKING**。
   读这个比较时必须先看 `exchangeOpenOrdersAgeMs`：缓存超过 2 分钟就该单发核实，而不是报警。
 
+### 11.1 「连续 N 轮」计数器的通用戒律（2026-11-09 立）
+
+**任何「连续 N 轮」的计数器，都必须绑定一把与被测对象**不同量级**的尺子。**
+
+2026-11-09 05:45 的假熔断就是反面教材：`stale` 判据 `positionsFetchedAt < lastFillAt`
+连续 12 轮（5s/轮 ≈ 60s）→ HALTED。但 fills 与 positions 是两条 **同为 ~5s 的独立轮询**，
+谁先谁后随机；成交密集时 `lastFillAt` 每几秒被刷新一次，于是「缓存落后最后成交」可以
+连续成立几十秒，**真实滞后只有 1.8s**。12 轮 × 5s 和两条 5s 轮询同量级，尺子与被测对象
+一样粗，测出来的只是相位，不是故障——方向还正好相反（平静期不触发、剧烈期必触发）。
+
+落地：`stale` 自 2026-11-09 起**只降级 DEFENSIVE + 禁开仓，永不熔断**（轮数仅进
+`metrics.consistencyStaleStreak` 供观测）。缓存真卡死由 mismatch 的强制重拉
+（`getPositionFresh` + `pollFillsNow`）复核后熔断，读不出仓位则落 `unknown`（2 轮熔断）。
+回归用例：`test/consistency-stale.test.js`「stale 连续 12 轮也不熔断」。
+
+### 11.2 G 段怎么读：`最近续期` 是相位，不是延迟
+
+`dmsRenewAgeMs` = **距上次续期过去了多久**。节拍 20s，所以它天然在 0–20000ms 锯齿内摆动，
+**不是「续期花了多久」**。健康判据只看两条：`triggers24h == 0` 且 `deadline 剩余` 满额
+（约 270–290s）。别把锯齿相位读成「爬升/回落」（2026-11-07 04:00–07:00 我连错三轮）。
+
 ---
 
 ## 12. 已知的观测债（下一维护窗处理）
