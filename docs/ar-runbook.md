@@ -319,25 +319,49 @@ balance = equity + 借入 − uPnL
 **不是「续期花了多久」**。健康判据只看两条：`triggers24h == 0` 且 `deadline 剩余` 满额
 （约 270–290s）。别把锯齿相位读成「爬升/回落」（2026-11-07 04:00–07:00 我连错三轮）。
 
-### 11.3 重启后先打一次 `/reconnect`，再确认对账在走
+### 11.3 重启后先看 `reconcile.timerActive`，再说别的
+
+**2026-11-09 10:20 定稿的结论（推翻本文档上一版的猜测）**：重启后对账停摆，
+不是 `fetchOpenOrders` 失败被静默 `catch` 掉，而是**定时器压根没启动**。
+证据是启动日志第 10834 行：
+
+```
+09:19:15 ⛔ 启动被风控拦截：已有熔断记录：仓位缓存连续 12 轮落后于成交…
+```
+
+`_start()` 里这道闸门（`if (blocked) { alert; _changed(); return; }`）位置在
+`_placeMany()` / `_finishPlacementPass()` / `_startReconcileTimer()` **之前**，
+于是「熔断记录没清就重启」会一次性留下三具尸体：
+
+1. 对账定时器不启动 → `exchangeOpenOrdersVerifiedAt` 冻在秒级，`ageMs` 单调涨；
+2. 风控心跳不启动（`_startReconcileTimer()` 顺带启动它）→ 风控只在成交事件里跑；
+3. `_beginPlacementProgress('start', seeds)` 已经写过，`_finishPlacementPass()` 永不执行
+   → `placementProgress.status` 永久 `placing`，把回收前置检查（bot.js 1709，
+   要求 `status === 'complete'`）永久堵死。
+
+10:20 起代码已修：闸门早退会清掉这批 progress 并 `_startReconcileTimer()`；
+`beginNewRiskEpoch()` 也会补一次 `_startReconcileTimer()`（幂等），避免「解了熔断但心跳没亮」。
+
+**验收三条（现在可以直接读，不用猜）**：
+
+1. `state.reconcile.timerActive === true`；
+2. `state.reconcile.skipReason === null` 且 `ageMs < 40s`（两次读数之间应 reset）；
+3. `state.placementProgress === null` 或 `status === 'complete'`。
+
+`skipReason` 的取值就是那六个早退出口：`not-running` / `halted` / `adapter-unsupported` /
+`no-grid` / `fetch-failed: …` / `bad-snapshot`。看到 `halted` 且熔断其实已解除，
+说明 `guardState` 与熔断记录不同步；看到 `fetch-failed` 才轮到查限流/网络。
+
+### 11.3.1 历史教训（保留）：`/reconnect` 是唯一「不撤单不平仓」的抢修口
 
 2026-11-09 09:19 维护窗实测：`ALLOW_STATE=1` 重启后进程正常（行情/W S/死手全绿、
 8 张种子单真的挂上了、成交也在处理），但**对账循环静默失效**——
 `exchangeOpenOrdersVerifiedAt` 与 `placementProgress.updatedAt` 双双冻在启动那一秒，
 `exchangeOpenOrders` 恒为 0、`placementProgress.status` 永远 `placing`。
-原因是对账入口 `reconcileOpenOrders()` 把 `fetchOpenOrders` 失败 `catch { return }` 掉了
-（静默），客户端在开机路径上卡住时没有任何告警。`POST /api/ar/reconnect` 之后
-立刻恢复（`ageMs` 从 375,000ms 掉到 1ms，local 7 == exchange 7）。
-
-**开窗验收必须加这三条**（缺一条就算没验收）：
-
-1. `exchangeOpenOrdersAgeMs` 是**个位数/十几秒**，且两次读数之间会**reset**（不是单调涨）；
-2. `local openOrders == exchangeOpenOrders`（用单发 `arcus_peek.mjs` 取真值比对）；
-3. `placementProgress.status` 不是 `placing`（`complete`/`null` 才算铺单收尾）。
-
-第 1 条不满足就 `POST /api/ar/reconnect` 再验一次——这是文档里唯一一个「先修连接、
-不撤单不平仓」的入口。静默 `catch` 属观测债，已记入第 12 节（结构化计数器要加
-`reconcileFails`/`lastReconcileError`）。
+抢修手段仍然是 `POST /api/ar/reconnect`：它调用一次 `reconcileOpenOrders()` 并重建客户端，
+实测把 `exchangeOpenOrdersAgeMs` 从 375,000ms 拉回 1ms、`local 7 == exchange 7`。
+注意它**只修一次**——如果定时器没起（见 11.3），一分钟后 age 会继续涨。
+所以「reconnect 有效」不等于「修好了」，必须回到 `reconcile.timerActive` 判断。
 
 ---
 

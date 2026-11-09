@@ -85,6 +85,19 @@ export class GridBot {
     this._lastFailAt = 0;
     this._exchangeOpenOrders = null; // last reconciled real open-order count
     this._exchangeOpenOrdersVerifiedAt = null; // authoritative REST snapshot time
+    // 2026-11-09：对账活性仪表。
+    //
+    // 09:19 那次重启暴露的教训：`_start()` 因为「已有熔断记录」早退，连带跳过了
+    // `_startReconcileTimer()`，于是对账/风控心跳整整 40 分钟没跑。旧代码里这件事
+    // **完全不可观测**——`reconcileOpenOrders()` 的六个早退出口全是静默 return，
+    // `exchangeOpenOrders` 只是一直冻着（而它本来就是缓存，冻结也能解释成「没变化」）。
+    // 现在把「最后一次成功时刻 / 最近一次跳过原因 / 定时器是否活着」直接暴露到 state，
+    // 让「循环死了」在下一次巡检里一眼可见，而不是靠人去推。
+    this._lastReconAt = 0;            // 最近一次对账成功（拿到真实快照并写回）的时间
+    this._reconSkipReason = 'not-running'; // 最近一次早退原因（null=最近一次成功）
+    this._reconRuns = 0;
+    this._reconFails = 0;
+    this._startBlocked = null;        // 启动被风控拦下的原因（null=未被拦）
     // 2026-11-07：mismatch 先强制拉取再判（runbook 7.1）。
     // 每次 mismatch 只强制一次，防风暴；一致性恢复后自动重置。
     this._mismatchRefetched = false;
@@ -676,10 +689,24 @@ export class GridBot {
     this._runRiskCycle('start');
     const blocked = this._startBlockedReason();
     if (blocked) {
-      this._alert(`⛔ 启动被风控拦截：${blocked}。本轮不铺任何开仓单，保持等待（无挂单、无持仓变化）。`);
+      // 2026-11-09：这条早退以前直接 return，后果有两个，都踩过：
+      //  ① 跳过了下面第 691 行的 `_startReconcileTimer()`/`_startDynTimer()` ——
+      //     熔断记录未清就重启时，对账与风控心跳**一次都不会启动**（09:19 实测：
+      //     `exchangeOpenOrdersVerifiedAt` 冻在启动那一秒，age 一路涨到 500s+，
+      //     只有手工 POST /api/ar/reconnect 才刷新一次），风控从此只靠成交事件驱动。
+      //  ② `_beginPlacementProgress('start', seeds)` 在闸门**之前**就写好了，
+      //     早退让 `_finishPlacementPass()` 永不执行 —— progress 永久停在 `placing`，
+      //     而 `_canEnterRecovery()`（bot.js 1709）要求它必须是 `complete`，
+      //     于是「未完成的铺单批次」会一直挡住回收路径。
+      // 现在：闸门照旧不铺单，但必须收尾 + 把心跳拉起来。
+      this._startBlocked = String(blocked);
+      this._placementProgress = null;   // 一张都没铺，这批 progress 没有意义
+      this._alert(`⛔ 启动被风控拦截：${blocked}。本轮不铺任何开仓单，保持等待（无挂单、无持仓变化）。对账/风控心跳已启动，后续按常规巡检。`);
+      this._startReconcileTimer();      // 幂等；HALTED 时 reconcile 自己会以 'halted' 早退
       this._changed();
       return this.getState();
     }
+    this._startBlocked = null;
     await this._placeMany(seeds.map((s) => ({ ...s, opening: true, _placementId: placementId })));
     this._finishPlacementPass();
 
@@ -960,8 +987,30 @@ export class GridBot {
 
   _restorePendingPlacementRetries() {
     const p = this._placementProgress;
-    if (!p || !this.ex.supportsSafeOpeningRetry || !Array.isArray(p.orders)) return;
+    if (!p) return;
+    // 2026-11-09：跨重启僵尸。progress 是落盘字段，一次没走完的铺单批次会跟着快照
+    // 活到下次启动；而 `_canEnterRecovery()` 要求 `status === 'complete'`，
+    // 所以一个永远补不完的 `placing`（或补完但没有新单可补的 `incomplete`）会把
+    // 回收路径永久堵死，还会伪造出一串「重启后恢复未完成挂单」的重试。
+    // 先把「其实已经在簿上」的档位剔掉，再决定这具僵尸还该不该存在。
+    const activeLevels = new Set([...this.active.values()].map((o) => Number(o.levelIndex)));
+    if (Array.isArray(p.pendingLevels)) {
+      for (const lv of [...p.pendingLevels]) {
+        if (!activeLevels.has(Number(lv))) continue;
+        if (!Array.isArray(p.confirmedLevels)) p.confirmedLevels = [];
+        if (!p.confirmedLevels.includes(lv)) p.confirmedLevels.push(lv);
+        p.pendingLevels = p.pendingLevels.filter((x) => x !== lv);
+      }
+    }
+    const nothingLeft = !(p.pendingLevels || []).length;
+    if (nothingLeft) {
+      // 没有待补档位就没有「未完成批次」：直接清掉，别再让它挡路。
+      this._placementProgress = null;
+      return;
+    }
+    // 进程重启后这一轮铺单必然已经结束：先如实收尾，再决定要不要续补。
     p.initialPassDone = true;
+    if (!this.ex.supportsSafeOpeningRetry || !Array.isArray(p.orders)) { this._refreshPlacementProgress(p); return; }
     const pending = new Set(p.pendingLevels || []);
     for (const order of p.orders) {
       if (!pending.has(order.levelIndex)) continue;
@@ -1039,6 +1088,8 @@ export class GridBot {
       pending: (p.pendingLevels || []).length,
       failed: (p.failedLevels || []).length,
       status: p.status, updatedAt: p.updatedAt,
+      // 僵尸判据：status 长时间不是 complete 而 updatedAt 不动 → 批次没在推进
+      ageMs: p.updatedAt ? Date.now() - p.updatedAt : null,
     };
   }
 
@@ -1420,6 +1471,10 @@ export class GridBot {
     }
     this._consistencyUnknownStreak = 0;
     this._consistencyStaleStreak = 0;
+    // 解熔断后必须保证心跳活着：09:19 那次 `_start()` 早退没启动定时器，
+    // 于是 new-epoch 解了熔断、主循环照常成交，但「对账/风控」两盏灯一盏都没亮。
+    // 这里是幂等的，已在跑就什么也不做。
+    this._startReconcileTimer();
     const rec = {
       at: new Date().toISOString(), by: String(by).slice(0, 64), reason: String(reason).slice(0, 200),
       prevExpected, exchangeBase: s1, delta: Number((s1 - prevExpected).toFixed(10)),
@@ -2537,13 +2592,15 @@ export class GridBot {
    */
   async reconcileOpenOrders() {
     this._touch();
-    if (!this.running || !this.config) return;
+    // 每个早退出口都留下原因：静默 return 会让「对账停摆」看起来像「一切正常」
+    // （2026-11-09 09:19–10:00 实测 40 分钟没人发现）。
+    if (!this.running || !this.config) { this._reconSkipReason = 'not-running'; return; }
     // HALTED 期间熔断已经把挂单全撤了，书架是空的 —— reconcile 没有对象，
     // 却还在以 weight 20 × 重试 3 次的频率制造纯浪费。
     // 2026-11-06 21:30 实测：openOrders 429 达 12 次/分钟 = 240/min，
     // 与 fills 的 400/min 叠加把预算吃穿，形成「限流→重试→更限流」的循环。
-    if (this.guardState?.state === 'HALTED') return;
-    if (typeof this.ex.fetchOpenOrders !== 'function') return;
+    if (this.guardState?.state === 'HALTED') { this._reconSkipReason = 'halted'; return; }
+    if (typeof this.ex.fetchOpenOrders !== 'function') { this._reconSkipReason = 'adapter-unsupported'; return; }
     // Keep the adapter's price watch warm so a long-running market is never
     // pruned as "idle" (adapters drop unwatched markets after 10 min).
     this.ex.getPrice?.(this.config.marketId)?.catch?.(() => {});
@@ -2551,7 +2608,7 @@ export class GridBot {
     // Recovery has no grid: derive levels straight from price via config.spacing.
     const sp = recovery ? this.config.spacing : this.grid?.spacing;
     const lvl0 = recovery ? 0 : this.grid?.levels?.[0];
-    if (!(sp > 0) || lvl0 == null) return;
+    if (!(sp > 0) || lvl0 == null) { this._reconSkipReason = 'no-grid'; return; }
     const nLevels = recovery ? Infinity : this.grid.levels.length;
     // Grid-mode recovery ladder (outOfRangeAction='recover') rests OUTSIDE the
     // grid: negative idx below the range, >= nLevels above. Widen the accepted
@@ -2560,10 +2617,14 @@ export class GridBot {
     const ladderPad = (!recovery && this.config.outOfRangeAction === 'recover') ? (this.grid?.count ?? 0) : 0;
     const idxLo = 0 - ladderPad, idxHi = nLevels === Infinity ? Infinity : nLevels + ladderPad;
     let real;
-    try { real = await this.ex.fetchOpenOrders(this.config.marketId); } catch { return; }
-    if (!Array.isArray(real)) return;
+    try { real = await this.ex.fetchOpenOrders(this.config.marketId); }
+    catch (e) { this._reconSkipReason = `fetch-failed: ${e?.message || e}`; this._reconFails += 1; return; }
+    if (!Array.isArray(real)) { this._reconSkipReason = 'bad-snapshot'; this._reconFails += 1; return; }
     this._exchangeOpenOrders = real.length;
     this._exchangeOpenOrdersVerifiedAt = Date.now();
+    this._lastReconAt = this._exchangeOpenOrdersVerifiedAt;
+    this._reconRuns += 1;
+    this._reconSkipReason = null;
     const realIds = new Set(real.map((o) => String(o.orderId)));
     const realById = new Map(real.map((o) => [String(o.orderId), o]));
     const now = Date.now();
@@ -3176,6 +3237,17 @@ export class GridBot {
         ? Date.now() - this._exchangeOpenOrdersVerifiedAt : null,
       exchangeOpenOrdersVerifiedAt: this._exchangeOpenOrdersVerifiedAt,
       placementProgress: this._placementProgressView(),
+      // 对账活性（2026-11-09 新增）：timerActive=false 或 ageMs 单调增长 = 心跳死了。
+      // 不要再用 exchangeOpenOrders 是否变化来猜对账有没有在跑，那是缓存。
+      reconcile: {
+        timerActive: !!this._reconTimer,
+        lastOkAt: this._lastReconAt || null,
+        ageMs: this._lastReconAt ? Date.now() - this._lastReconAt : null,
+        skipReason: this._reconSkipReason ?? null,
+        runs: this._reconRuns,
+        fails: this._reconFails,
+      },
+      startBlockedReason: this._startBlocked ?? null,
       openByLevel,
       health: this._health(),
       position: pos ? {

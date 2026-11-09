@@ -351,7 +351,19 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
         if (exCfg?.recoverMaxLossUsd != null) body.recoverMaxLossUsd = exCfg.recoverMaxLossUsd;
         return send(res, 200, await bot.start(body));
       }
-      catch (e) { return send(res, 400, { error: e.message }); }
+      catch (e) {
+        // 2026-11-09：「已在运行」不是失败。旧实现把幂等请求回成 400，运维脚本
+        // （以及我自己 09:19 那轮）会把「本来就已经在跑」误读成「启动失败」，
+        // 接着去做多余的排查。同族问题还有 new-epoch 的 note 与实际行为不一致。
+        if (/已在运行|正在启动/.test(e.message || '')) {
+          return send(res, 200, {
+            ok: true, alreadyRunning: true,
+            note: '机器人已在运行（本次请求视为幂等成功，未做任何变更）',
+            state: bot.getState?.(),
+          });
+        }
+        return send(res, 400, { error: e.message });
+      }
     }
 
     if (subPath === '/stop' && req.method === 'POST') {
