@@ -319,6 +319,26 @@ balance = equity + 借入 − uPnL
 **不是「续期花了多久」**。健康判据只看两条：`triggers24h == 0` 且 `deadline 剩余` 满额
 （约 270–290s）。别把锯齿相位读成「爬升/回落」（2026-11-07 04:00–07:00 我连错三轮）。
 
+### 11.3 重启后先打一次 `/reconnect`，再确认对账在走
+
+2026-11-09 09:19 维护窗实测：`ALLOW_STATE=1` 重启后进程正常（行情/W S/死手全绿、
+8 张种子单真的挂上了、成交也在处理），但**对账循环静默失效**——
+`exchangeOpenOrdersVerifiedAt` 与 `placementProgress.updatedAt` 双双冻在启动那一秒，
+`exchangeOpenOrders` 恒为 0、`placementProgress.status` 永远 `placing`。
+原因是对账入口 `reconcileOpenOrders()` 把 `fetchOpenOrders` 失败 `catch { return }` 掉了
+（静默），客户端在开机路径上卡住时没有任何告警。`POST /api/ar/reconnect` 之后
+立刻恢复（`ageMs` 从 375,000ms 掉到 1ms，local 7 == exchange 7）。
+
+**开窗验收必须加这三条**（缺一条就算没验收）：
+
+1. `exchangeOpenOrdersAgeMs` 是**个位数/十几秒**，且两次读数之间会**reset**（不是单调涨）；
+2. `local openOrders == exchangeOpenOrders`（用单发 `arcus_peek.mjs` 取真值比对）；
+3. `placementProgress.status` 不是 `placing`（`complete`/`null` 才算铺单收尾）。
+
+第 1 条不满足就 `POST /api/ar/reconnect` 再验一次——这是文档里唯一一个「先修连接、
+不撤单不平仓」的入口。静默 `catch` 属观测债，已记入第 12 节（结构化计数器要加
+`reconcileFails`/`lastReconcileError`）。
+
 ---
 
 ## 12. 已知的观测债（下一维护窗处理）
