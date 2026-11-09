@@ -121,8 +121,9 @@ test('跨重启僵尸：待补档位其实都在簿上时，progress 必须被�
   await bot.stop({ closePosition: false }).catch(() => {});
 });
 
-test('跨重启且确有待补档位：progress 保留但状态推进到 retrying', async () => {
-  const { bot } = makeBot({ price: 150 });
+test('跨重启且确有待补档位：适配器支持安全重试时保留并推进到 retrying', async () => {
+  const { ex, bot } = makeBot({ price: 150 });
+  ex.supportsSafeOpeningRetry = true;   // Arcus 是 false，这里验证「支持」的那条分支
   bot.config = { ...CFG };
   bot.running = true;
   bot.active.set('a1', { levelIndex: 1, side: 'buy', price: 100, sizeBase: 1, opening: true });
@@ -137,5 +138,22 @@ test('跨重启且确有待补档位：progress 保留但状态推进到 retryin
   assert.ok(bot._placementProgress, '真有待补档位时不能清');
   assert.deepEqual(bot._placementProgress.pendingLevels, [2], '已在簿的档位必须从待补里剔除');
   assert.equal(bot._placementProgress.status, 'retrying', '重启后不许再停在 placing');
+  await bot.stop({ closePosition: false }).catch(() => {});
+});
+
+test('跨重启且适配器不支持安全重试：没有可执行动作的批次必须清掉', async () => {
+  const { bot } = makeBot({ price: 150 });   // MockEx 默认没有 supportsSafeOpeningRetry
+  bot.config = { ...CFG };
+  bot.running = true;
+  bot.active.set('a1', { levelIndex: 1, side: 'buy', price: 100, sizeBase: 1, opening: true });
+  bot._placementProgress = {
+    id: 'stale-3', action: 'start', target: 2,
+    orders: [{ levelIndex: 1, side: 'buy', price: 100 }, { levelIndex: 2, side: 'buy', price: 99 }],
+    confirmedLevels: [], pendingLevels: [1, 2], failedLevels: [],
+    status: 'placing', initialPassDone: false, completionAlerted: false,
+    updatedAt: Date.now() - 3600_000,
+  };
+  bot._restorePendingPlacementRetries();
+  assert.equal(bot._placementProgress, null, '补不了的批次必须清掉，否则永久挡回收');
   await bot.stop({ closePosition: false }).catch(() => {});
 });

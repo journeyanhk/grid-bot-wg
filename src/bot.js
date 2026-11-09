@@ -1014,7 +1014,15 @@ export class GridBot {
     }
     // 进程重启后这一轮铺单必然已经结束：先如实收尾，再决定要不要续补。
     p.initialPassDone = true;
-    if (!this.ex.supportsSafeOpeningRetry || !Array.isArray(p.orders)) { this._refreshPlacementProgress(p); return; }
+    if (!this.ex.supportsSafeOpeningRetry || !Array.isArray(p.orders)) {
+      // 适配器不支持「两次快照去重」的开仓重试（Arcus 就是 false）：剩下这 N 个档位
+      // 谁也补不了，留着只会让 progress 永远停在 retrying，再次把回收前置检查堵死。
+      // 没有可执行动作的批次，正确定义就是「结束」——清掉，别留残骸。
+      this._refreshPlacementProgress(p);
+      p.status = 'complete';
+      this._placementProgress = null;
+      return;
+    }
     const pending = new Set(p.pendingLevels || []);
     for (const order of p.orders) {
       if (!pending.has(order.levelIndex)) continue;
