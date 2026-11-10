@@ -61,13 +61,16 @@ test('P2-1：进入熔断那一刻复位节流标记（否则下一次熔断不�
   const bot = mkBot([BAD]);
   bot.guardState = { state: STATES.RUNNING, reasons: [], metrics: {} };
   bot._guardLastState = STATES.RUNNING;
-  bot._forceMismatchRefetch = async () => {};   // 第一次 mismatch 只强制拉取
+  bot._forceMismatchRefetch = async () => {};
+  // 2026-11-10：第一次 mismatch 不再「只拉一次然后什么都不说」，而是开一个
+  // 90 秒收敛窗口（DEFENSIVE）。判定仍不一致要等窗口耗尽，所以这里把 since 回拨。
   bot._applyGuard('test');
-  assert.equal(bot._mismatchRefetched, true, '第一次 mismatch 应触发了强制拉取');
+  assert.equal(bot._mismatchWindow?.attempts, 1, '第一次 mismatch 应开窗并强制拉取');
 
-  // 第二次 mismatch（已拉过）→ 必须熔断，且必须在「进入熔断」时复位节流
+  bot._mismatchWindow.since -= 91_000;
+  bot._mismatchWindow.inFlight = false;
   bot._applyGuard('test');
-  assert.equal(bot.guardState.state, STATES.HALTED, '拉取后仍不一致必须熔断');
+  assert.equal(bot.guardState.state, STATES.HALTED, '窗口耗尽仍不一致必须熔断');
   assert.equal(bot._haltSatisfied, false, '进入熔断必须把「已确认清空」复位');
   assert.equal(bot._haltEnforceLastAt, 0, '进入熔断必须把节流时间戳清零');
 });

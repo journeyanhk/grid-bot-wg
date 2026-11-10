@@ -18,6 +18,25 @@ const HALT_RECHECK_MS = 5 * 60 * 1000;      // 已确认清空后：5 分钟复�
 const HALT_RECHECK_PENDING_MS = 15 * 1000;  // 尚未确认清空：15 秒重试一次（仍需快，但不要 5 秒）
 const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 
+// 账本不一致（mismatch）的「限时收敛」窗口。2026-11-10 定稿。
+//
+// 历史：四个 mismatch 熔断（11-06 21:29、11-06 22:36、11-09 17:05、11-09 21:34）
+// 全部在数秒内自行对齐，零次真错账 —— 假阳性率 100%。根因是**两个数据源的时序差**：
+// position 快照比 fills 事件早约 4–5 秒可见，单拍比对必然读到「少/多一笔」的中间态。
+// 11-07 的「先强制拉取再判」救不了它：强制拉取那一拍，fills 端点里那笔成交还没出现。
+//
+// 判据因此从「此刻差多少」改成「限时内是否收敛」：
+//   不一致 → DEFENSIVE（禁新增开仓，不撤单、不动仓位）+ 0/30/60s 三次强制重拉
+//   90s 内任一拍对齐 → 回 RUNNING，只留一条「已自愈」告警
+//   90s 后仍不一致 → 才 HALTED（fail-closed 不放松）
+// 90 秒的「可能按旧库存多铺一格」，远便宜于 4–12 小时的「完全停摆 + 裸仓无腿」。
+const MISMATCH_CONVERGE_MS = 90 * 1000;
+const MISMATCH_ATTEMPT_GAP_MS = 30 * 1000;
+const MISMATCH_MAX_ATTEMPTS = 3;
+// 铺单批次「仍在进行」的判定窗口：超过这个年龄的 retrying/incomplete 是僵尸记录，
+// 不该拦住重锚（2026-11-09 实测 placementProgress 停在 retrying/pending 2 达 34,700s）。
+const PLACEMENT_PROGRESS_LIVE_MS = 5 * 60 * 1000;
+
 // 挂单"全撤"确认门：连续多少轮对账都拿到 0 单才认定是真的没了（对账约 30 秒一轮）。
 const MASS_VANISH_CONFIRM_ROUNDS = 3;
 // 阶梯"塌陷"（非全撤）：死手/交易所批量撤销后仍残留少数挂单时 massVanish 不会触发，
@@ -98,9 +117,15 @@ export class GridBot {
     this._reconRuns = 0;
     this._reconFails = 0;
     this._startBlocked = null;        // 启动被风控拦下的原因（null=未被拦）
-    // 2026-11-07：mismatch 先强制拉取再判（runbook 7.1）。
-    // 每次 mismatch 只强制一次，防风暴；一致性恢复后自动重置。
-    this._mismatchRefetched = false;
+    // 2026-11-10：mismatch 改为「限时收敛」（runbook 7.1 改写）。
+    // 窗口对象 { since, attempts, inFlight }：since=首次发现不一致的时刻，
+    // attempts=已强制重拉次数（上限 3），inFlight=同一时刻只允许一次重拉。
+    this._mismatchWindow = null;
+    // 未跟踪成交：成交到了、本地没有这张单的记录（撤单竞态/重启丢单/非本机下单）。
+    // 2026-11-10 之前这个数组只有读、没有写，等于一个从未接线的传感器。
+    this._untrackedFills = [];
+    // 被风控拦下的开仓腿（见 _deferOpening）：风控恢复后补铺，避免留下无出口的裸腿。
+    this._deferredOpenings = [];
     // 2026-11-07：熔断执行节流。撤单是幂等的，一旦确认「交易所非减仓单 = 0」，
     // 答案不会自己变回去（HALTED 禁开仓，不产生新单），不必每轮再拉一次快照。
     this._haltSatisfied = false;
@@ -208,6 +233,9 @@ export class GridBot {
       active: [...this.active.entries()],
       placementProgress: this._placementProgress,
       retryQueue: this._retryQueue,
+      // 未跟踪成交（成交到了但本地没这张单）：跨重启保留，否则重启后传感器归零、
+      // 「刚才那笔没人认领的成交」这件事就永远消失了。
+      untrackedFills: (this._untrackedFills || []).slice(0, 20),
       // 「上一轮为什么没铺单」是事实，必须跨重启保留：只活在内存里的话，重启后
       // `running=true` 会被恢复、`startBlocked` 却消失，巡检看到的是一个「正常在跑的空机器人」。
       startBlocked: this._startBlocked ?? null,
@@ -237,6 +265,7 @@ export class GridBot {
     this._pnlBase = snap.pnlBase ?? null;
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
+    this._untrackedFills = Array.isArray(snap.untrackedFills) ? snap.untrackedFills : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
     this._startBlocked = snap.startBlocked ?? null; // 上一轮为什么没铺单（跨重启保留）
     this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : []; // 动态动作记录（毕业评审）
@@ -279,6 +308,7 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
+    this._untrackedFills = Array.isArray(snap.untrackedFills) ? snap.untrackedFills : [];
     // 注意：`_restorePendingPlacementRetries()` 必须等 active 重建之后再调，
     // 否则它看到的 active 是空的，「已在簿的档位」剔不掉，僵尸 progress 会被当成
     // 8 个待补档位重新排进重试队列（2026-11-09 10:20 实测踩到）。真正的调用在下面。
@@ -347,6 +377,7 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = (Array.isArray(snap.retryQueue) ? snap.retryQueue : [])
       .map((o) => ({ ...o, _nextAt: Math.max(Number(o._nextAt) || 0, Date.now() + 30_000) }));
+    this._untrackedFills = Array.isArray(snap.untrackedFills) ? snap.untrackedFills : [];
     this.active.clear();
     for (const [id, info] of (Array.isArray(snap.active) ? snap.active : [])) {
       const oid = String(id);
@@ -1050,6 +1081,22 @@ export class GridBot {
     return p && order?._placementId === p.id ? p : null;
   }
 
+  /**
+   * 铺单批次是否「仍在进行」。
+   *
+   * 判据是「状态非 complete **且** 记录新鲜」：status 的枚举只有
+   * placing/retrying/incomplete/complete，从来不存在 'running'（旧代码按它判，
+   * 于是两处判断恒真/恒假）。而只用 status 也不够——熔断或崩溃会留下一个
+   * 停在 retrying 的僵尸记录（2026-11-09 实测 pending 2 挂了 34,700s），
+   * 拿它当「正在铺单」会永久挡住重锚、永久关掉缺口哨兵。所以必须带年龄。
+   */
+  _placementInFlight() {
+    const p = this._placementProgress;
+    if (!p || p.status === 'complete') return false;
+    const age = Date.now() - Number(p.updatedAt || 0);
+    return age < PLACEMENT_PROGRESS_LIVE_MS;
+  }
+
   _refreshPlacementProgress(p = this._placementProgress) {
     if (!p) return;
     const confirmed = new Set(p.confirmedLevels || []);
@@ -1321,6 +1368,38 @@ export class GridBot {
     }
   }
 
+  /**
+   * 记下一条被风控拦下的开仓腿，等风控恢复后补出去。
+   *
+   * 为什么必须记：`_place` 被拦时是**直接 return**。如果这一单是某笔成交的
+   * 对手腿（buy 成交后要挂的 sell），丢掉它不会「少赚一格」，而是让那笔库存
+   * 变成没有出口的裸腿——止盈腿的价格只有成交那一刻算得出来。
+   * 按档位去重，最多 32 条（一屏窗口远远够用）。
+   */
+  _deferOpening(spec) {
+    if (!spec || !Number.isFinite(Number(spec.levelIndex))) return;
+    this._deferredOpenings = this._deferredOpenings || [];
+    const lvl = Number(spec.levelIndex);
+    if (this._deferredOpenings.some((s) => Number(s.levelIndex) === lvl)) return;
+    this._deferredOpenings.push({ ...spec, levelIndex: lvl, _deferredAt: Date.now() });
+    if (this._deferredOpenings.length > 32) this._deferredOpenings.shift();
+  }
+
+  /** 风控恢复后补铺被拦下的开仓腿（价格/数量用当时的规格，档位已占用则跳过）。 */
+  _drainDeferredOpenings(reason = '') {
+    const list = this._deferredOpenings;
+    if (!list || !list.length) return;
+    if (!this.running || this.recovery) return;
+    if (this.guardState?.state === STATES.HALTED || this.guardState?.blockOpening) return;
+    this._deferredOpenings = [];
+    logger.info('bot', `风控恢复（${reason}）：补铺窗口期被拦下的 ${list.length} 张开仓腿`);
+    for (const spec of list) {
+      const order = { ...spec };
+      delete order._deferredAt;   // 内部字段不许传给下单
+      this._place(order).catch(() => {});
+    }
+  }
+
   /** 该不该放这张单。减仓/回收腿永远放行——风控只拦"增加风险"的动作。 */
   _guardAllowsOrder(o) {
     const g = this.guardState;
@@ -1355,30 +1434,18 @@ export class GridBot {
     this._consistencyStaleStreak = consistency.status === 'stale'
       ? (this._consistencyStaleStreak || 0) + 1
       : 0;
-    // 2026-11-07：mismatch 先强制拉取，再判。
+    // 2026-11-10：mismatch 从「立即判定」改成「限时收敛」（见文件头 MISMATCH_CONVERGE_MS 注释）。
     //
-    // 11-06 的两次熔断（21:29 / 22:36）同形：WS 先推来新鲜仓位快照，成交推送晚到几秒，
-    // 于是「快照时间戳 > 最后成交时间」成立（stale 判据失效），读出差一格 → 立即熔断；
-    // 成交到达后账本自己对齐了，熔断却粘滞 14 小时。
-    //
-    // 根因和 stale 判据那次一样：**用「某一瞬间的差」代替「差是否真的存在」**。
-    // 正确判据是「强制拉取之后仍然差」——拉取是增量的（共用游标），不重复花权重。
-    //
-    // 三约束（缺一不可）：
-    //   ① 每次 mismatch 只强制一次（防风暴）
-    //   ② 强制拉取失败也照样往下熔断（fail-closed 不放松）
-    //   ③ 强制拉取后仍不一致 → 本轮真的熔断
-    if (consistency.status === 'mismatch' && !this._mismatchRefetched) {
-      const canRefetch = typeof this.ex?.pollFillsNow === 'function'
-        || typeof this.ex?.getPositionFresh === 'function';
-      if (canRefetch) {
-        this._mismatchRefetched = true;
-        this._forceMismatchRefetch(consistency).catch(() => {});
-        // 本轮不动 guardState：数据其实是旧的，此刻任何结论都不成立。
-        return this.guardState;
-      }
+    // 11-06 21:29 / 22:36、11-09 17:05 / 21:34 四次同形熔断，全部在数秒内自行对齐，
+    // 零次真错账：position 快照比 fills 事件早约 4–5 秒可见，单拍比对读到的是中间态。
+    // 11-07 的「先强制拉取再判」不足以救场——那一拍 fills 端点里那笔成交还没出现。
+    if (consistency.status === 'mismatch') {
+      const converged = this._handleMismatchConverge(consistency);
+      if (converged) return converged;   // 窗口内：DEFENSIVE，不熔断
+      // 落到这里只有三种情况：已在熔断、适配器无法重拉、90s 窗口耗尽 → 按原判据熔断
+    } else if (consistency.ok) {
+      this._clearMismatchWindow();
     }
-    if (consistency.ok) this._mismatchRefetched = false;
     let r = null;
     try {
       r = evaluateRisk({
@@ -1391,6 +1458,68 @@ export class GridBot {
       this._alert(`风控评估异常（已跳过本轮）：${e.message}`);
       return null;
     }
+    return this._applyGuardResult(r);
+  }
+
+  /**
+   * 账本不一致的「限时收敛」。返回已应用的风控结果，或 null 表示交给原判据熔断。
+   *
+   * 窗口内一律 DEFENSIVE（blockOpening）——只禁新增开仓，不撤单、不动仓位、
+   * 不碰止盈腿，这与 stale 那条判据的形状一致：报警但不做不可逆动作。
+   */
+  _handleMismatchConverge(consistency) {
+    // 已在熔断：熔断是粘滞的，任何自动窗口都不许把它降级成 DEFENSIVE。
+    if (this.guard?.isHalted) return null;
+    // 拿不到新数据的能力就别假装能收敛：立刻按原判据熔断（fail-closed 不放松）。
+    const canRefetch = typeof this.ex?.pollFillsNow === 'function'
+      || typeof this.ex?.getPositionFresh === 'function';
+    if (!canRefetch) return null;
+
+    const now = Date.now();
+    if (!this._mismatchWindow) this._mismatchWindow = { since: now, attempts: 0, inFlight: false };
+    const w = this._mismatchWindow;
+    const elapsed = now - w.since;
+    if (elapsed >= MISMATCH_CONVERGE_MS) return null;   // 窗口用尽 → 真错账
+
+    const due = w.attempts === 0 ? 0 : w.attempts * MISMATCH_ATTEMPT_GAP_MS;
+    if (!w.inFlight && elapsed >= due && w.attempts < MISMATCH_MAX_ATTEMPTS) {
+      w.attempts += 1;
+      w.inFlight = true;
+      const left = Math.max(0, Math.ceil((MISMATCH_CONVERGE_MS - elapsed) / 1000));
+      this._alert(
+        `账本不一致（${(consistency.issues || []).join('；')}）：第 ${w.attempts}/${MISMATCH_MAX_ATTEMPTS} 次强制重拉，`
+        + `${left}s 内未对齐将熔断（窗口内仅禁开仓，不撤单）`,
+        { key: 'mismatch-converge', level: 'warn' },
+      );
+      const done = () => { w.inFlight = false; };
+      try {
+        Promise.resolve(this._forceMismatchRefetch(consistency)).catch(() => {}).finally(done);
+      } catch { done(); }
+    }
+    this._changed();
+    return this._applyGuardResult({
+      state: STATES.DEFENSIVE,
+      reasons: [`账本不一致收敛中（${Math.round(elapsed / 1000)}s/${MISMATCH_CONVERGE_MS / 1000}s，重拉 ${w.attempts} 次）`],
+      blockOpening: true,
+      blockSide: null,
+      haltReason: null,
+    });
+  }
+
+  /** 一致性恢复：清窗口，并把「自愈」写进告警——否则下次又是一次无人知晓的静默。 */
+  _clearMismatchWindow() {
+    const w = this._mismatchWindow;
+    if (!w) return;
+    this._mismatchWindow = null;
+    const sec = Math.max(0, Math.round((Date.now() - w.since) / 1000));
+    this._alert(
+      `✅ 账本不一致已在 ${sec}s 内自行对齐（强制重拉 ${w.attempts} 次，未熔断）`,
+      { key: 'mismatch-converged', level: 'info' },
+    );
+  }
+
+  /** 把一份风控结果落到状态机与持久化熔断账本上（含状态迁移告警）。 */
+  _applyGuardResult(r) {
     const prev = this._guardLastState;
     this.guardState = r;
     this._guardLastState = r.state;
@@ -1473,8 +1602,19 @@ export class GridBot {
 
     if (this.active.size > 0) throw new Error(`前置检查失败：本地仍跟踪 ${this.active.size} 张挂单`);
     if ((this._retryQueue?.length || 0) > 0) throw new Error(`前置检查失败：重试队列非空（${this._retryQueue.length}）`);
-    if ((this._untrackedFills?.length || 0) > 0) throw new Error(`前置检查失败：存在未跟踪成交（${this._untrackedFills.length}）`);
-    if (this._placementProgress?.status === 'running') throw new Error('前置检查失败：铺单批次仍在进行');
+    // 2026-11-10：两个死前置的处置（评审 2026-11-09 发现，代码核对成立）。
+    //
+    //  ① `_untrackedFills` 此前从未被赋值，永远 undefined → 这条检查从上线起没生效过。
+    //     现在接线了（_handleFill），但仍**不作为硬前置**：这类成交照样由 applyFill
+    //     记进账本，把它当成「账本不可信」会拦住唯一合法的恢复动作。改为随返回值审计。
+    //  ② `_placementProgress.status` 的枚举是 placing/retrying/incomplete/complete，
+    //     从来没有 'running'，所以这条也永远不成立。改成「非 complete 且记录是新鲜的」
+    //     —— 僵尸记录（2026-11-09 实测停在 retrying/pending 2 达 34,700s）不许拦恢复。
+    const pp = this._placementProgress;
+    const ppAgeMs = pp ? Date.now() - Number(pp.updatedAt || 0) : Infinity;
+    if (this._placementInFlight()) {
+      throw new Error(`前置检查失败：铺单批次仍在进行（${pp.status}，pending ${pp.pending ?? 0}，${Math.round(ppAgeMs / 1000)}s 前）`);
+    }
 
     const idsOf = (rows) => (rows || []).map((o) => String(o.orderId ?? '')).sort().join(',');
     const a = await this.ex.fetchOpenOrders(mid, { refresh: true });
@@ -1494,6 +1634,10 @@ export class GridBot {
       this.guard.clearHalt();
       this.guardState = { ...(this.guardState || {}), state: 'RUNNING', haltReason: null, blockSide: null };
     }
+    // 重锚 = 新一代：节流标记不继承上一代（否则 5 分钟内再熔断不撤单，P2-1 同族）。
+    this._haltSatisfied = false;
+    this._haltEnforceLastAt = 0;
+    this._deferredOpenings = [];   // 上一代被拦下的腿不得跨代重放（价格基准已变）
     this._consistencyUnknownStreak = 0;
     this._consistencyStaleStreak = 0;
     // 解熔断后必须保证心跳活着：09:19 那次 `_start()` 早退没启动定时器，
@@ -1503,7 +1647,14 @@ export class GridBot {
     const rec = {
       at: new Date().toISOString(), by: String(by).slice(0, 64), reason: String(reason).slice(0, 200),
       prevExpected, exchangeBase: s1, delta: Number((s1 - prevExpected).toFixed(10)),
+      // 审计：本次重锚时传感器里有什么（不再作为前置，但必须可见）
+      untrackedFills: (this._untrackedFills || []).length,
+      placementProgressStale: pp && pp.status !== 'complete' && ppAgeMs >= PLACEMENT_PROGRESS_LIVE_MS
+        ? { status: pp.status, pending: pp.pending ?? 0, ageMs: Math.round(ppAgeMs) }
+        : null,
     };
+    // 重锚同时重置收敛窗口：上一代的 mismatch 与这一代无关。
+    this._mismatchWindow = null;
     this._epochRecords = [rec, ...(this._epochRecords || [])].slice(0, 20);
     this._alert(`新风险周期：账本重锚 ${prevExpected} → ${s1}（操作人 ${rec.by}；${rec.reason}）。仅解除熔断，不自动铺单。`);
     this._changed();
@@ -1515,6 +1666,12 @@ export class GridBot {
     if (!prev) return { ok: false, message: '当前不在熔断状态' };
     this.guardState = null;
     this._guardLastState = null;
+    this._mismatchWindow = null;   // 解除熔断 = 新一代判定，旧窗口作废
+    // 节流标记也一起复位：解除后 5 分钟内若再次熔断，不能因为旧时间戳还在
+    // 而按「已确认清空」的 5 分钟间隔算，导致一次撤单都不发（P2-1 同族）。
+    this._haltSatisfied = false;
+    this._haltEnforceLastAt = 0;
+    this._deferredOpenings = [];   // 熔断撤清所有非减仓单后，待补规格作废（按新基准重铺）
     this._alert(`✅ 熔断已解除（原原因：${prev}，操作者：${by}）`);
     this._changed();
     return { ok: true, cleared: prev };
@@ -1581,6 +1738,9 @@ export class GridBot {
       } else if (r?.state === STATES.DEFENSIVE) {
         this._enforceDefensive(r).catch(() => {});
       }
+      // 风控恢复（含 mismatch 收敛窗口关闭）后，把窗口期被拦下的开仓腿补出去。
+      // 不补就是「格子的对手腿永久消失」——那是裸腿，不是少赚一格。
+      if (!r?.blockOpening && r?.state !== STATES.HALTED) this._drainDeferredOpenings(reason);
       return r;
     } catch (e) {
       // fail-closed：风控自己崩了，按最保守处理——禁止新增开仓，并留证据
@@ -1799,7 +1959,15 @@ export class GridBot {
     const reduceOnly = o.reduceOnly ?? isReduceOnly(o.side, this.config.mode);
     // P1-2：reduceOnly / recovery 单一律不是 opening，全流程共用这一处推导
     const opening = o.opening !== false && !reduceOnly && !o.recovery;
-    if (!this._guardAllowsOrder({ ...o, reduceOnly, opening })) return;
+    if (!this._guardAllowsOrder({ ...o, reduceOnly, opening })) {
+      // 收敛窗口（DEFENSIVE/blockOpening）里被拦下的开仓腿不能就这么丢掉：
+      // 一笔成交之后它的对手腿若消失，留下的是一条**没有出口的裸腿**，
+      // 而不是「少赚一格」。挂进待铺队列，风控一恢复立刻补（见 _runRiskCycle）。
+      if (opening && !this.recovery && this.guardState?.state !== STATES.HALTED) {
+        this._deferOpening({ ...o, opening: true });
+      }
+      return;
+    }
     // P0 硬门：破界期间任何开仓腿都不许发出，不依赖 guardState 缓存
     if (opening && !this.recovery && (this.outOfRange || this._beyondHysteresis())) return;
     // Back-off: while paused (after a burst of cancellations / collateral
@@ -2090,6 +2258,19 @@ export class GridBot {
     const id = String(f.orderId);
     const act = this.active.get(id);
     this.active.delete(id);
+    // 2026-11-10：接上「未跟踪成交」传感器。
+    // 这个数组此前全项目只有两处读、没有一处写 —— 一个专门用来发现「成交到了、
+    // 本地却没有这张单」的仪表，从上线起一次都没亮过。真实写点就在这里：
+    // 撤单竞态、重启丢单、或者压根不是本机下的单，都会让 act 为空。
+    // 只记录、不阻塞：这类成交照样进了 posLedger（applyFill 无条件执行），
+    // 它不是「账本不可信」的证据，拦住重锚只会给事故恢复多加一道假闸门。
+    if (!act) {
+      this._untrackedFills.unshift({
+        t: Date.now(), orderId: id, side: f.side,
+        sizeBase: Number(f.sizeBase) || 0, price: Number(f.price) || 0,
+      });
+      if (this._untrackedFills.length > 20) this._untrackedFills.length = 20;
+    }
     const levelIndex = act?.levelIndex ?? f.levelIndex;
     const fillPrice = Number.isFinite(f.price) ? f.price : (act?.price ?? 0);
     const fillSize = Number.isFinite(f.sizeBase) ? f.sizeBase : this.config.sizeBase;
@@ -2744,7 +2925,11 @@ export class GridBot {
     // 阶梯完整性哨兵：对账只清理/接管、从不重铺（重铺会单边累积库存），所以任何一次
     // 补腿丢失都会留下永久空洞。这里把空洞变成可见状态 + 告警，避免"总数看着还行、
     // 现价附近整段瘫痪"的静默失效（2026-10-22 实测 132 档剩 70 单，连续 50 档空洞）。
-    if (!recovery && !this.outOfRange && this.running && this.grid && this._placementProgress?.status !== 'running') {
+    // 2026-11-10：这里原来判的是 status !== 'running'，而 status 的枚举里从来没有
+    // 'running'（只有 placing/retrying/incomplete/complete）—— 等于这个门永远为真，
+    // 铺单过程中哨兵照样跑、照样发瞬时缺口告警。改成 _placementInFlight()：
+    // 非 complete 且记录新鲜；僵尸记录（停了很久的 retrying）不算在铺，别把哨兵永久关掉。
+    if (!recovery && !this.outOfRange && this.running && this.grid && !this._placementInFlight()) {
       const levels = this.grid.levels;
       const px = this.lastPrice;
       // 活跃窗口：窗口外的档位本来就不该有单，不能算缺口。
@@ -3207,6 +3392,17 @@ export class GridBot {
     const pos = this.running || this.config ? this.ex.getPosition?.(this.config?.marketId) : null;
     // 风控状态必须对外可见：状态机在跑但外部看不见，等于没有（巡检/面板都读不到）。
     const guard = this.guard?.toJSON?.() || null;
+    // 熔断原因此刻是否仍然成立 —— 必须由代码算出来，而不是让读报告的人从一段句子里猜。
+    // 只读适配器缓存（不发请求）：getState 是高频调用，不能在这里多打交易所。
+    let haltLiveCheck = null;
+    if (this.guard?.isHalted) {
+      haltLiveCheck = 'unknown';
+      try {
+        const c = this._guardConsistency() || {};
+        if (c.ok) haltLiveCheck = 'aligned';
+        else if (c.status) haltLiveCheck = c.status;
+      } catch { haltLiveCheck = 'error'; }
+    }
     const proj = this.running && this.config ? this._projectedInventory() : { projected: 0, pending: 0, side: null };
     const openByLevel = {};
     for (const o of this.active.values()) openByLevel[o.levelIndex] = o.side;
@@ -3293,6 +3489,23 @@ export class GridBot {
       guardState: this.guardState?.state || null,
       guardReason: this.guardState?.haltReason || null,
       guardBlockSide: this.guardState?.blockSide || null,
+      // ── 熔断的「化石 vs 活值」（2026-11-10 评审）────────────────────────────
+      // haltReason 是一段**冻结的字符串**，它描述的是熔断那一瞬的事实，
+      // 之后账本可能早已自己对齐。把它当现值读，会让巡逻者在报告里并排写出
+      // 「本地 0.0018」和「expected=0.0016」两个互相矛盾的数。
+      // 所以这里同时给出：发生时刻、以及**此刻重新算一遍**的一致性结论。
+      haltReasonAt: this.guard?.haltedAt ? new Date(Number(this.guard.haltedAt)).toISOString() : null,
+      haltAgeMs: this.guard?.haltedAt ? Date.now() - Number(this.guard.haltedAt) : null,
+      haltLiveCheck: haltLiveCheck,
+      haltResolved: !!(this.guard?.isHalted && haltLiveCheck === 'aligned'),
+      // 恢复动作的可见性：不可见的前置条件等于不存在（巡检看不到就只能靠人猜）。
+      retryQueue: (this._retryQueue || []).length,
+      untrackedFills: (this._untrackedFills || []).length,
+      untrackedFillsRecent: (this._untrackedFills || []).slice(0, 3),
+      deferredOpenings: (this._deferredOpenings || []).length,
+      mismatchWindow: this._mismatchWindow
+        ? { ageMs: Date.now() - this._mismatchWindow.since, attempts: this._mismatchWindow.attempts }
+        : null,
       maxInventoryBase: this.config ? this._maxInventoryBase() : 0,
       inventoryBase: Number(proj.projected) || 0,
       inventoryPendingBase: Number(proj.pending) || 0,

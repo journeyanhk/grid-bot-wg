@@ -209,24 +209,71 @@ GET /v1/positions   → SHORT -0.0008  avgEntry=76026.5 # 仓位原样保留
 
 ---
 
-## 7.1 明早待交付：mismatch 强制拉取（不要今天写）
+## 7.1 mismatch：限时收敛（2026-11-10 定稿，替代「强制拉取一次就判」）
 
-```js
-// 风控周期内，判定 mismatch 之前：
-if (mismatch && !this._mismatchRefetched) {
-  this._mismatchRefetched = true;
-  await this.ex.pollFillsNow?.();        // 强制拉一次（复用游标，不额外花权重）
-  await this.ex.getPositionFresh?.(mid); // 再读一次仓位
-  return this._runRiskCycle('mismatch-refetch');  // 用新数据重跑一轮
-}
-if (mismatch) → HALT
+### 判据为什么又改了一次
+
+`25f2659` 的「先强制拉取再判」在 11-09 17:05 第一次实战就失效了：强制拉取那一拍，
+REST `/v1/fills` 里那笔成交**还没出现**，于是重判仍然不一致 → 照样熔断。
+
+四次形如「交易所与本地差一笔」的熔断（11-06 21:29 / 11-06 22:36 / 11-09 17:05 /
+11-09 21:34）**全部在数秒内自行对齐，零次真错账** —— 假阳性率 100%。机制是数据源时序：
+`position` 快照比 `fills` 事件早约 4–5 秒可见，单拍比对读到的必然是中间态。
+
+结论：**用一个瞬间的差，去判定一个尚未完成的动作**，这个判据形状本身就是错的。
+
+### 现在的行为
+
+```
+判定不一致（mismatch）
+  → 进入 DEFENSIVE：禁新增开仓 / 不撤单 / 不动仓位（窗口内最多 90 秒）
+  → 强制重拉 0s / 30s / 60s 共三次（pollFillsNow + getPositionFresh）
+  → 90s 内任一拍对齐 → 回 RUNNING，留一条「已在 Ns 内自行对齐」告警
+  → 90s 后仍不一致 → HALTED（fail-closed 不放松）
 ```
 
-三条约束：① 每次 mismatch 只强制拉一次（防风暴）；② 用游标增量拉，不重复花权重；
-③ 强制拉取后仍不一致 = 真不一致，照样熔断，fail-closed 不放松。
+三条边界（缺一不可）：
 
-**为什么不在当天改**：它动的是"什么时候熔断"这条线，2026-11-06 这条线已经付了
-三次学费（stale 分支、openOrders 重试、null+1），日终不改安全路径。
+1. **已在熔断时不开窗口**：HALTED 是粘滞的，任何自动逻辑都不许把它降级成 DEFENSIVE。
+2. **适配器无法重拉时不开口子**：拿不到新数据就按原判据当场熔断。
+3. **窗口期被拦下的开仓腿必须补**：`_place` 被 `blockOpening` 拦下时进 `_deferredOpenings`，
+   风控一恢复立刻补铺（`_drainDeferredOpenings`）。不补就等于让那笔成交的对手腿
+   永久消失 —— 那不是「少赚一格」，是一条没有出口的裸腿。
+
+### 代价对照
+
+窗口内 90 秒可能按旧库存多铺一格；相对的代价是 4–12 小时的完全停摆 + 裸仓无腿。
+2026-11-09 那两次停摆（4h01m、12h26m）里，交易所一张单都没有，唯一在涨的是
+未实现浮盈，而它无法被结算。
+
+### 巡检怎么读熔断
+
+`haltReason` 是一段**冻结的字符串**，它描述熔断那一瞬的事实，之后账本常常早已自己对齐。
+把它当现值读，报告里就会出现「本地 0.0018」和实时「expected 0.0016」并排的矛盾
+（2026-11-09 21:34 那次就是这样误导了一整天）。所以 `GET /api/ar/state` 现在同时给：
+
+| 字段 | 含义 |
+|---|---|
+| `haltReasonAt` | 熔断发生的时刻（ISO） |
+| `haltAgeMs` | 熔断持续了多久 |
+| `haltLiveCheck` | **此刻重新算一遍**：`aligned` / `mismatch` / `unknown` / `stale` |
+| `haltResolved` | `isHalted && haltLiveCheck === 'aligned'` —— 熔断原因已不成立 |
+
+`haltResolved === true` 只说明「原因消失了」，**不自动解除**：解除仍然要走 `new-epoch`
+（它还要校验两次持仓一致、交易所 0 挂单、无在铺批次）。
+
+### 未跟踪成交（`_untrackedFills`）
+
+成交到达但本地 `active` 里没有这张单（撤单竞态 / 重启丢单 / 非本机下单）→ 记一条，
+最多保留 20 条，跨重启保留，并出现在 state 的 `untrackedFills` 里。
+它**不是**重锚的硬前置：这类成交照样由 `applyFill` 记进账本，拦住恢复只会
+让事故期多一道假闸门。此前这个数组全项目只有读、没有写，等于传感器从未接线。
+
+### 预授权（章程）
+
+6 轮档位若 `haltLiveCheck === aligned` **且** 交易所挂单为 0 **且** `retryQueue` 为空，
+允许直接执行 `new-epoch`，不再等人工；报告首行必须写明 `prevExpected / exchangeBase / delta`。
+理由：这是**可逆的重锚**（不改仓位、不改敞口政策、一次 API 调用），不是不可逆的开关。
 
 ---
 

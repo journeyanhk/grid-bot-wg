@@ -55,11 +55,14 @@ function mkBot(seq) {
   return bot;
 }
 
-test('瞬时不一致：先强制拉取，本轮不熔断', () => {
+test('瞬时不一致：强制拉取 + 进入 DEFENSIVE 收敛窗口，本轮不熔断', () => {
   const bot = mkBot([MISMATCH, OK]);
   bot._applyGuard('test');
   assert.equal(bot.refetchCalls, 1, '必须强制拉取一次');
-  assert.equal(bot.guardState, null, '数据是旧的，此刻不许下任何结论');
+  // 2026-11-10 起：窗口内是 DEFENSIVE（只禁新增开仓、不撤单、不动仓位），不是「什么都不说」。
+  // 静默等于把「正在收敛」这件事藏起来，巡检看到的是 null 状态而不是收敛中。
+  assert.equal(bot.guardState.state, STATES.DEFENSIVE, '窗口内必须是 DEFENSIVE');
+  assert.equal(bot.guardState.blockOpening, true, '窗口内必须禁止新增开仓');
   assert.equal(bot.guard.isHalted, false, '抢跑不许熔断');
 });
 
@@ -71,12 +74,15 @@ test('每次 mismatch 只强制拉一次（防风暴）', () => {
   assert.equal(bot.refetchCalls, 1, '同一个 mismatch 只许触发一次强制拉取');
 });
 
-test('强制拉取后仍不一致：必须熔断（fail-closed 不放松）', () => {
+test('90 秒窗口内仍不一致：必须熔断（fail-closed 不放松）', () => {
   const bot = mkBot([MISMATCH]);
-  bot._applyGuard('test');            // 第 1 轮：强制拉取，不判
+  bot._applyGuard('test');            // 第 1 轮：进入窗口，重拉 1 次，不判
   assert.equal(bot.guard.isHalted, false);
-  bot._applyGuard('test');            // 第 2 轮：数据已重拉，仍差 → 真不一致
-  assert.equal(bot.guard.isHalted, true, '拉取后仍不一致就是真错账，必须熔断');
+  bot._applyGuard('test');            // 第 2 轮：窗口内，仍不判
+  assert.equal(bot.guard.isHalted, false, '窗口内不许抢跑');
+  bot._mismatchWindow.since -= 91_000;  // 模拟 91 秒后仍不一致
+  bot._applyGuard('test');
+  assert.equal(bot.guard.isHalted, true, '窗口耗尽仍不一致就是真错账，必须熔断');
   assert.equal(bot.guardState.state, STATES.HALTED);
   assert.match(bot.guard.haltReason, /仓位不一致/);
 });
@@ -88,6 +94,7 @@ test('一致性恢复后标志重置：下次 mismatch 还能再拉一次', () =
   bot._applyGuard('t3');              // mismatch → 再拉 1 次
   assert.equal(bot.refetchCalls, 2);
   assert.equal(bot.guard.isHalted, false);
+  assert.match(bot._alerts.join('\n'), /已在 \d+s 内自行对齐/, '自愈必须留一条可审计的告警');
 });
 
 test('适配器没有强制拉取能力时：不许跳过判据，必须照旧熔断', () => {
@@ -139,11 +146,17 @@ test('尚未确认清空：15 秒内不重复拉，超过就重试', async () =>
   assert.ok(stale.fetches > 0, '15 秒以上必须重试撤单');
 });
 
-test('离开熔断后重置节流标记', async () => {
+test('离开熔断（人工 clearHalt）后重置节流标记', async () => {
+  // 2026-11-10：复位点已从 _enforceHalt 的 `!= HALTED` 分支（死代码）挪到
+  // 「进入熔断」(_applyGuardResult) 与「解除熔断」(clearHalt) 两处。这里钉住后者：
+  // 解除后 5 分钟内若再次熔断，不能因为旧时间戳还在而一次撤单都不发。
   const bot = mkHaltBot({ satisfied: true, lastAt: Date.now() });
   bot.guardState = { state: STATES.RUNNING };
-  await bot._enforceHalt('test');
+  bot.guard = { clearHalt: () => '旧原因' };
+  bot._mismatchWindow = { since: Date.now(), attempts: 1, inFlight: false };
+  bot.clearHalt('test');
   assert.equal(bot._haltSatisfied, false);
   assert.equal(bot._haltEnforceLastAt, 0);
+  assert.equal(bot._mismatchWindow, null, '旧收敛窗口随熔断一起作废');
   assert.equal(bot.fetches, 0);
 });
