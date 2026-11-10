@@ -169,6 +169,25 @@ test('收敛窗口拦下的开仓腿：按档去重入队，恢复后补铺；�
   assert.equal(placed[0]._deferredAt, undefined, '内部字段不许传给下单');
 });
 
+test('过期（>5 分钟）的被拦开仓腿：丢弃并告警，不用旧价格补出去', () => {
+  const bot = Object.create(GridBot.prototype);
+  bot.running = true;
+  bot.recovery = false;
+  bot.guardState = { state: STATES.RUNNING, blockOpening: false };
+  bot._deferredOpenings = [];
+  bot._alerts = [];
+  bot._alert = (m) => bot._alerts.push(m);
+  const placed = [];
+  bot._place = async (o) => { placed.push(o); };
+
+  bot._deferOpening({ levelIndex: 30, side: 'sell', price: 75_320.8 });
+  bot._deferredOpenings[0]._deferredAt = Date.now() - 6 * 60_000;  // 模拟卡了 6 分钟
+  bot._drainDeferredOpenings('late');
+  assert.equal(placed.length, 0, '旧价格不能补出去（卖腿可能瞬间亏损成交）');
+  assert.equal(bot._deferredOpenings.length, 0);
+  assert.match(bot._alerts.join('\n'), /按过期丢弃/);
+});
+
 test('_placementInFlight：新鲜的非 complete = 在铺；僵尸记录 = 不在铺', () => {
   const bot = Object.create(GridBot.prototype);
   bot._placementProgress = { status: 'retrying', pending: 2, updatedAt: Date.now() };

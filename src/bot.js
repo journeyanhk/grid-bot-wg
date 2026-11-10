@@ -36,6 +36,10 @@ const MISMATCH_MAX_ATTEMPTS = 3;
 // 铺单批次「仍在进行」的判定窗口：超过这个年龄的 retrying/incomplete 是僵尸记录，
 // 不该拦住重锚（2026-11-09 实测 placementProgress 停在 retrying/pending 2 达 34,700s）。
 const PLACEMENT_PROGRESS_LIVE_MS = 5 * 60 * 1000;
+// 被拦下的开仓腿最多滞留这么久。超过就丢弃而不是补：价格是下单那一刻算出来的，
+// 隔太久再补等于用旧价格下单（卖腿可能瞬间变成亏损成交）。5 分钟覆盖 mismatch
+// 的 90 秒窗口绰绰有余，长时 DEFENSIVE（库存/破界）本来就不该按旧价重放。
+const DEFERRED_OPENING_TTL_MS = 5 * 60 * 1000;
 
 // 挂单"全撤"确认门：连续多少轮对账都拿到 0 单才认定是真的没了（对账约 30 秒一轮）。
 const MASS_VANISH_CONFIRM_ROUNDS = 3;
@@ -1392,8 +1396,16 @@ export class GridBot {
     if (!this.running || this.recovery) return;
     if (this.guardState?.state === STATES.HALTED || this.guardState?.blockOpening) return;
     this._deferredOpenings = [];
-    logger.info('bot', `风控恢复（${reason}）：补铺窗口期被拦下的 ${list.length} 张开仓腿`);
-    for (const spec of list) {
+    const now = Date.now();
+    const fresh = list.filter((s) => now - Number(s._deferredAt || 0) <= DEFERRED_OPENING_TTL_MS);
+    const expired = list.length - fresh.length;
+    if (expired > 0) {
+      // 过期不补：旧价格补出去可能直接成交在亏损位置。缺的格由对账/补齐路径处理。
+      this._alert(`⚠️ 有 ${expired} 张被拦下的开仓腿已超过 ${Math.round(DEFERRED_OPENING_TTL_MS / 60000)} 分钟，按过期丢弃（旧价格不再有效）`);
+    }
+    if (!fresh.length) return;
+    logger.info('bot', `风控恢复（${reason}）：补铺窗口期被拦下的 ${fresh.length} 张开仓腿`);
+    for (const spec of fresh) {
       const order = { ...spec };
       delete order._deferredAt;   // 内部字段不许传给下单
       this._place(order).catch(() => {});
