@@ -128,6 +128,9 @@ export class GridBot {
     // 未跟踪成交：成交到了、本地没有这张单的记录（撤单竞态/重启丢单/非本机下单）。
     // 2026-11-10 之前这个数组只有读、没有写，等于一个从未接线的传感器。
     this._untrackedFills = [];
+    // orderId → {levelIndex, price, opening, recovery, ts}：成交后仍留 30 分钟，
+    // 让同一张单的后续碎片（交易所会把一笔挂单拆成多块推送）还能被认出来。
+    this._recentOrderMeta = new Map();
     // 被风控拦下的开仓腿（见 _deferOpening）：风控恢复后补铺，避免阶梯永久少一格买位。
     this._deferredOpenings = [];
     this._deferredDropped = 0;   // 因 32 条上限被挤掉的待铺腿（静默丢弃家族第 5 例的解药）
@@ -1381,8 +1384,40 @@ export class GridBot {
    * 止盈腿（买成交后的卖）opening=false，`_guardAllowsOrder` 对非开仓单一律放行，
    * 永远不会被拦。所以丢掉这一张的代价是「阶梯少一格买位、少赚一格」，
    * 不是「裸腿」——仓位在卖单成交时已经减掉了。
-   * 按档位去重，最多 32 条；被挤掉的计数进 state（deferredDropped），不静默。
+ * 按档位去重，最多 32 条；被挤掉的计数进 state（deferredDropped），不静默。
+ */
+  /**
+   * 订单台账：成交之后仍然记住这张单是谁（档位/方向/开平），供「同单续成交」认领。
+   *
+   * 为什么必须记：`_handleFill` 拿到成交就 `this.active.delete(id)`，一笔挂单被
+   * 拆成两块推送时，第二块的 orderId 已经查不到了。没有台账，它就只能算
+   * 「未识别成交」——而那个计数不会被任何操作清掉（重拉只会拿回同一笔历史成交），
+   * 于是 90 秒收敛窗口必然失败、账本明明一致也熔断。TTL 30 分钟足够覆盖交易所
+   * 分块推送的间隔（实测 5 秒级），上限 500 条防泄漏。
    */
+  _rememberOrderMeta(id, act) {
+    if (!id || !act) return;
+    if (!this._recentOrderMeta) this._recentOrderMeta = new Map();
+    this._recentOrderMeta.set(id, {
+      levelIndex: act.levelIndex,
+      price: act.price,
+      opening: act.opening,
+      recovery: act.recovery,
+      ts: Date.now(),
+    });
+    if (this._recentOrderMeta.size > 500) {
+      const cutoff = Date.now() - 30 * 60 * 1000;
+      for (const [k, v] of this._recentOrderMeta) {
+        if (!v || v.ts < cutoff) this._recentOrderMeta.delete(k);
+      }
+      // 全是新的也超上限：砍掉最旧的一半，宁可少认，不可无界增长
+      if (this._recentOrderMeta.size > 500) {
+        const keys = [...this._recentOrderMeta.keys()].slice(0, 250);
+        for (const k of keys) this._recentOrderMeta.delete(k);
+      }
+    }
+  }
+
   _deferOpening(spec) {
     if (!spec || !Number.isFinite(Number(spec.levelIndex))) return;
     this._deferredOpenings = this._deferredOpenings || [];
@@ -1658,6 +1693,9 @@ export class GridBot {
     this._haltSatisfied = false;
     this._haltEnforceLastAt = 0;
     this._deferredOpenings = [];   // 上一代被拦下的腿不得跨代重放（价格基准已变）
+    // 未识别成交是「上一代没认出来的碎片」，重锚后账本以交易所真值为准，
+    // 它们不再有任何判断价值；留着只会让新一代第一轮巡检就报旧账。
+    this._untrackedFills = [];
     this._consistencyUnknownStreak = 0;
     this._consistencyStaleStreak = 0;
     // 解熔断后必须保证心跳活着：09:19 那次 `_start()` 早退没启动定时器，
@@ -1692,6 +1730,13 @@ export class GridBot {
     this._haltSatisfied = false;
     this._haltEnforceLastAt = 0;
     this._deferredOpenings = [];   // 熔断撤清所有非减仓单后，待补规格作废（按新基准重铺）
+    // 未识别成交计数只增不减，不清就会「解除后 90 秒原地再熔」。解除动作本身就是
+    // 人已经看过账的声明，因此在这里清空——但不静默：清掉几条要说出来。
+    const _droppedUnknown = (this._untrackedFills || []).length;
+    if (_droppedUnknown) {
+      this._untrackedFills = [];
+      this._alert(`⚠️ 解除熔断同时清空 ${_droppedUnknown} 笔未识别成交记录（以交易所对账为准，重锚后重新计数）`);
+    }
     this._alert(`✅ 熔断已解除（原原因：${prev}，操作者：${by}）`);
     this._changed();
     return { ok: true, cleared: prev };
@@ -2284,21 +2329,34 @@ export class GridBot {
     const id = String(f.orderId);
     const act = this.active.get(id);
     this.active.delete(id);
+    // 2026-11-10 18:42 主网事故：一笔 0.0002 买单被拆成两块推送（0.00013971 + 0.00006029）。
+    // 第一块命中 active 后这里就把 orderId 删了，第二块同一个 orderId 再来时 act 为空 →
+    // 旧代码记成「未识别成交」，而这个计数只增不减、90 秒收敛窗口永远收敛不了 →
+    // 账本其实一分不差（0.003 vs 0.003）也照样熔断，裸腿 15 格在熔断里放了 11 小时。
+    // 所以留一张短 TTL 的订单台账：已认识的 orderId 在成交后仍能被后续碎片认出来。
+    let actEff = act;
+    let continuation = false;
+    if (act) {
+      this._rememberOrderMeta(id, act);
+    } else {
+      const hist = this._recentOrderMeta?.get ? this._recentOrderMeta.get(id) : null;
+      if (hist) { actEff = hist; continuation = true; }
+    }
     // 2026-11-10：接上「未跟踪成交」传感器。
     // 这个数组此前全项目只有两处读、没有一处写 —— 一个专门用来发现「成交到了、
     // 本地却没有这张单」的仪表，从上线起一次都没亮过。真实写点就在这里：
     // 撤单竞态、重启丢单、或者压根不是本机下的单，都会让 act 为空。
     // 只记录、不阻塞：这类成交照样进了 posLedger（applyFill 无条件执行），
     // 它不是「账本不可信」的证据，拦住重锚只会给事故恢复多加一道假闸门。
-    if (!act) {
+    if (!actEff) {
       this._untrackedFills.unshift({
         t: Date.now(), orderId: id, side: f.side,
         sizeBase: Number(f.sizeBase) || 0, price: Number(f.price) || 0,
       });
       if (this._untrackedFills.length > 20) this._untrackedFills.length = 20;
     }
-    const levelIndex = act?.levelIndex ?? f.levelIndex;
-    const fillPrice = Number.isFinite(f.price) ? f.price : (act?.price ?? 0);
+    const levelIndex = actEff?.levelIndex ?? f.levelIndex;
+    const fillPrice = Number.isFinite(f.price) ? f.price : (actEff?.price ?? 0);
     const fillSize = Number.isFinite(f.sizeBase) ? f.sizeBase : this.config.sizeBase;
 
     if (f.side === 'buy') this.stats.buys++; else this.stats.sells++;
@@ -2306,10 +2364,13 @@ export class GridBot {
     this.fills.unshift({ t: Date.now(), side: f.side, price: fillPrice, size: fillSize, level: levelIndex });
     if (this.fills.length > 50) this.fills.pop();
 
-    const isRecovery = !!(act && act.recovery);
+    const isRecovery = !!(actEff && actEff.recovery);
     const closing = isRecovery ? true
-      : (act ? act.opening === false
+      : (actEff ? actEff.opening === false
              : ((this.config.mode === 'short') ? f.side === 'buy' : f.side === 'sell'));
+    if (continuation) {
+      logger.info('bot', `同单续成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName });
+    }
     // P0-2：真实成交推进本地预期仓位（幂等键去重，重复投递不会记两次）
     try {
       this.posLedger.applyFill({
