@@ -128,8 +128,9 @@ export class GridBot {
     // 未跟踪成交：成交到了、本地没有这张单的记录（撤单竞态/重启丢单/非本机下单）。
     // 2026-11-10 之前这个数组只有读、没有写，等于一个从未接线的传感器。
     this._untrackedFills = [];
-    // 被风控拦下的开仓腿（见 _deferOpening）：风控恢复后补铺，避免留下无出口的裸腿。
+    // 被风控拦下的开仓腿（见 _deferOpening）：风控恢复后补铺，避免阶梯永久少一格买位。
     this._deferredOpenings = [];
+    this._deferredDropped = 0;   // 因 32 条上限被挤掉的待铺腿（静默丢弃家族第 5 例的解药）
     // 2026-11-07：熔断执行节流。撤单是幂等的，一旦确认「交易所非减仓单 = 0」，
     // 答案不会自己变回去（HALTED 禁开仓，不产生新单），不必每轮再拉一次快照。
     this._haltSatisfied = false;
@@ -1375,10 +1376,12 @@ export class GridBot {
   /**
    * 记下一条被风控拦下的开仓腿，等风控恢复后补出去。
    *
-   * 为什么必须记：`_place` 被拦时是**直接 return**。如果这一单是某笔成交的
-   * 对手腿（buy 成交后要挂的 sell），丢掉它不会「少赚一格」，而是让那笔库存
-   * 变成没有出口的裸腿——止盈腿的价格只有成交那一刻算得出来。
-   * 按档位去重，最多 32 条（一屏窗口远远够用）。
+   * 为什么必须记：`_place` 被拦时是**直接 return**。
+   * 能走到这里的只有 opening=true 的**再入场腿**（卖成交后要在下方补的那张买）：
+   * 止盈腿（买成交后的卖）opening=false，`_guardAllowsOrder` 对非开仓单一律放行，
+   * 永远不会被拦。所以丢掉这一张的代价是「阶梯少一格买位、少赚一格」，
+   * 不是「裸腿」——仓位在卖单成交时已经减掉了。
+   * 按档位去重，最多 32 条；被挤掉的计数进 state（deferredDropped），不静默。
    */
   _deferOpening(spec) {
     if (!spec || !Number.isFinite(Number(spec.levelIndex))) return;
@@ -1386,7 +1389,12 @@ export class GridBot {
     const lvl = Number(spec.levelIndex);
     if (this._deferredOpenings.some((s) => Number(s.levelIndex) === lvl)) return;
     this._deferredOpenings.push({ ...spec, levelIndex: lvl, _deferredAt: Date.now() });
-    if (this._deferredOpenings.length > 32) this._deferredOpenings.shift();
+    // 32 条被挤爆不是「无所谓」：一整圈窗口只有 4 格，堆积到 32 说明拦住的东西
+    // 远超一次收敛窗口该有的量。计数进 state（deferredDropped），别静默 shift。
+    if (this._deferredOpenings.length > 32) {
+      this._deferredOpenings.shift();
+      this._deferredDropped = (Number(this._deferredDropped) || 0) + 1;
+    }
   }
 
   /** 风控恢复后补铺被拦下的开仓腿（价格/数量用当时的规格，档位已占用则跳过）。 */
@@ -1751,7 +1759,7 @@ export class GridBot {
         this._enforceDefensive(r).catch(() => {});
       }
       // 风控恢复（含 mismatch 收敛窗口关闭）后，把窗口期被拦下的开仓腿补出去。
-      // 不补就是「格子的对手腿永久消失」——那是裸腿，不是少赚一格。
+      // 不补就是「再入场买位永久消失」——少赚一格，不是裸腿（见 _deferOpening 注释）。
       if (!r?.blockOpening && r?.state !== STATES.HALTED) this._drainDeferredOpenings(reason);
       return r;
     } catch (e) {
@@ -1972,9 +1980,15 @@ export class GridBot {
     // P1-2：reduceOnly / recovery 单一律不是 opening，全流程共用这一处推导
     const opening = o.opening !== false && !reduceOnly && !o.recovery;
     if (!this._guardAllowsOrder({ ...o, reduceOnly, opening })) {
-      // 收敛窗口（DEFENSIVE/blockOpening）里被拦下的开仓腿不能就这么丢掉：
-      // 一笔成交之后它的对手腿若消失，留下的是一条**没有出口的裸腿**，
-      // 而不是「少赚一格」。挂进待铺队列，风控一恢复立刻补（见 _runRiskCycle）。
+      // 这里能进来的只有 opening === true 的单 —— 所以被拦下的是**再入场腿**，
+      // 不是止盈腿。`_handleFill` 里 `repl.opening = closing`：买成交 → 对腿是卖、
+      // opening=false（止盈腿），非开仓单在 _guardAllowsOrder 里一律放行，永远不会走到这；
+      // 卖成交 → 对腿是买、opening=true（再入场腿），才是这里要救的那一张。
+      //
+      // 后果要说准：丢掉再入场腿**不是裸腿**（仓位已经减掉了），而是窗口恢复后
+      // 阶梯少一格买位，并且那一格恰好是刚卖出去那笔的重新入场位 —— 少赚一格，
+      // 不是多一分风险。反过来说：**绝不能**为了「保护出口」把 closing 腿也做成可 defer，
+      // 那会把唯一真实的「无出口」风险引进这个机制里（止盈腿本来就永远放行）。
       if (opening && !this.recovery && this.guardState?.state !== STATES.HALTED) {
         this._deferOpening({ ...o, opening: true });
       }
@@ -3515,6 +3529,7 @@ export class GridBot {
       untrackedFills: (this._untrackedFills || []).length,
       untrackedFillsRecent: (this._untrackedFills || []).slice(0, 3),
       deferredOpenings: (this._deferredOpenings || []).length,
+      deferredDropped: Number(this._deferredDropped) || 0,
       mismatchWindow: this._mismatchWindow
         ? { ageMs: Date.now() - this._mismatchWindow.since, attempts: this._mismatchWindow.attempts }
         : null,

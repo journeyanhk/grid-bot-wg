@@ -188,6 +188,15 @@ test('过期（>5 分钟）的被拦开仓腿：丢弃并告警，不用旧价�
   assert.match(bot._alerts.join('\n'), /按过期丢弃/);
 });
 
+test('待铺队列超 32 条：挤掉的必须计数（否则又是一次静默丢弃）', () => {
+  const bot = Object.create(GridBot.prototype);
+  bot._deferredOpenings = [];
+  bot._deferredDropped = 0;
+  for (let i = 0; i < 40; i += 1) bot._deferOpening({ levelIndex: i, side: 'buy', price: 70_000 + i });
+  assert.equal(bot._deferredOpenings.length, 32, '上限仍是 32');
+  assert.equal(bot._deferredDropped, 8, '被挤掉的 8 条必须计数，不能静默 shift');
+});
+
 test('_placementInFlight：新鲜的非 complete = 在铺；僵尸记录 = 不在铺', () => {
   const bot = Object.create(GridBot.prototype);
   bot._placementProgress = { status: 'retrying', pending: 2, updatedAt: Date.now() };
