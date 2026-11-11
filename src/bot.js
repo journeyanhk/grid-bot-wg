@@ -30,6 +30,8 @@ const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 //   90s 内任一拍对齐 → 回 RUNNING，只留一条「已自愈」告警
 //   90s 后仍不一致 → 才 HALTED（fail-closed 不放松）
 // 90 秒的「可能按旧库存多铺一格」，远便宜于 4–12 小时的「完全停摆 + 裸仓无腿」。
+// 未识别成交的过期时间：24 小时后不再参与一致性判定（见 _guardConsistency 注释）。
+const UNKNOWN_FILL_TTL_MS = 24 * 60 * 60 * 1000;
 const MISMATCH_CONVERGE_MS = 90 * 1000;
 const MISMATCH_ATTEMPT_GAP_MS = 30 * 1000;
 const MISMATCH_MAX_ATTEMPTS = 3;
@@ -1306,7 +1308,11 @@ export class GridBot {
     }
     // P0-2 修正：本地预期仓位来自成交账本，绝不能把未成交挂单加总当持仓
     const localPos = this.posLedger.value;
-    const unknown = Array.isArray(this._untrackedFills) ? this._untrackedFills.length : 0;
+    // 过期机制（2026-11-11）：未识别成交只在「账本与交易所不一致」时才拦人，
+    // 但即便如此也不该有一条记录跨周期永远缠着我们。24 小时之后它只是历史。
+    const unknown = Array.isArray(this._untrackedFills)
+      ? this._untrackedFills.filter((f) => Date.now() - Number(f?.t || 0) < UNKNOWN_FILL_TTL_MS).length
+      : 0;
     return checkConsistency({
       positionBase: Number.isFinite(pos) ? pos : undefined,
       localPositionBase: Number.isFinite(localPos) ? localPos : undefined,

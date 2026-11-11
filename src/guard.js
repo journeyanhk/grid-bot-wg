@@ -46,6 +46,17 @@ export const GUARD_DEFAULTS = Object.freeze({
 
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
+/**
+ * 账本与交易所是否一致。任一不可用就返回 false（fail-closed）：
+ * 「无法核实」不等于「没问题」——这条判据只在能证明一致时才放行。
+ */
+function positionsAgree(ctx, tol) {
+  const a = Number(ctx.positionBase);
+  const b = Number(ctx.localPositionBase);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return Math.abs(a - b) <= tol;
+}
+
 /** 加仓方向：多头加仓是 buy，空头加仓是 sell。仓位为 0 时返回 null。 */
 export function addSideFor(positionBase) {
   const p = num(positionBase);
@@ -294,7 +305,15 @@ export function checkConsistency(ctx = {}, limits = {}) {
       issues.push(`仓位不一致：交易所 ${ctx.positionBase} vs 本地 ${ctx.localPositionBase}（Δ${delta}）`);
     }
   }
-  if (num(ctx.unknownFills) > 0) issues.push(`存在 ${ctx.unknownFills} 笔未识别成交`);
+  // 2026-11-11：未识别成交**只有账本真的对不上**时才是风险。
+  // `applyFill` 是无条件执行的，仓位数才是唯一真相；账本已经一致时，它只是一条
+  // 历史记录。此前这里无条件报，而 `_untrackedFills` 只增不减、还进快照，
+  // 于是三种恢复路径（clear-halt / new-epoch / 重启）全部被一条记录堵死，
+  // 主网因此停摆 17 小时（11-10 18:42 → 11-11 12:00）。
+  // 传感器必须两条线都接：一条让它说话，一条让它闭嘴。
+  if (num(ctx.unknownFills) > 0 && !positionsAgree(ctx, L.positionDeltaTol)) {
+    issues.push(`存在 ${ctx.unknownFills} 笔未识别成交且账本不一致`);
+  }
   if (num(ctx.untrackedFills) > 0) issues.push(`存在 ${ctx.untrackedFills} 笔未跟踪成交`);
   if (num(ctx.rejectedInTracked) > 0) issues.push(`${ctx.rejectedInTracked} 张被拒订单出现在本地台账`);
   if (num(ctx.reduceOnlyMismatch) > 0) issues.push(`${ctx.reduceOnlyMismatch} 张 reduceOnly 单被当作开仓单`);
