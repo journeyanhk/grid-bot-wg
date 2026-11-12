@@ -3711,7 +3711,13 @@ export class GridBot {
         runs: this._reconRuns,
         fails: this._reconFails,
       },
-      startBlockedReason: this._startBlocked ?? null,
+      // 「现在起不了」必须是**此刻算出来的**，不是上一次写下的那句话。
+      // 2026-11-12 实测：重启后 resume() 把快照里的旧值原样搬回来，字段继续报
+      // 「已有熔断记录：存在 1 笔未识别成交」——而当时 guard 根本没熔断。
+      // 存储型字段只要有一条加载路径忘了清，它就会永远说谎；派生型字段没有这个问题。
+      // 停机时不派生：没有「正在跑」这个前提，问「现在为什么起不了」没有意义，回落到历史值。
+      startBlockedReason: this.running ? (this._startBlockedReason() ?? null) : (this._startBlocked ?? null),
+      startBlockedLast: this._startBlocked ?? null,   // 历史：上一次被拦下时的原话（可能是旧世代的）
       openByLevel,
       health: this._health(),
       position: pos ? {

@@ -14,6 +14,7 @@ function mkBot() {
   bot.running = true;
   bot.recovery = false;
   bot.outOfRange = false;
+  bot.lastPrice = 73_763;
   bot.config = {
     marketId: 1, sizeBase: 0.0002, mode: 'neutral', displayName: 'BTC-USD',
     lower: 70_000, upper: 80_000, gridCount: 2,
@@ -80,4 +81,27 @@ test('① 铺单批次铺完（complete）也必须清掉 startBlocked', () => {
   bot._refreshPlacementProgress = () => {};   // 只为隔离被测行为
   bot._finishPlacementPass();
   assert.equal(bot._startBlocked, null, '铺单成功即证明「被风控拦住」已不成立');
+});
+
+// 2026-11-12 实测到的第 4 处：重启走 resume()，把快照里的旧值原样搬回来，
+// 于是字段继续报「已有熔断记录：存在 1 笔未识别成交」，而 guard 根本没熔断。
+// 结论：这个字段必须是**派生**的——「现在为什么起不了」只能由此刻的状态算。
+test('① startBlockedReason 是派生值：旧熔断原话不许在未熔断时冒充现值', () => {
+  const bot = mkBot();
+  bot._startBlocked = '已有熔断记录：账本不一致：存在 1 笔未识别成交';
+  bot.guardState = { state: 'RUNNING', reasons: [], blockOpening: false, blockSide: null };
+  bot.ex.getPosition = () => ({ sizeBase: 0.0046, entryPrice: 74_018.1 });
+  bot._projectedInventory = () => ({ projected: 0.0046, pending: 0, side: 'long' });
+  bot._maxInventoryBase = () => 0.0068;
+  const s = bot.getState();
+  assert.equal(s.startBlockedReason, null, '未熔断、价格在区间内 → 没有任何东西在拦启动');
+  assert.match(s.startBlockedLast, /未识别成交/, '历史原话仍然可查，但只许出现在 *Last 字段里');
+});
+
+test('① startBlockedReason 在 DEFENSIVE 时必须说出真实原因（不是旧熔断）', () => {
+  const bot = mkBot();
+  bot._startBlocked = '已有熔断记录：存在 1 笔未识别成交';
+  const s = bot.getState();
+  assert.match(s.startBlockedReason, /DEFENSIVE/, '真正拦住启动的是当前风控状态');
+  assert.doesNotMatch(s.startBlockedReason, /未识别成交/, '不许拿旧世代的熔断原话当现值');
 });
