@@ -127,6 +127,13 @@ test('「上一轮为什么没铺单」进快照，重启后仍然可见', async
 
   const { bot: bot2 } = makeBot();
   await bot2.resume(snap);
-  assert.match(String(bot2.getState().startBlockedReason), /已有熔断记录/, '重启后巡检还要能看见上一轮为什么没铺单');
+  // 2026-11-12 语义收紧：重启后要能看见上一轮为什么没铺单，但**不许让它冒充现值**。
+  // 上一版这里断言的是 startBlockedReason 仍等于那句旧话，而实测中它连报 20 小时
+  // 「已有熔断记录：存在 1 笔未识别成交」，同时 guard=DEFENSIVE 正常在跑。
+  // 历史留 startBlockedLast；startBlockedReason 只描述「此刻为什么起不了」。
+  assert.match(String(bot2.getState().startBlockedLast), /已有熔断记录/, '重启后巡检还要能看见上一轮为什么没铺单');
+  const now = bot2.getState().startBlockedReason;
+  assert.ok(now === null || !/已有熔断记录/.test(String(now)),
+    `旧世代的熔断原话不许作为现值出现，实际=${now}`);
   await bot2.stop({ closePosition: false }).catch(() => {});
 });
