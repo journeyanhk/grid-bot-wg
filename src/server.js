@@ -463,6 +463,19 @@ function makeExchangeHandler(prefix, bot, exchange, exCfg, clients, name) {
       catch (e) { return send(res, 400, { error: e.message }); }
     }
 
+    // 人工减仓（2026-11-12）：一次显式、可计数的动作，走 bot 自己的账本路径，
+    // 消灭「在交易所界面手动挂 reduce-only 单 → 落进 _untrackedFills」那条危险路径。
+    // 只减不动方向、不全平；超过单次上限的一律拒绝（全平走 /close-position）。
+    if (subPath === '/reduce' && req.method === 'POST') {
+      try {
+        const b = await readBody(req);
+        if (!b || b.confirm !== true) throw new Error('需要 {"confirm": true} 才执行减仓');
+        return send(res, 200, await bot.reducePosition({
+          sizeBase: b.sizeBase, by: b.by || 'operator', reason: b.reason,
+        }));
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
     if (subPath === '/stream') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',

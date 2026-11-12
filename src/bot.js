@@ -1159,6 +1159,9 @@ export class GridBot {
     if (!this._placementProgress) return;
     this._placementProgress.initialPassDone = true;
     this._refreshPlacementProgress();
+    // 铺单批次真的铺完了 = 「上一轮为什么没铺单」这件事已经不成立了。
+    // startBlocked 的语义是**当前**状态，不是历史；历史留给 _alert 与日志。
+    if (this._placementProgress.status === 'complete') this._startBlocked = null;
   }
 
   _placementProgressView() {
@@ -1409,6 +1412,7 @@ export class GridBot {
       price: act.price,
       opening: act.opening,
       recovery: act.recovery,
+      manual: !!act.manual,
       ts: Date.now(),
     });
     if (this._recentOrderMeta.size > 500) {
@@ -1702,6 +1706,11 @@ export class GridBot {
     // 未识别成交是「上一代没认出来的碎片」，重锚后账本以交易所真值为准，
     // 它们不再有任何判断价值；留着只会让新一代第一轮巡检就报旧账。
     this._untrackedFills = [];
+    // 2026-11-12：`_startBlocked` 此前只在 `_start()` 的成功分支清空，于是
+    // 「new-epoch 救活」这条路径永远留着上一代那句话——11-12 巡检里它连报 20 小时
+    // 「已有熔断记录…未识别成交」，而那时 guardState 早已是 DEFENSIVE 在正常跑。
+    // 没有清空路径的字段，迟早会被当成现值读。
+    this._startBlocked = null;
     this._consistencyUnknownStreak = 0;
     this._consistencyStaleStreak = 0;
     // 解熔断后必须保证心跳活着：09:19 那次 `_start()` 早退没启动定时器，
@@ -1731,6 +1740,7 @@ export class GridBot {
     this.guardState = null;
     this._guardLastState = null;
     this._mismatchWindow = null;   // 解除熔断 = 新一代判定，旧窗口作废
+    this._startBlocked = null;     // 同上：解除熔断后「上一轮为什么没铺单」必须作废
     // 节流标记也一起复位：解除后 5 分钟内若再次熔断，不能因为旧时间戳还在
     // 而按「已确认清空」的 5 分钟间隔算，导致一次撤单都不发（P2-1 同族）。
     this._haltSatisfied = false;
@@ -2371,6 +2381,10 @@ export class GridBot {
     if (this.fills.length > 50) this.fills.pop();
 
     const isRecovery = !!(actEff && actEff.recovery);
+    // 2026-11-12：人工减仓（/api/ar/reduce）也走成交事件，但它**不是一格网格**。
+    // 若不区分：completedRungs 会凭空 +1、gridProfit 会记一格假利、还会按 levelIndex=-1
+    // 触发「缺档位不补腿」告警——一次人工动作污染三项统计。
+    const isManual = !!(actEff && actEff.manual);
     const closing = isRecovery ? true
       : (actEff ? actEff.opening === false
              : ((this.config.mode === 'short') ? f.side === 'buy' : f.side === 'sell'));
@@ -2386,7 +2400,7 @@ export class GridBot {
     } catch { /* 账本异常不能阻断交易主流程，由一致性巡检兜底 */ }
     this._runRiskCycle('fill');   // P0-1：成交后立即评估（库存/偏置/账本）
     if (this.fills[0]) this.fills[0].opening = !closing;   // 供风控的「成交偏置」判定
-    if (closing) {
+    if (closing && !isManual) {
       this.stats.completedRungs++;
       // Incremental accumulation with the ACTUAL fill size: adjustRange no longer
       // rewrites history (the old code recomputed rungs × CURRENT spacing), and
@@ -2404,7 +2418,8 @@ export class GridBot {
 
     // Recovery-ladder fills are pure reduce-only EXITS of stranded inventory —
     // never re-quote a replacement for them.
-    if (!isRecovery && this.grid) {
+    // 人工减仓不补腿：它没有档位，减掉的库存就是要减掉的，不许被对腿补回来。
+    if (!isRecovery && !isManual && this.grid) {
       // 兜底：levelIndex 非法（未跟踪成交）时只记账、不补腿。
       // replacementFor 内部已有同样的守卫，这里再拦一次是为了留下可观测的告警——
       // 静默返回 null 会让「有一笔成交没有对应档位」这件事永远不出现在日志里。
@@ -2753,6 +2768,136 @@ export class GridBot {
   }
 
   /** 市价平仓：撤销该市场全部挂单并立即市价平掉持仓。 */
+  /**
+   * 人工减仓：一次显式的、可计数的动作，**不是自动交易器**。
+   *
+   * 存在理由（2026-11-12 用户裁决）：在此接口之前，「减一点仓」只有两条路——
+   *  ① 交易所界面手动挂 reduce-only 单 → 成交进的来但本地没这张单 → 落进
+   *     `_untrackedFills`，正是 2026-11-10 停摆 19 小时那个病；
+   *  ② 全平（/close-position），代价与诉求不匹配。
+   * 所以这个接口的首要价值是**消灭那条危险路径**，其次才是自动化。
+   *
+   * 硬约束（每条都有测试，见 test/reduce-position.test.js）：
+   *  1. sizeBase > 0 且是 config.sizeBase 的整数倍（碎量不许进账本）
+   *  2. sizeBase ≤ 当前持仓，且 ≤ maxReduceGrids（默认 10 格）单次上限
+   *  3. HALTED 拒绝（熔断期间不动仓）
+   *  4. outOfRange 拒绝（走破界处置路径）
+   *  5. retryQueue 非空拒绝（台账不干净时不动仓）
+   *  6. 在途 reduce 拒绝（幂等）
+   *  7. 走适配器下单 + reduceOnly，成交由 `_handleFill` 推进 posLedger
+   *  8. 60 秒内做一次恒等式核对，不一致立刻告警 key='reduce-mismatch'
+   */
+  async reducePosition({ sizeBase, by = 'operator', reason = '', waitMs = 4000 } = {}) {
+    const cfg = this.config;
+    if (!cfg) throw new Error('尚未配置网格，无法减仓');
+    if (!String(reason).trim()) throw new Error('必须填写 reason（为什么现在减仓）');
+    const req = Number(sizeBase);
+    const gridSize = Number(cfg.sizeBase) || 0;
+    if (!(req > 0)) throw new Error('sizeBase 必须 > 0');
+    if (!(gridSize > 0)) throw new Error('配置缺少 sizeBase，无法校验减仓粒度');
+    const steps = req / gridSize;
+    if (Math.abs(steps - Math.round(steps)) > 1e-6) {
+      throw new Error(`sizeBase 必须是 ${gridSize} 的整数倍（收到 ${req}）`);
+    }
+    const maxGrids = Number(cfg.maxReduceGrids ?? 10);
+    if (req > maxGrids * gridSize + 1e-9) {
+      throw new Error(`单次减仓上限 ${maxGrids} 格（${(maxGrids * gridSize).toFixed(4)}），超过请走全平`);
+    }
+    if (this.guardState?.state === STATES.HALTED || this.guard?.isHalted) {
+      throw new Error('熔断状态不许动仓（先 new-epoch 重锚）');
+    }
+    if (this.outOfRange) throw new Error('价格在区间外，走破界处置路径，不做人工减仓');
+    if ((this._retryQueue?.length || 0) > 0) {
+      throw new Error(`重试队列非空（${this._retryQueue.length}），台账不干净时不许动仓`);
+    }
+    if (this._reduceInFlight) throw new Error('上一笔减仓仍在途，拒绝重复提交');
+    const mId = Number(cfg.marketId);
+    const pos = await (this.ex.getPositionFresh?.(mId) ?? this.ex.getPosition?.(mId) ?? null);
+    const held = Math.abs(Number(pos?.sizeBase) || 0);
+    if (!(held > 0)) throw new Error('当前没有持仓，无需减仓');
+    if (req > held + 1e-9) throw new Error(`减仓量 ${req} 超过当前持仓 ${held}`);
+
+    const side = Number(pos.sizeBase) > 0 ? 'sell' : 'buy';
+    const last = Number(this.lastPrice) || Number(await this.ex.getPrice(mId)) || 0;
+    if (!(last > 0)) throw new Error('拿不到最新价格，无法定价减仓单');
+    // IOC（postOnly:false）+ 穿过盘口半个基点，保证成交；3bp ≈ $22 @74k，远小于半格。
+    const px = side === 'sell' ? last * (1 - 3e-4) : last * (1 + 3e-4);
+    const before = Number(this.posLedger?.value ?? NaN);
+    const clientOrderId = Number(`${Date.now() % 1_000_000_0}${String((++this._coidSeq) % 1_000_000).padStart(6, '0')}`);
+
+    this._reduceInFlight = { at: Date.now(), sizeBase: req, side, price: px };
+    let res;
+    try {
+      res = await this.ex.placeLimitOrder({
+        marketId: mId, side, price: px, sizeBase: req,
+        reduceOnly: true, postOnly: false, levelIndex: -1, clientOrderId,
+      });
+    } finally {
+      this._reduceInFlight = null;
+    }
+    const orderId = String(res?.orderId ?? '');
+    // 在「短期订单台账」里登记身份：成交到达时 `_handleFill` 才认得它，
+    // 从而推进 posLedger，而不是把它记进 `_untrackedFills`。
+    this._rememberOrderMeta(orderId, {
+      levelIndex: -1, price: px, opening: false, recovery: false, manual: true,
+    });
+    this._alert(`🔻 人工减仓 ${side === 'sell' ? '卖出' : '买入'} ${req} @ ${roundPrice(px)}（${by}；${String(reason).slice(0, 120)}）`);
+
+    // 等成交落地（IOC 通常 1–2 秒内），再回读持仓与账本，把现场量写进返回体。
+    const t0 = Date.now();
+    let after;
+    // 至少回读一次交易所：返回体里的 before/filled/after 是**现场量**，不是下单意图。
+    for (;;) {
+      const p = await (this.ex.getPositionFresh?.(mId) ?? this.ex.getPosition?.(mId) ?? null);
+      after = Math.abs(Number(p?.sizeBase) || 0);
+      if (after < held - 1e-9 || after < 1e-9) break;
+      if (Date.now() - t0 >= Math.max(0, Number(waitMs) || 0)) break;
+      await sleep(250);
+    }
+    const filled = Number((held - after).toFixed(10));
+    const afterLedger = Number(this.posLedger?.value ?? NaN);
+    const out = {
+      ok: true, by: String(by).slice(0, 64), reason: String(reason).slice(0, 200),
+      orderId, side, price: roundPrice(px), requested: req,
+      beforeSize: held, filledSize: filled, afterSize: after,
+      beforeLedger: before, afterLedger, delta: Number((afterLedger - before).toFixed(10)),
+      unfilled: Math.max(0, Number((req - filled).toFixed(10))),
+    };
+    this._lastReduce = { at: new Date().toISOString(), ...out };
+    this._scheduleReduceVerify(orderId);
+    this._changed();
+    return out;
+  }
+
+  /** 减仓后 60 秒做一次恒等式核对：posLedger 与交易所必须对得上。 */
+  _scheduleReduceVerify(orderId, timeoutMs = 60_000) {
+    if (this._reduceVerifyTimer) clearTimeout(this._reduceVerifyTimer);
+    this._reduceVerifyTimer = setTimeout(() => {
+      this._reduceVerify(orderId).catch(() => {});
+    }, Math.max(0, Number(timeoutMs) || 0));
+    this._reduceVerifyTimer?.unref?.();
+  }
+
+  async _verifyReduce(orderId) {
+    const cfg = this.config;
+    if (!cfg) return null;
+    const mId = Number(cfg.marketId);
+    const pos = await (this.ex.getPositionFresh?.(mId) ?? this.ex.getPosition?.(mId) ?? null);
+    const exchangeBase = Number(pos?.sizeBase) || 0;
+    const ledger = Number(this.posLedger?.value) || 0;
+    const delta = Number((exchangeBase - ledger).toFixed(10));
+    const tol = Math.max(1e-9, (Number(cfg.sizeBase) || 0) * 0.5);
+    this._lastReduceVerify = { at: new Date().toISOString(), orderId, ledger, exchangeBase, delta };
+    if (Math.abs(delta) > tol) {
+      this._alert(`❌ 减仓后账本不平：posLedger=${ledger} 交易所=${exchangeBase} delta=${delta}（orderId=${orderId}）`,
+        { key: 'reduce-mismatch', level: 'error' });
+    } else {
+      this._alert(`✅ 减仓核对通过：posLedger=${ledger} 交易所=${exchangeBase} delta=${delta}`);
+    }
+    this._changed();
+    return this._lastReduceVerify;
+  }
+
   async closePositionNow(marketId) {
     const mId = Number(marketId ?? this.config?.marketId);
     if (!Number.isFinite(mId)) throw new Error('未指定市场，无法平仓。');
@@ -3579,9 +3724,26 @@ export class GridBot {
       } : null,
       operationalIssue: this._operationalIssue ?? this.ex.operationalIssue ?? null,
       // 风控面（v1.6.48）：巡检与面板据此判断「该不该继续开仓」
-      guardState: this.guardState?.state || null,
-      guardReason: this.guardState?.haltReason || null,
+      // 2026-11-12：`guardState` 在 /state 里曾是**字符串**、在 .state.json 里是**对象**，
+      // 同名不同型——跨接口读同一个名字必然踩（我自己写巡检就踩过一次）。
+      // 现在统一：`guardState` 一律是对象，字符串走 `guardStateName`。一个名字只允许一种语义。
+      guardState: this.guardState ? {
+        state: this.guardState.state ?? null,
+        reasons: Array.isArray(this.guardState.reasons) ? this.guardState.reasons : [],
+        blockOpening: !!this.guardState.blockOpening,
+        blockSide: this.guardState.blockSide ?? null,
+      } : null,
+      guardStateName: this.guardState?.state || null,
+      // DEFENSIVE 的 reasons 此前从不进这个字段（只取 haltReason），于是
+      // `HALTED-ALERT.log` 里刷了 20 小时的 `guard=DEFENSIVE reason=`——**空原因告警等于没告警**。
+      guardReason: this.guardState?.haltReason
+        || (Array.isArray(this.guardState?.reasons) && this.guardState.reasons.length
+          ? this.guardState.reasons.join('；') : null),
       guardBlockSide: this.guardState?.blockSide || null,
+      // 人工减仓的现场量（2026-11-12）：不可见的动作等于没发生。
+      lastReduce: this._lastReduce ?? null,
+      lastReduceVerify: this._lastReduceVerify ?? null,
+      reduceInFlight: this._reduceInFlight ? { sizeBase: this._reduceInFlight.sizeBase } : null,
       // ── 熔断的「化石 vs 活值」（2026-11-10 评审）────────────────────────────
       // haltReason 是一段**冻结的字符串**，它描述的是熔断那一瞬的事实，
       // 之后账本可能早已自己对齐。把它当现值读，会让巡逻者在报告里并排写出
