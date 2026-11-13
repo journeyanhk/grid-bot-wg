@@ -204,7 +204,11 @@ export class GridBot {
     this._duplicateFills = 0;        // 被 fillKey 挡住的重复成交（轮询回放）
     this._reconcileEvents = [];      // 24h 内的账本对齐（>3 次/天 = 漏单还在发生）
     this._ledgerReconcileRefused = null; // 最近一次被拒绝的重锚（BLOCKING 证据）
-    this._stallRunningMs = 0;        // 完成格零增长（只累计运行态）
+    this._stallRunningMs = 0;        // 完成格零增长（只累计「真的能成交」的时间）
+    this._haltedMs = 0;              // 熔断期（running=true 但完全不动）
+    this._blockedMs = 0;             // 开仓被拦期（库存闸/mismatch 窗口）
+    this._applyFillErrors = 0;       // 账本写入失败次数（必须比「成交没认领」更响）
+    this._ledgerBlockReason = null;  // 重锚被拒 → 持续禁开仓，直到新一代
     this._stallTickAt = Date.now();
     this._lastRungAt = null;         // 完成格最近增长（墙钟，仅历史展示）
     this._lastVanishAlertAt = 0;
@@ -277,6 +281,10 @@ export class GridBot {
       reconcileEvents: (this._reconcileEvents || []).slice(0, 50),
       ledgerReconcileRefused: this._ledgerReconcileRefused ?? null,
       stallRunningMs: Number(this._stallRunningMs) || 0,
+      haltedMs: Number(this._haltedMs) || 0,
+      blockedMs: Number(this._blockedMs) || 0,
+      applyFillErrors: Number(this._applyFillErrors) || 0,
+      ledgerBlockReason: this._ledgerBlockReason ?? null,
       lastRungAt: this._lastRungAt ?? null,
       // 认领窗口的实测值要跨重启累积，否则 120s 这个数永远得不到标定（review P1-2）。
       lastCloseClaim: this._lastCloseClaim ?? null,
@@ -320,6 +328,10 @@ export class GridBot {
     this._reconcileEvents = Array.isArray(snap.reconcileEvents) ? snap.reconcileEvents : [];
     this._ledgerReconcileRefused = snap.ledgerReconcileRefused ?? null;
     this._stallRunningMs = Number(snap.stallRunningMs) || 0;
+    this._haltedMs = Number(snap.haltedMs) || 0;
+    this._blockedMs = Number(snap.blockedMs) || 0;
+    this._applyFillErrors = Number(snap.applyFillErrors) || 0;
+    this._ledgerBlockReason = snap.ledgerBlockReason ?? null;
     this._lastRungAt = snap.lastRungAt ?? null;
     this._stallTickAt = Date.now();
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
@@ -1080,6 +1092,13 @@ export class GridBot {
     const feeKnown = this.ex?.feeRateKnown !== false && Number.isFinite(feeRate) && feeRate >= 0;
     const feePerRung = feeKnown ? round8(2 * feeRate * this.config.sizeBase * mid) : null;
     const perRungNet = feeKnown ? round8(grossPerRung - feePerRung) : null;
+    // 费率项有价格依赖（手续费按成交名义额收），所以净额必须带取价点：
+    // 区间中点给「这一格平均能赚多少」，现价给「此刻开这一格能赚多少」。
+    // 2026-11-13 review：一个会随价格漂移的数，必须带着它的取价点走，
+    // 否则有人会把它当常数去做年度推演（差 1.7% 看着小，乘 66 格 × 365 天就不小）。
+    const pxNow = Number(this.lastPrice) || Number(this.ex?.lastPrice) || null;
+    const feePerRungAtPrice = feeKnown && pxNow ? round8(2 * feeRate * this.config.sizeBase * pxNow) : null;
+    const perRungNetAtPrice = feePerRungAtPrice == null ? null : round8(grossPerRung - feePerRungAtPrice);
     this.risk = {
       leverage: this.config.leverage,
       notional: round2(notional),
@@ -1089,6 +1108,9 @@ export class GridBot {
       grossPerRung,
       feePerRung,
       perRungNet,
+      feePerRungAtPrice,
+      perRungNetAtPrice,
+      perRungPriceBasis: pxNow,
       feeRatePpm: feeKnown ? Math.round(feeRate * 1e6) : null,
       feeRateKnown: feeKnown,
       sizeBase: this.config.sizeBase,
@@ -1683,6 +1705,16 @@ export class GridBot {
 
   /** 把一份风控结果落到状态机与持久化熔断账本上（含状态迁移告警）。 */
   _applyGuardResult(r) {
+    // 账本重锚被拒 → 无论风控怎么算，都不许再开新仓（粘滞，直到新一代）。
+    if (this._ledgerBlockReason && r && r.state !== STATES.HALTED) {
+      r = {
+        ...r,
+        state: STATES.DEFENSIVE,
+        blockOpening: true,
+        blockSide: 'both',
+        reasons: [this._ledgerBlockReason, ...(r.reasons || [])].slice(0, 5),
+      };
+    }
     const prev = this._guardLastState;
     this.guardState = r;
     this._guardLastState = r.state;
@@ -1791,10 +1823,40 @@ export class GridBot {
    */
   _rungStallTick() {
     const now = Date.now();
+    this._rungStallTickAt(now);
+  }
+
+  /**
+   * 「引擎是否真的在产出」不是 `running` 一个布尔值就能回答的。
+   *
+   * 2026-11-13 review（第二次）指出：HALTED 与 blockOpening（库存闸）期间 running 仍为 true，
+   * 但买腿被拦、根本不能成交。把这段时间算进「零增长」，熔断恢复那一刻
+   * `_stallRunningMs` 直接 ≥12h，projected≥28 也成立 → 预授权减仓会自动执行。
+   * 这正是「运行是一个状态，不是一个布尔值」的同族第 4 例。
+   */
+  _engineProductive() {
+    if (!this.running) return false;
+    const g = this.guardState;
+    if (!g) return true;                       // 尚未跑过风控：按运行态计（保守）
+    if (g.state === STATES.HALTED) return false;
+    if (g.blockOpening) return false;
+    return true;
+  }
+
+  /** 内部：按给定时刻推进三种计时（productive / halted / blocked）。 */
+  _rungStallTickAt(now) {
     const last = Number(this._stallTickAt) || now;
     this._stallTickAt = now;
-    if (this.running) {
+    const g = this.guardState;
+    if (this._engineProductive()) {
       this._stallRunningMs = (Number(this._stallRunningMs) || 0) + Math.max(0, now - last);
+    } else if (this.running) {
+      // 开着但干不了活：单独计时，报告里分列，绝不混进「零增长」。
+      if (g?.state === STATES.HALTED) {
+        this._haltedMs = (Number(this._haltedMs) || 0) + Math.max(0, now - last);
+      } else {
+        this._blockedMs = (Number(this._blockedMs) || 0) + Math.max(0, now - last);
+      }
     }
   }
 
@@ -1909,6 +1971,9 @@ export class GridBot {
     // 「已有熔断记录…未识别成交」，而那时 guardState 早已是 DEFENSIVE 在正常跑。
     // 没有清空路径的字段，迟早会被当成现值读。
     this._startBlocked = null;
+    // 重锚被拒的粘滞闸随新一代一起解除：账本已按交易所真值重建，旧理由不再成立。
+    this._ledgerBlockReason = null;
+    this._ledgerReconcileRefused = null;
     this._consistencyUnknownStreak = 0;
     this._consistencyStaleStreak = 0;
     // 解熔断后必须保证心跳活着：09:19 那次 `_start()` 早退没启动定时器，
@@ -2547,6 +2612,35 @@ export class GridBot {
   }
 
   /**
+   * 账本写入的统一入口：**「账本写失败」必须比「成交没认领」更响。**
+   *
+   * 2026-11-13 review 补丁：旧写法 `catch {}` 把整条成交静默丢掉且不计数——
+   * 「成交没认领」至少还有一条未识别记录，而账本写失败连记录都没有，
+   * 于是巡检看到的是一本「干净的账」和一本「少了一笔的账」。
+   */
+  _applyFillGuarded(payload, ctx = {}) {
+    try {
+      return { result: this.posLedger.applyFill(payload), error: null };
+    } catch (e) {
+      const msg = String(e?.message || e).slice(0, 160);
+      this._applyFillErrors = (Number(this._applyFillErrors) || 0) + 1;
+      this._untrackedFills.unshift({
+        t: Date.now(), orderId: String(payload.orderId), side: payload.side,
+        sizeBase: Number(payload.sizeBase) || 0, price: Number(payload.price) || 0,
+        applyError: msg, whileStopped: !!ctx.whileStopped,
+      });
+      if (this._untrackedFills.length > 20) this._untrackedFills.length = 20;
+      this._alert(
+        `⛔ 账本写入失败：${payload.side} ${payload.sizeBase} @ ${payload.price}`
+        + `（orderId=${payload.orderId}）未入账 → 已记入未识别。${msg}`,
+        { key: 'ledger-write-failed', level: 'error' },
+      );
+      logger.error('bot', `账本写入失败 ${payload.side} ${payload.sizeBase} @ ${payload.price} orderId=${payload.orderId}: ${msg}`);
+      return { result: null, error: msg };
+    }
+  }
+
+  /**
    * 停机期间到达的成交：只入账，不碰网格状态。
    * 之所以单独一条路，是因为停机时 `active` 已被清空、统计也不该被平仓腿污染；
    * 但**账本必须推进**——它是真实成交，不记就等于账本撒谎，重启时会变成假熔断。
@@ -2559,13 +2653,19 @@ export class GridBot {
     const known = this._recentOrderMeta?.get?.(id) || null;
     // 回放先去重：重复成交不入账、不重复留痕、更不许进「未识别」列表
     // （进了就会拦住下次启动 —— 修好入账反而制造假熔断，review 必改 3）。
-    let dup = false;
-    try {
-      const r = this.posLedger.applyFill({
-        orderId: id, side: f.side, sizeBase: size, price, rawTs: f.rawTs, createdAt: f.createdAt,
-      });
-      dup = !!r?.duplicate;
-    } catch { /* 账本异常由一致性巡检兜底 */ }
+    const applied = this._applyFillGuarded(
+      { orderId: id, side: f.side, sizeBase: size, price, rawTs: f.rawTs, createdAt: f.createdAt },
+      { whileStopped: true },
+    );
+    if (applied.error) {
+      // 写失败已经记进未识别并告警；这里只留一条停机痕迹，不再重复记一次未识别。
+      this.lastStopFill = {
+        at: Date.now(), orderId: id, side: f.side, sizeBase: size, price, known: !!known, applyError: applied.error,
+      };
+      this._changed();
+      return;
+    }
+    const dup = !!applied.result?.duplicate;
     if (dup) {
       this._duplicateFills = (Number(this._duplicateFills) || 0) + 1;
       this.lastStopFill = {
@@ -2654,14 +2754,13 @@ export class GridBot {
     // 回放先去重（review 必改 3）：轮询游标重启后会重新对齐，可能把旧成交再推一遍。
     // 幂等键由 PositionLedger.fillKey 提供（orderId+rawTs+side+size+price，跨重启持久化），
     // 重复不入账、不统计、不补腿、不进未识别。
-    let dup = false;
-    try {
-      const led = this.posLedger.applyFill({
-        orderId: id, side: f.side, sizeBase: fillSize, price: fillPrice,
-        rawTs: f.rawTs, createdAt: f.createdAt,
-      });
-      dup = !!led?.duplicate;
-    } catch { /* 账本异常不能阻断交易主流程，由一致性巡检兜底 */ }
+    // 账本写失败不阻断交易主流程（格子已成交、该补的腿还要补），但会立刻告警并记未识别，
+    // 随后一致性检查会因 expected 落后而进入收敛窗口 → 熔断，绝不会「安静地少一笔」。
+    const applied = this._applyFillGuarded({
+      orderId: id, side: f.side, sizeBase: fillSize, price: fillPrice,
+      rawTs: f.rawTs, createdAt: f.createdAt,
+    });
+    const dup = !!applied.result?.duplicate;
     if (dup) {
       this._duplicateFills = (Number(this._duplicateFills) || 0) + 1;
       return;
@@ -3267,6 +3366,15 @@ export class GridBot {
                 this._startBlocked = `账本重锚被拒绝（${rec.reason}）：from=${rec.from} to=${rec.to} expectedDelta=${rec.expectedDelta} actualDelta=${rec.actualDelta}`;
                 this._alert(`⛔ 平仓确认归零但账本差额无法解释（${rec.reason}：账本 ${rec.from} → 交易所 ${rec.to}，应变动 ${rec.expectedDelta}，实际 ${rec.actualDelta}）：拒绝重锚，按 BLOCKING 处理`);
                 this._ledgerReconcileRefused = { at: Date.now(), ...rec };
+                // 运行态下「只拦启动」是不够的：账本已不可信，网格却还在挂单。
+                // 立刻把开仓闸落下（粘滞，直到新一代），而不是等下一次 _applyGuard 才生效。
+                this._ledgerBlockReason = `账本重锚被拒绝（${rec.reason}）`;
+                if (this.running) {
+                  this._applyGuardResult({
+                    state: STATES.DEFENSIVE, reasons: [this._ledgerBlockReason],
+                    blockOpening: true, blockSide: 'both', haltReason: null, metrics: {},
+                  });
+                }
               } else if (rec?.changed) {
                 this._noteReconcile(rec);
                 this._alert(`⚠️ 平仓后账本按交易所真值对齐：${rec.from} → ${rec.to}（差额=本次平仓量，未收到对应成交事件，已留痕）`);
@@ -4163,6 +4271,10 @@ export class GridBot {
       // 零增长只算运行态（review 必改 2）；stoppedMs 单独给出，供人判断「没开」多久。
       rungsStalledRunningMs: Number(this._stallRunningMs) || 0,
       rungsLastIncreaseAt: this._lastRungAt ? new Date(this._lastRungAt).toISOString() : null,
+      haltedMs: Number(this._haltedMs) || 0,
+      blockedMs: Number(this._blockedMs) || 0,
+      applyFillErrors: Number(this._applyFillErrors) || 0,
+      ledgerBlockReason: this._ledgerBlockReason ?? null,
       stoppedMs: this.running ? 0
         : ((this._lastStop?.at ?? this._stoppedSince)
           ? Math.max(0, Date.now() - Number(this._lastStop?.at ?? this._stoppedSince)) : null),
