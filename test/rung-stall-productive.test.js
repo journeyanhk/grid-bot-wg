@@ -20,23 +20,28 @@ import { STATES } from '../src/guard.js';
 
 const H12 = 12 * 3600_000;
 
-function mkBot({ running = true, state = STATES.RUNNING, blockOpening = false } = {}) {
+function mkBot({ running = true, state = STATES.RUNNING, blockOpening = false, outOfRange = false } = {}) {
   const bot = Object.create(GridBot.prototype);
   bot.running = running;
+  bot.outOfRange = outOfRange;
   bot.guardState = { state, blockOpening, blockSide: null, reasons: [] };
+  bot._productiveMs = 0;
   bot._stallRunningMs = 0;
   bot._haltedMs = 0;
   bot._blockedMs = 0;
+  bot._recoveryMs = 0;
   bot._stallTickAt = 1_000_000;
   return bot;
 }
 
-test('RUNNING：12h 全计入零增长', () => {
+test('RUNNING：12h 全计入零增长，同时进生产时长', () => {
   const bot = mkBot({});
   bot._rungStallTickAt(1_000_000 + H12);
   assert.equal(bot._stallRunningMs, H12);
+  assert.equal(bot._productiveMs, H12);
   assert.equal(bot._haltedMs, 0);
   assert.equal(bot._blockedMs, 0);
+  assert.equal(bot._recoveryMs, 0);
 });
 
 test('running=true + HALTED：12h 一格都不进零增长，全进 haltedMs', () => {
@@ -55,24 +60,42 @@ test('running=true + DEFENSIVE + blockOpening（库存闸）：只进 blockedMs'
   assert.equal(bot._haltedMs, 0);
 });
 
-test('running=false：三个计时都不动（停机不是停转）', () => {
+test('running=false：四个计时都不动（停机不是停转）', () => {
   const bot = mkBot({ running: false, state: STATES.RUNNING });
   bot._rungStallTickAt(1_000_000 + H12);
   assert.equal(bot._stallRunningMs, 0);
+  assert.equal(bot._productiveMs, 0);
+  assert.equal(bot._haltedMs, 0);
+  assert.equal(bot._blockedMs, 0);
+  assert.equal(bot._recoveryMs, 0);
+});
+
+// review 2026-11-13（第三次）：回收模式 running=true / RUNNING / !blockOpening，三项全过，
+// 但它只挂 reduce-only、一格都完不成 —— 排除法漏掉的第三项。
+test('running + outOfRange（回收模式）：零增长不涨，单独记 recoveryMs', () => {
+  const bot = mkBot({ outOfRange: true });
+  bot._rungStallTickAt(1_000_000 + H12);
+  assert.equal(bot._stallRunningMs, 0, '回收模式零产出，不许计入零增长（否则与回收减仓叠加）');
+  assert.equal(bot._recoveryMs, H12);
   assert.equal(bot._haltedMs, 0);
   assert.equal(bot._blockedMs, 0);
 });
 
-test('跨状态分段累计：4h 跑 + 6h 熔断 + 2h 拦买 → 零增长只有 4h', () => {
+test('跨状态分段累计：4h 跑 + 6h 熔断 + 1h 拦买 + 1h 回收 → 零增长只有 4h', () => {
   const bot = mkBot({});
   bot._rungStallTickAt(1_000_000 + 4 * 3600_000);
   bot.guardState = { state: STATES.HALTED, blockOpening: false, reasons: [] };
   bot._rungStallTickAt(1_000_000 + 10 * 3600_000);
   bot.guardState = { state: STATES.DEFENSIVE, blockOpening: true, reasons: [] };
+  bot._rungStallTickAt(1_000_000 + 11 * 3600_000);
+  bot.guardState = { state: STATES.RUNNING, blockOpening: false, reasons: [] };
+  bot.outOfRange = true;
   bot._rungStallTickAt(1_000_000 + 12 * 3600_000);
   assert.equal(bot._stallRunningMs, 4 * 3600_000);
+  assert.equal(bot._productiveMs, 4 * 3600_000);
   assert.equal(bot._haltedMs, 6 * 3600_000);
-  assert.equal(bot._blockedMs, 2 * 3600_000);
+  assert.equal(bot._blockedMs, 1 * 3600_000);
+  assert.equal(bot._recoveryMs, 1 * 3600_000);
 });
 
 test('完成一格：零增长清零（熔断/拦买计时不清——它们是历史，不是判据）', () => {

@@ -33,6 +33,10 @@ const PRUNE_GRACE_MS = 20000; // don't prune a tracked order younger than this
 // 未识别成交的过期时间：24 小时后不再参与一致性判定（见 _guardConsistency 注释）。
 const UNKNOWN_FILL_TTL_MS = 24 * 60 * 60 * 1000;
 const MISMATCH_CONVERGE_MS = 90 * 1000;
+// 账本闸（_ledgerBlockReason）的自愈规格：与 mismatch 收敛窗口同规格 —— 3 次同样本一致、历时 ≥90s。
+// review 2026-11-13：「一个只会变红的闸，和一个永远解不开的锁，是同一种东西。」
+const LEDGER_BLOCK_CLEAR_MS = 90 * 1000;
+const LEDGER_BLOCK_CLEAR_STREAK = 3;
 const MISMATCH_ATTEMPT_GAP_MS = 30 * 1000;
 const MISMATCH_MAX_ATTEMPTS = 3;
 // 铺单批次「仍在进行」的判定窗口：超过这个年龄的 retrying/incomplete 是僵尸记录，
@@ -205,8 +209,14 @@ export class GridBot {
     this._reconcileEvents = [];      // 24h 内的账本对齐（>3 次/天 = 漏单还在发生）
     this._ledgerReconcileRefused = null; // 最近一次被拒绝的重锚（BLOCKING 证据）
     this._stallRunningMs = 0;        // 完成格零增长（只累计「真的能成交」的时间）
+    this._productiveMs = 0;          // 真生产期（四桶之和 = 运行态总时长）
     this._haltedMs = 0;              // 熔断期（running=true 但完全不动）
     this._blockedMs = 0;             // 开仓被拦期（库存闸/mismatch 窗口）
+    this._recoveryMs = 0;            // 越界回收期（只挂 reduce-only，零产出）
+    this._ledgerBlockAt = null;      // 账本闸落下的时刻（用于 3 轮升级/6h 过期）
+    this._ledgerBlockOkStreak = 0;   // 连续一致次数（自愈判据）
+    this._ledgerBlockOkSince = 0;
+    this._ledgerBlockAutoCleared = null;
     this._applyFillErrors = 0;       // 账本写入失败次数（必须比「成交没认领」更响）
     this._ledgerBlockReason = null;  // 重锚被拒 → 持续禁开仓，直到新一代
     this._stallTickAt = Date.now();
@@ -281,10 +291,16 @@ export class GridBot {
       reconcileEvents: (this._reconcileEvents || []).slice(0, 50),
       ledgerReconcileRefused: this._ledgerReconcileRefused ?? null,
       stallRunningMs: Number(this._stallRunningMs) || 0,
+      productiveMs: Number(this._productiveMs) || 0,
       haltedMs: Number(this._haltedMs) || 0,
       blockedMs: Number(this._blockedMs) || 0,
+      recoveryMs: Number(this._recoveryMs) || 0,
       applyFillErrors: Number(this._applyFillErrors) || 0,
       ledgerBlockReason: this._ledgerBlockReason ?? null,
+      ledgerBlockAt: this._ledgerBlockAt ?? null,
+      ledgerBlockAgeMs: this._ledgerBlockAt ? Math.max(0, Date.now() - this._ledgerBlockAt) : null,
+      ledgerBlockOkStreak: Number(this._ledgerBlockOkStreak) || 0,
+      ledgerBlockAutoCleared: this._ledgerBlockAutoCleared ?? null,
       lastRungAt: this._lastRungAt ?? null,
       // 认领窗口的实测值要跨重启累积，否则 120s 这个数永远得不到标定（review P1-2）。
       lastCloseClaim: this._lastCloseClaim ?? null,
@@ -328,8 +344,12 @@ export class GridBot {
     this._reconcileEvents = Array.isArray(snap.reconcileEvents) ? snap.reconcileEvents : [];
     this._ledgerReconcileRefused = snap.ledgerReconcileRefused ?? null;
     this._stallRunningMs = Number(snap.stallRunningMs) || 0;
+    this._productiveMs = Number(snap.productiveMs) || 0;
     this._haltedMs = Number(snap.haltedMs) || 0;
     this._blockedMs = Number(snap.blockedMs) || 0;
+    this._recoveryMs = Number(snap.recoveryMs) || 0;
+    this._ledgerBlockAt = snap.ledgerBlockAt ?? null;
+    this._ledgerBlockAutoCleared = snap.ledgerBlockAutoCleared ?? null;
     this._applyFillErrors = Number(snap.applyFillErrors) || 0;
     this._ledgerBlockReason = snap.ledgerBlockReason ?? null;
     this._lastRungAt = snap.lastRungAt ?? null;
@@ -1631,6 +1651,9 @@ export class GridBot {
     this._consistencyStaleStreak = consistency.status === 'stale'
       ? (this._consistencyStaleStreak || 0) + 1
       : 0;
+    // 账本闸的复位线：底层条件恢复（连续 3 次同样本一致、历时 ≥90s）→ 自动解除。
+    // 放在这里而不是 getState：只有这里拿得到「交易所 vs 账本」这一拍的比对结果。
+    this._maybeAutoClearLedgerBlock(consistency);
     // 2026-11-10：mismatch 从「立即判定」改成「限时收敛」（见文件头 MISMATCH_CONVERGE_MS 注释）。
     //
     // 11-06 21:29 / 22:36、11-09 17:05 / 21:34 四次同形熔断，全部在数秒内自行对齐，
@@ -1716,6 +1739,45 @@ export class GridBot {
   }
 
   /** 把一份风控结果落到状态机与持久化熔断账本上（含状态迁移告警）。 */
+  /**
+   * 账本闸的自愈路径（review 2026-11-13 要求 1）。
+   *
+   * 触发线有了、复位线只有 new-epoch（人工）—— 那就是一扇只会朝里开的门。
+   * 现在：连续 3 次「账本 vs 交易所」同样本比对一致，且历时 ≥90s → 自动解除并留痕。
+   * 三次而不是一次：一次一致可能只是缓存刚追上；连续三次才说明差额真的消失了。
+   * 任一次不一致 → 连击清零（不累计、不降级）。
+   */
+  _maybeAutoClearLedgerBlock(consistency) {
+    if (!this._ledgerBlockReason) return false;
+    if (!consistency?.ok) {
+      this._ledgerBlockOkStreak = 0;
+      this._ledgerBlockOkSince = 0;
+      return false;
+    }
+    const now = Date.now();
+    if (!this._ledgerBlockOkSince) this._ledgerBlockOkSince = now;
+    this._ledgerBlockOkStreak = (Number(this._ledgerBlockOkStreak) || 0) + 1;
+    const held = now - this._ledgerBlockOkSince;
+    if (this._ledgerBlockOkStreak < LEDGER_BLOCK_CLEAR_STREAK || held < LEDGER_BLOCK_CLEAR_MS) return false;
+
+    let exchangeBase = null;
+    try { exchangeBase = Number(this.ex?.getPosition?.(this.config?.marketId)?.sizeBase); } catch { /* 取不到就是 null */ }
+    const delta = Number.isFinite(exchangeBase) ? round8(this.posLedger.value - exchangeBase) : null;
+    const rec = { at: now, n: this._ledgerBlockOkStreak, heldMs: held, delta };
+    this._ledgerBlockAutoCleared = rec;
+    this._ledgerBlockReason = null;
+    this._ledgerBlockAt = null;
+    this._ledgerBlockOkStreak = 0;
+    this._ledgerBlockOkSince = 0;
+    this._alert(
+      `✅ 账本闸已自愈解除：连续 ${rec.n} 次同样本比对一致（历时 ${Math.round(held / 1000)}s，Δ=${delta == null ? 'n/a' : delta}）`,
+      { key: 'ledger-block-cleared', level: 'info' },
+    );
+    logger.info('bot', `账本闸自愈解除 n=${rec.n} held=${held}ms delta=${delta}`);
+    this._changed();
+    return true;
+  }
+
   _applyGuardResult(r) {
     // 账本重锚被拒 → 无论风控怎么算，都不许再开新仓（粘滞，直到新一代）。
     if (this._ledgerBlockReason && r) {
@@ -1847,11 +1909,19 @@ export class GridBot {
    * 这正是「运行是一个状态，不是一个布尔值」的同族第 4 例。
    */
   _engineProductive() {
+    // **准入式白名单，不是排除法。**
+    //
+    // 2026-11-13 review（第三次）：排除法永远会漏掉下一项 —— 我先漏了 HALTED/blockOpening，
+    // 补上之后又漏了 outOfRange（回收模式：只挂 reduce-only，一格都完不成，但它
+    // running=true、state=RUNNING、blockOpening=false，三项全过）。
+    // 所以这里反过来写：只有「在跑、没熔断、没拦买、没越界回收」这一种组合才算生产态，
+    // 其余一律归零并分桶。新增状态时默认落到「非生产」，而不是默认落到「生产」。
     if (!this.running) return false;
     const g = this.guardState;
-    if (!g) return true;                       // 尚未跑过风控：按运行态计（保守）
-    if (g.state === STATES.HALTED) return false;
+    if (!g) return false;                      // 没跑过风控 = 还没证明自己在生产
+    if (g.state !== STATES.RUNNING) return false;
     if (g.blockOpening) return false;
+    if (this.outOfRange) return false;         // 回收模式：暂停补单，零产出
     return true;
   }
 
@@ -1860,14 +1930,21 @@ export class GridBot {
     const last = Number(this._stallTickAt) || now;
     this._stallTickAt = now;
     const g = this.guardState;
+    const dt = Math.max(0, now - last);
     if (this._engineProductive()) {
-      this._stallRunningMs = (Number(this._stallRunningMs) || 0) + Math.max(0, now - last);
+      this._productiveMs = (Number(this._productiveMs) || 0) + dt;
+      this._stallRunningMs = (Number(this._stallRunningMs) || 0) + dt;
     } else if (this.running) {
-      // 开着但干不了活：单独计时，报告里分列，绝不混进「零增长」。
+      // 开着但干不了活：分桶计时，报告里四桶并列，绝不混进「零增长」。
       if (g?.state === STATES.HALTED) {
-        this._haltedMs = (Number(this._haltedMs) || 0) + Math.max(0, now - last);
+        this._haltedMs = (Number(this._haltedMs) || 0) + dt;
+      } else if (g?.blockOpening) {
+        this._blockedMs = (Number(this._blockedMs) || 0) + dt;
+      } else if (this.outOfRange) {
+        this._recoveryMs = (Number(this._recoveryMs) || 0) + dt;
       } else {
-        this._blockedMs = (Number(this._blockedMs) || 0) + Math.max(0, now - last);
+        // 兜底：状态不明也算非生产（fail-closed），并记进拦买桶以便被发现。
+        this._blockedMs = (Number(this._blockedMs) || 0) + dt;
       }
     }
   }
@@ -1985,6 +2062,9 @@ export class GridBot {
     this._startBlocked = null;
     // 重锚被拒的粘滞闸随新一代一起解除：账本已按交易所真值重建，旧理由不再成立。
     this._ledgerBlockReason = null;
+    this._ledgerBlockAt = null;
+    this._ledgerBlockOkStreak = 0;
+    this._ledgerBlockOkSince = 0;
     this._ledgerReconcileRefused = null;
     this._consistencyUnknownStreak = 0;
     this._consistencyStaleStreak = 0;
@@ -3381,6 +3461,9 @@ export class GridBot {
                 // 运行态下「只拦启动」是不够的：账本已不可信，网格却还在挂单。
                 // 立刻把开仓闸落下（粘滞，直到新一代），而不是等下一次 _applyGuard 才生效。
                 this._ledgerBlockReason = `账本重锚被拒绝（${rec.reason}）`;
+                this._ledgerBlockAt = Date.now();
+                this._ledgerBlockOkStreak = 0;
+                this._ledgerBlockOkSince = 0;
                 if (this.running) {
                   this._applyGuardResult({
                     state: STATES.DEFENSIVE, reasons: [this._ledgerBlockReason],
@@ -4286,10 +4369,14 @@ export class GridBot {
       // 零增长只算运行态（review 必改 2）；stoppedMs 单独给出，供人判断「没开」多久。
       rungsStalledRunningMs: Number(this._stallRunningMs) || 0,
       rungsLastIncreaseAt: this._lastRungAt ? new Date(this._lastRungAt).toISOString() : null,
+      productiveMs: Number(this._productiveMs) || 0,
       haltedMs: Number(this._haltedMs) || 0,
       blockedMs: Number(this._blockedMs) || 0,
+      recoveryMs: Number(this._recoveryMs) || 0,
       applyFillErrors: Number(this._applyFillErrors) || 0,
       ledgerBlockReason: this._ledgerBlockReason ?? null,
+      ledgerBlockAt: this._ledgerBlockAt ?? null,
+      ledgerBlockAutoCleared: this._ledgerBlockAutoCleared ?? null,
       stoppedMs: this.running ? 0
         : ((this._lastStop?.at ?? this._stoppedSince)
           ? Math.max(0, Date.now() - Number(this._lastStop?.at ?? this._stoppedSince)) : null),
