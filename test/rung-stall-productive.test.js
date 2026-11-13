@@ -82,3 +82,20 @@ test('完成一格：零增长清零（熔断/拦买计时不清——它们是�
   assert.equal(bot._stallRunningMs, 0);
   assert.equal(bot._haltedMs, H12);
 });
+// —— @现价 的单位经济必须是派生值 ——
+// 只在 _recomputeRisk（启动时）算一次，字段会常年 null：一个「存在但永远没有值」的死字段。
+test('_refreshRiskAtPrice：价格变了，@现价净额跟着变，且不改 @mid 的两项', () => {
+  const bot = Object.create(GridBot.prototype);
+  bot.config = { sizeBase: 0.0002 };
+  bot.ex = { feeRate: 0.00015 };
+  bot.risk = { grossPerRung: 0.03024939, feePerRung: 0.00453739, perRungNet: 0.025712, feeRateKnown: true };
+  bot.lastPrice = 68_400;
+  bot._refreshRiskAtPrice();
+  assert.equal(bot.risk.feePerRungAtPrice, 0.004104);
+  assert.equal(bot.risk.perRungNetAtPrice, 0.02614539);
+  assert.equal(bot.risk.perRungPriceBasis, 68_400);
+  assert.equal(bot.risk.perRungNet, 0.025712, '@mid 不许被现价覆盖');
+  bot.lastPrice = 75_623.25;
+  bot._refreshRiskAtPrice();
+  assert.equal(bot.risk.perRungNetAtPrice, 0.025712);
+});

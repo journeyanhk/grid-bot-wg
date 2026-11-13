@@ -1119,6 +1119,18 @@ export class GridBot {
     this._applyGuard();
   }
 
+  /** 用当前价刷新 @现价 的单位经济（纯派生，不触发风控、不发请求）。 */
+  _refreshRiskAtPrice() {
+    const r = this.risk;
+    if (!r || !this.config || r.feeRateKnown !== true) return;
+    const px = Number(this.lastPrice) || Number(this.ex?.lastPrice);
+    if (!(px > 0)) return;
+    const fee = round8(2 * (Number(this.ex?.feeRate) || 0) * this.config.sizeBase * px);
+    r.feePerRungAtPrice = fee;
+    r.perRungNetAtPrice = round8(r.grossPerRung - fee);
+    r.perRungPriceBasis = px;
+  }
+
   _beginPlacementProgress(action, orders) {
     const levels = [...new Set((orders || []).map((o) => Number(o.levelIndex)).filter(Number.isFinite))];
     const id = `${Date.now()}-${(++this._coidSeq) % 1_000_000}`;
@@ -4106,6 +4118,9 @@ export class GridBot {
     if (this.grid && this.config && this.risk && this.risk.feeRateKnown === false && this.ex?.feeRateKnown === true) {
       this._recomputeRisk();
     }
+    // @现价 的净额是派生值：价格每变一次它就变，不能只在启动时算一次 ——
+    // 只在启动时算，字段就会常年 null，变成一个「存在但永远没有值」的死字段。
+    this._refreshRiskAtPrice();
     const pos = this.running || this.config ? this.ex.getPosition?.(this.config?.marketId) : null;
     // 风控状态必须对外可见：状态机在跑但外部看不见，等于没有（巡检/面板都读不到）。
     const guard = this.guard?.toJSON?.() || null;
