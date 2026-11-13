@@ -69,3 +69,28 @@ test('_clearDeferredOpenings：启动即清，返回清掉的条数（重启不�
   assert.deepEqual(bot._deferredOpenings, []);
   assert.equal(bot._clearDeferredOpenings('start'), 0, '幂等：没东西可清时返回 0');
 });
+
+test('重锚后 guardState 不许自相矛盾：state=RUNNING 时 blockOpening 必须 false、reasons 清空', async () => {
+  const bot = mkBot();
+  bot.guardState = { state: 'DEFENSIVE', reasons: ['库存 82%…', '价格在区间外'], blockOpening: true, blockSide: null };
+  bot.active = new Map();
+  bot._retryQueue = [];
+  bot._placementProgress = null;
+  bot._untrackedFills = [];
+  bot._deferredOpenings = [];
+  bot.posLedger = { value: 0.0056, reset(v) { this.value = v; return this; } };
+  bot.guard = { clearHalt() { return { reason: '账本不一致' }; } };
+  bot.ex = {
+    fetchOpenOrders: async () => [],
+    getPositionFresh: async () => ({ sizeBase: 0 }),
+  };
+  bot._startReconcileTimer = () => {};
+  bot._alert = () => {};
+  bot._changed = () => {};
+  const r = await bot.beginNewRiskEpoch({ by: 'test', reason: '单测' });
+  assert.equal(r.ok, true);
+  assert.equal(bot.guardState.state, 'RUNNING');
+  assert.equal(bot.guardState.blockOpening, false, 'state=RUNNING 时 blockOpening 必须 false');
+  assert.deepEqual(bot.guardState.reasons, [], '上一代 reasons 不许冒充现值');
+  assert.equal(bot.posLedger.value, 0, '账本重锚到交易所真值');
+});

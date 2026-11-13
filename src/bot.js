@@ -1735,7 +1735,17 @@ export class GridBot {
     this.posLedger.reset(s1);
     if (this.guard) {
       this.guard.clearHalt();
-      this.guardState = { ...(this.guardState || {}), state: 'RUNNING', haltReason: null, blockSide: null };
+      // 2026-11-13：重锚后必须把上一代的风控读数一起作废。此前只把 state 改写成
+      // RUNNING、却留着上一代的 reasons 与 blockOpening=true，于是 state 说「在跑」、
+      // blockOpening 说「禁买」——两个字段互相打脸。停机时 `_runRiskCycle` 会早退，
+      // 这个矛盾就会一直挂在面板上（今天 11:02 重启后实测：state=RUNNING、
+      // reasons=[库存 82%…, 价格在区间外…]、blockOpening=true）。
+      // 重锚点是一个干净起点：没有已知的禁买理由，下一轮风控自己重算。
+      this.guardState = {
+        ...(this.guardState || {}),
+        state: 'RUNNING', reasons: [], blockOpening: false, blockSide: null, haltReason: null,
+        epochResetAt: new Date().toISOString(),
+      };
     }
     // 重锚 = 新一代：节流标记不继承上一代（否则 5 分钟内再熔断不撤单，P2-1 同族）。
     this._haltSatisfied = false;
