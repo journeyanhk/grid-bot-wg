@@ -1939,7 +1939,7 @@ export class GridBot {
     return true;
   }
 
-  /** 内部：按给定时刻推进三种计时（productive / halted / blocked）。 */
+  /** 内部：按给定时刻推进四桶计时（productive / halted / blocked / recovery）。 */
   _rungStallTickAt(now) {
     const last = Number(this._stallTickAt) || now;
     this._stallTickAt = now;
