@@ -28,7 +28,9 @@ test('库存 50% → DEFENSIVE（仅降级，不封锁方向）', () => {
   const r = evaluateRisk({ ...base, positionBase: -0.0033 }); // 0.0033 / 0.0066 = 50%
   assert.equal(r.state, STATES.DEFENSIVE);
   assert.equal(r.blockSide, null, '50% 只降级，不封方向');
-  assert.match(r.reasons.join('|'), /防守/);
+  // 2026-11-13：旧文案「进入防守」被读成「已经限买」，而这一档 blockOpening=false。
+  // 文案改成「库存预警 N%（未限制买入；…）」，断言跟着改成「未限制买入」。
+  assert.match(r.reasons.join('|'), /库存预警 \d+%（未限制买入/);
 });
 
 test('库存 75% → DEFENSIVE 且封锁加仓方向', () => {

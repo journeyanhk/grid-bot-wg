@@ -1093,6 +1093,7 @@ export class ArcusExchange extends EventEmitter {
     // 用 mid±2% 的 IOC 根本碰不到对手价，只会白撤两轮然后报"未完成"。
     let book = null;
     try { book = await this._fetchBook(mId); } catch { /* 退化到缓存 mid */ }
+    let closeRes;
     for (const slip of [0.002, 0.01, 0.03]) {
       const ref = (side === 'sell' ? book?.bid : book?.ask)
         || this._prices.get(mId) || m.lastPrice || pos.entryPrice;
@@ -1110,13 +1111,30 @@ export class ArcusExchange extends EventEmitter {
         orderSide: side === 'buy' ? 'BUY' : 'SELL', orderType: 'LIMIT', quantity: qty.text, price: px.text,
         timeInForce: 'IOC', reduceOnly: true, goodTilTime: String(goodTilUs), timestamp: String(ts),
       };
-      await this._http('POST', `/v1/placeOrder?address=${this.address}`, {
-        body, headers: this._headers(payload, ts), timeoutMs: 20_000,
-      }).catch((e) => { logger.warn('ar', `平仓下单失败：${e.message}`); });
+      // 2026-11-13 破界平仓事故：这里原先把响应丢掉了，平仓单也不进 `_tracked`，
+      // 于是成交回来「查无此单」→ 适配器打「未跟踪订单的成交」+ operationalIssue
+      // （health=error），而 bot 侧同样算成一笔未识别成交。11-10 停摆 19 小时的入口
+      // 与今天 10:14 这一笔是同一个机制：下单没登记，成交找不到人。
+      let resp = null;
+      try {
+        resp = await this._http('POST', `/v1/placeOrder?address=${this.address}`, {
+          body, headers: this._headers(payload, ts), timeoutMs: 20_000,
+        });
+      } catch (e) { logger.warn('ar', `平仓下单失败：${e.message}`); }
+      const closeOrderId = resp?.orderId ? String(resp.orderId)
+        : (resp?.result?.orderId ? String(resp.result.orderId) : null);
+      if (closeOrderId) {
+        this._tracked.set(closeOrderId, {
+          marketId: mId, levelIndex: -1, side,
+          price: Number(px.text), sizeBase: Number(qty.text),
+          reduceOnly: true, placedAt: Date.now(), seen: false, closing: true,
+        });
+      }
+      closeRes = { orderId: closeOrderId, side, price: Number(px.text), sizeBase: Number(qty.text) };
       await new Promise((r) => setTimeout(r, 1500));
       await this._refreshAccount().catch(() => {});
       const after = this._pos.get(mId) || null;
-      if (!after || Math.abs(after.sizeBase) < Number(m.stepSize)) return true;
+      if (!after || Math.abs(after.sizeBase) < Number(m.stepSize)) return closeRes || true;
     }
     throw new Error('Arcus 平仓未完成（三轮 IOC 后仍有持仓），请人工介入。');
   }

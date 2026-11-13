@@ -215,7 +215,14 @@ export function evaluateRisk(ctx = {}, limits = {}) {
       reasons.push(`库存暴露 ${(frac * 100).toFixed(0)}%（真实 ${realAbs} + 同向待成交）≥ ${(L.inventoryBlockFrac * 100)}%，停止 ${blockSide} 方向开仓`);
     } else if (frac >= L.inventoryWarnFrac) {
       state = STATES.DEFENSIVE;
-      reasons.push(`库存 ${(frac * 100).toFixed(0)}% ≥ ${(L.inventoryWarnFrac * 100)}%，进入防守`);
+      // 2026-11-13 用户裁决：warn 档只变色、不拦开仓（blockOpening=false），
+      // 旧文案「进入防守」被读成「已经限买」，抄送行里必须把真相写清楚。
+      const pct = (frac * 100).toFixed(0);
+      const blockG = Number(L.inventoryBlockGrids);
+      const haltG = Number(L.inventoryHaltGrids);
+      reasons.push(Number.isFinite(blockG) && Number.isFinite(haltG)
+        ? `库存预警 ${pct}%（未限制买入；${blockG} 格禁买 / ${haltG} 格熔断）`
+        : `库存预警 ${pct}%（未限制买入）`);
     }
   }
 

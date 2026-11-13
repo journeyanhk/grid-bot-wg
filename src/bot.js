@@ -130,6 +130,10 @@ export class GridBot {
     // 未跟踪成交：成交到了、本地没有这张单的记录（撤单竞态/重启丢单/非本机下单）。
     // 2026-11-10 之前这个数组只有读、没有写，等于一个从未接线的传感器。
     this._untrackedFills = [];
+    // 2026-11-13 10:14 主网破界平仓：适配器直接下的平仓单不进 `active`，成交回来
+    // 必然「查无此单」——每次 close 都 100% 制造一笔未跟踪成交（11-10 停摆 19h 的入口）。
+    // 平仓在途时用它兜住同市场/同方向/时间窗内的成交，让 `_handleFill` 能认领。
+    this._closingCtx = null;
     // orderId → {levelIndex, price, opening, recovery, ts}：成交后仍留 30 分钟，
     // 让同一张单的后续碎片（交易所会把一笔挂单拆成多块推送）还能被认出来。
     this._recentOrderMeta = new Map();
@@ -182,6 +186,10 @@ export class GridBot {
     this._dynGateLastAt = { inventory: 0, calm: 0, cooldown: 0 };
     this._auditNeedsRebase = false; // 恢复路径缺省既无基线又无锚点时，首次观测重校准
     this._autoStopped = null;        // { at, reason:'breakout'|'maxloss', config } 自动停机记录 → 冷静门重启
+    // 2026-11-13：停机原因必须独立于 dynamic 开关存在。破界平仓停机后，
+    // state 里只有化石 `startBlockedReason`（上一世代的「账本不一致」），
+    // 而真正的原因「breakout」在这个字段里根本不存在。
+    this._lastStop = null;           // { reason:'breakout'|'maxloss'|'manual', at }
     this._lastVanishAlertAt = 0;
     // Cancellation is safety-critical: require consecutive exchange snapshots
     // showing target orders gone before local state is cleared or trading moves on.
@@ -250,6 +258,7 @@ export class GridBot {
       // `running=true` 会被恢复、`startBlocked` 却消失，巡检看到的是一个「正常在跑的空机器人」。
       startBlocked: this._startBlocked ?? null,
       autoStopped: this._autoStopped,   // 动态网格：自动停机→冷静门重启状态
+      lastStop: this._lastStop ?? null, // 停机原因（breakout/maxloss/manual）：跨重启保留，别让它变成谜
       invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
       auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
       auditSellsBase: this._auditSellsBase ?? 0,
@@ -277,6 +286,7 @@ export class GridBot {
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._untrackedFills = Array.isArray(snap.untrackedFills) ? snap.untrackedFills : [];
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
+    this._lastStop = snap.lastStop ?? null;       // 停机原因跨重启保留
     this._startBlocked = snap.startBlocked ?? null; // 上一轮为什么没铺单（跨重启保留）
     this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : []; // 动态动作记录（毕业评审）
     this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
@@ -727,6 +737,10 @@ export class GridBot {
     if (typeof this.ex.start === 'function') this.ex.start();
 
     // ---- seed the ladder (every seed order is an OPENING leg) ----
+    // 2026-11-13 破界平仓事故：停机时内存里可能留着一条「被风控拦下的待铺开仓腿」。
+    // drain 虽然按 5 分钟 TTL 过滤，但「重启后不会用旧价多挂一张买单」这件事
+    // 不能靠 TTL 的巧合 —— 启动本来就会重建全部网格，任何旧腿都只能带旧价。直接清。
+    this._clearDeferredOpenings('start');
     let seeds = seedOrders({ levels: this.grid.levels, price: this.lastPrice, mode: this.config.mode, spacing: this.grid.spacing, windowGrids: this.config.activeWindowGrids });
     // 限流/慢铺单时，离现价近的档位优先上账：首批即可让网格开始工作，远端档慢慢补齐
     seeds.sort((a, b) => Math.abs(a.price - this.lastPrice) - Math.abs(b.price - this.lastPrice));
@@ -792,6 +806,11 @@ export class GridBot {
 
   async stop({ closePosition = true } = {}) {
     const wasRunning = this.running;
+    // 自动停机（breakout/maxloss）会先 _noteAutoStop 再调 stop()，那条原因要留着；
+    // 只有「60 秒内没有自动原因」的停机才算人工 —— 否则人工动作会把真因覆盖掉。
+    if (!this._lastStop || Date.now() - Number(this._lastStop.at || 0) > 60_000) {
+      this._lastStop = { reason: 'manual', at: Date.now() };
+    }
     this._pauseTradingRuntime();
     try {
       if (this.config) await this._cancelAllConfirmed(this.config.marketId, '停止网格时撤销挂单');
@@ -1199,6 +1218,9 @@ export class GridBot {
       inventoryWarnFrac: Math.min(0.99, warn / maxGrids),
       inventoryBlockFrac: Math.min(0.999, block / maxGrids),
       inventoryHaltFrac: Math.min(1, halt / maxGrids),
+      // 原样带上「格」，只为让告警文案能说人话：
+      // 「库存预警 82%（未限制买入；30 格禁买 / 34 格熔断）」比「进入防守」有用得多。
+      inventoryWarnGrids: warn, inventoryBlockGrids: block, inventoryHaltGrids: halt,
     };
   }
 
@@ -1443,6 +1465,22 @@ export class GridBot {
   }
 
   /** 风控恢复后补铺被拦下的开仓腿（价格/数量用当时的规格，档位已占用则跳过）。 */
+  /**
+   * 启动时清空待铺腿（2026-11-13 破界平仓事故）。
+   * 停机那一瞬内存里可能留着一批「被风控拦下的开仓腿」；只要它在 TTL 内、
+   * 风控又恰好恢复，`_drainDeferredOpenings` 就会**用停机前的旧价格**把它铺出去
+   * ——重启后在你不知情的时候多挂一张买单。启动本来就会重建全部网格，
+   * 任何旧腿都只可能带旧价，所以启动即清，不靠 TTL 的巧合。
+   */
+  _clearDeferredOpenings(why = 'start') {
+    const n = (this._deferredOpenings || []).length;
+    if (n > 0) {
+      logger.info('bot', `清理 ${n} 条待铺开仓腿（${why}）：启动会重建全部网格，旧腿只可能带旧价`);
+    }
+    this._deferredOpenings = [];
+    return n;
+  }
+
   _drainDeferredOpenings(reason = '') {
     const list = this._deferredOpenings;
     if (!list || !list.length) return;
@@ -2358,6 +2396,18 @@ export class GridBot {
       const hist = this._recentOrderMeta?.get ? this._recentOrderMeta.get(id) : null;
       if (hist) { actEff = hist; continuation = true; }
     }
+    // 2026-11-13 破界平仓（closePosition）的成交认领。
+    // 平仓单由适配器直接下发、不进 `active`；若只靠 orderId 台账，成交比 HTTP 响应
+    // 先到时仍会漏成「未跟踪成交」，而适配器会把它报成 operationalIssue（health=error）。
+    // 所以平仓在途窗口内，同市场 + 同方向 + ≤120s 的未知成交一律归给这次平仓。
+    if (!actEff && this._closingCtx) {
+      const ctx = this._closingCtx;
+      if (Date.now() - ctx.at <= 120_000 && f.marketId === ctx.marketId && f.side === ctx.side) {
+        actEff = { levelIndex: -1, opening: false, manual: true, closing: true };
+        ctx.claimed = (Number(ctx.claimed) || 0) + (Number(f.sizeBase) || 0);
+        logger.info('bot', `平仓成交认领 ${f.side} ${Number(f.sizeBase) || 0} @ ${Number(f.price) || 0}（orderId=${id}）`);
+      }
+    }
     // 2026-11-10：接上「未跟踪成交」传感器。
     // 这个数组此前全项目只有两处读、没有一处写 —— 一个专门用来发现「成交到了、
     // 本地却没有这张单」的仪表，从上线起一次都没亮过。真实写点就在这里：
@@ -2935,19 +2985,46 @@ export class GridBot {
     const mId = Number(marketId);
     if (typeof this.ex.closePosition !== 'function') return false;
     if (!this.ex.getPosition?.(mId)) { await this.ex.closePosition(mId).catch(() => {}); return true; }
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try { await this.ex.closePosition(mId); }
-      catch (e) { this._alert('平仓指令发送失败: ' + (e?.message || e)); }
-      const t0 = Date.now();
-      while (Date.now() - t0 < 8000) { // wait for the adapter's position poll to reflect it
-        await sleep(1000);
-        const pos = this.ex.getPosition?.(mId);
-        if (!pos || !pos.sizeBase) { this._alert('✅ 已确认仓位已平。'); return true; }
+    const pos0 = this.ex.getPosition?.(mId);
+    const closeSide = Number(pos0?.sizeBase) > 0 ? 'sell' : 'buy';
+    const untrackedBefore = this._untrackedFills.length;
+    // 平仓在途窗口：让成交能被认领（见 _handleFill 里的 _closingCtx 分支），
+    // 否则每一次 close 都会留下一笔「未识别成交」，并把 health 钉在 error 上。
+    this._closingCtx = { marketId: mId, side: closeSide, at: Date.now(), claimed: 0 };
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const placed = await this.ex.closePosition(mId);
+          // 适配器若把 orderId 返回来，立即登记订单台账：成交碎片（同一 orderId 多次推送）
+          // 与「先成交后返回」的竞态都能靠订单号认领，不再依赖时间窗。
+          if (placed && placed.orderId) {
+            this._rememberOrderMeta(String(placed.orderId), {
+              levelIndex: -1, opening: false, closing: true, manual: true,
+              price: Number(placed.price) || 0,
+            });
+          }
+        } catch (e) { this._alert('平仓指令发送失败: ' + (e?.message || e)); }
+        const t0 = Date.now();
+        while (Date.now() - t0 < 8000) { // wait for the adapter's position poll to reflect it
+          await sleep(1000);
+          const pos = this.ex.getPosition?.(mId);
+          if (!pos || !pos.sizeBase) {
+            this._alert('✅ 已确认仓位已平。');
+            return true;
+          }
+        }
+        if (attempt < 3) this._alert(`⚠️ 平仓后仓位仍在（第 ${attempt} 次），按最新价重试市价平仓…`);
       }
-      if (attempt < 3) this._alert(`⚠️ 平仓后仓位仍在（第 ${attempt} 次），按最新价重试市价平仓…`);
+      this._alert('❌ 已尝试 3 次平仓但仓位仍未平掉，请立即到交易所手动处理！');
+      return false;
+    } finally {
+      // 传感器不许被这次修复蒙住：认领窗口若没覆盖住，仍要留下痕迹。
+      const grew = this._untrackedFills.length - untrackedBefore;
+      this._closingCtx = null;
+      if (grew > 0) {
+        this._alert(`⚠️ 平仓期间仍产生 ${grew} 笔未跟踪成交：认领窗口未覆盖（请把 orderId/时间报给维护者）。`);
+      }
     }
-    this._alert('❌ 已尝试 3 次平仓但仓位仍未平掉，请立即到交易所手动处理！');
-    return false;
   }
 
   /** 独立回收阶梯：始终在现价的"下一档步进"处维持一排 reduce-only 退出单。 */
@@ -3414,6 +3491,11 @@ export class GridBot {
 
   /** 记录一次自动停机（供冷静门自动重启）。仅动态网格启用时记录。 */
   _noteAutoStop(reason, snapshotConfig) {
+    // 2026-11-13：这一行必须在 dynamic 早退**之前**。原先整段被
+    // `if (!dynamic.enabled) return` 挡住，于是「没开动态网格」这个默认形态下，
+    // 破界平仓 / 止损停机在 state 里没有任何原因字段 —— 巡检只能读到化石
+    // startBlockedReason（上一世代的账本不一致），把「为什么停」永久变成谜。
+    this._lastStop = { reason: String(reason), at: Date.now() };
     if (!this.config?.dynamic?.enabled) return;
     // 深拷贝最小必要配置（不含敏感字段），供后续 start() 复用
     const c = snapshotConfig || this.config;
@@ -3763,8 +3845,23 @@ export class GridBot {
       retryQueue: (this._retryQueue || []).length,
       untrackedFills: (this._untrackedFills || []).length,
       untrackedFillsRecent: (this._untrackedFills || []).slice(0, 3),
-      deferredOpenings: (this._deferredOpenings || []).length,
+      // 2026-11-13：原先报的是数组长度，而 drain 只补「5 分钟内」的腿 —— 于是一条
+      // 早已过期的待铺腿会在 state 里永远显示 `deferredOpenings=1`，读起来像「重启后
+      // 会补一张旧价买单」。过期的腿永远不会被铺出去，所以计数也必须按新鲜度派生。
+      deferredOpenings: (this._deferredOpenings || [])
+        .filter((s) => Date.now() - Number(s._deferredAt || 0) <= DEFERRED_OPENING_TTL_MS).length,
+      deferredOpeningsExpired: (this._deferredOpenings || [])
+        .filter((s) => Date.now() - Number(s._deferredAt || 0) > DEFERRED_OPENING_TTL_MS).length,
       deferredDropped: Number(this._deferredDropped) || 0,
+      // 停机原因必须单列：停机后 `startBlockedReason` 回落到历史值，
+      // 会显示上一世代的「账本不一致」——那是化石，不是这次为什么停。
+      // 同样按「派生 ≠ 存储」的规矩：正在跑的时候 `stopReason` 必须是 null
+      // （否则面板会一边显示 running=true 一边显示「破界停机」）；历史另开字段。
+      stopReason: this.running ? null : (this._lastStop?.reason ?? null),
+      stopReasonAt: !this.running && this._lastStop?.at
+        ? new Date(Number(this._lastStop.at)).toISOString() : null,
+      lastStopReason: this._lastStop?.reason ?? null,
+      lastStopAt: this._lastStop?.at ? new Date(Number(this._lastStop.at)).toISOString() : null,
       mismatchWindow: this._mismatchWindow
         ? { ageMs: Date.now() - this._mismatchWindow.since, attempts: this._mismatchWindow.attempts }
         : null,
