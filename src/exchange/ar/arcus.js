@@ -116,6 +116,9 @@ export class ArcusExchange extends EventEmitter {
     this.equity = null;
     this.realizedPnl = null;
     this.feeRate = 0;                          // maker ppm / 1e6（0 = 免费，合法值）
+    // 「0 = 免费」与「0 = 还没加载」必须能区分：否则单位经济 perRungNet 会在重启后
+    // 静默变回毛额（2026-11-13 实测 $0.0302 == 毛额，费率表还没拉到）。
+    this.feeRateKnown = false;
     this.dataSource = null;
     this.lastOkAt = 0;
     this.lastError = null;
@@ -146,6 +149,7 @@ export class ArcusExchange extends EventEmitter {
     this._dmsQuotaRejectedAt = 0;  // 最近一次因配额被拒的时间
     this._dmsArmedAt = 0;
     this._dmsDeadlineMs = 0;
+    this._dmsSamples = [];                     // 24h 内每次续期耗时（ms）
     this._ws = null;
     this._wsReady = false;
     this._wsTimer = null;
@@ -397,6 +401,7 @@ export class ArcusExchange extends EventEmitter {
     if (def) {
       this._watch.add(def.marketId);
       this.feeRate = (Number(def.makerFeePpm) || 0) / 1e6;
+      this.feeRateKnown = true;
     }
     // 启动即断言：maker 不为 0 时网格单位经济不成立（1 格才 1 美分）。
     // testnet 的费率表是模拟值（150/450ppm），不是真实成本——把它升成
@@ -1190,6 +1195,7 @@ export class ArcusExchange extends EventEmitter {
     // 2026-10-24 12:47 实测：网络劣化时单次续期可能被底层重试拖住好几分钟，
     // 期间没有任何"续期失败"日志，deadline 静默过期、交易所把 132 单全撤。
     // 这里给续期加 20 秒硬上限，卡住就进 catch，让下一轮 tick 重新发起。
+    const _t0 = Date.now();
     try {
       await Promise.race([
         this._armDms(),
@@ -1200,6 +1206,13 @@ export class ArcusExchange extends EventEmitter {
       ]);
       this._dmsFailStreak = 0;
       this._dmsLastOkAt = Date.now();
+      // 「续期耗时」此前根本没测过：state 里的 dmsRenewAgeMs 是「距上次续期多久」，
+      // 被读成「这次续期花了多久」（2026-11-13 review 的第 7 条就是这么来的）。
+      // 现在真的计时，并保留 24h 样本供 p50/p95/max —— 单点值不足以判断趋势。
+      const dt = this._dmsLastOkAt - _t0;
+      this._dmsSamples = [...(this._dmsSamples || []), { at: this._dmsLastOkAt, ms: dt }]
+        .filter((s) => this._dmsLastOkAt - s.at <= 24 * 3600_000)
+        .slice(-500);
       this._dmsRenews = (this._dmsRenews || 0) + 1;
       this._dmsQuickRetries = 0;
       // 2026-10-25 21:48 又触发一次死手，但窗口内一条「续期失败」都没有 —— 没有正向
@@ -1339,6 +1352,9 @@ export class ArcusExchange extends EventEmitter {
       clockSkewMs: this.clockSkewMs,
       dmsDeadlineInMs: this._dmsDeadlineMs ? this._dmsDeadlineMs - now : null,
       dmsRenewAgeMs: this._dmsLastOkAt ? now - this._dmsLastOkAt : null,
+      // 真正的「续期耗时」分布（24h），以及最近一次成功的耗时。
+      dmsRenewMs: this._dmsSamples?.length ? this._dmsSamples[this._dmsSamples.length - 1].ms : null,
+      dmsRenewMsSamples: (this._dmsSamples || []).map((s) => s.ms),
       dmsRenews: this._dmsRenews || 0,
       dmsFailStreak: this._dmsFailStreak || 0,
       // 死手开关的健康面：续期次数（不耗配额）与已触发次数（吃每日 10 次配额）。

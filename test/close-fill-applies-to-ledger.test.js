@@ -101,25 +101,54 @@ test('仓位确认归零后账本按真值对齐：不把「重启前先 new-epo
   const ok = await bot._closeWithConfirm(1);
   assert.equal(ok, true);
   assert.equal(bot.posLedger.value, 0, '账本必须对齐到交易所真值 0');
-  assert.equal(bot.posLedger.lastReconcile?.why, 'close-confirmed#1');
+  assert.equal(bot.posLedger.lastReconcile?.why, 'close-confirmed');
   assert.ok(bot._alerts.some((m) => /账本按交易所真值对齐/.test(m)));
   assert.equal(bot._lastCloseClaim?.attemptId, 1, '平仓尝试序号要可见');
 });
 
 test('平仓期间未认领的成交：仓位已归零 + 账本对齐 → 移入 resolved，不拦下次启动', async () => {
-  const bot = mkBot();
-  let pos = { sizeBase: 0.0056, entryPrice: 71_249.6 };
+  const bot = mkBot({ ledgerBase: 0.0058 });
+  // 交易所仓位含那笔 0.0002（它确实成交了），所以平仓量 = 0.0060；
+  // 账本 0.0058 + 窗口外成交 0.0002 = 0.0060 → 差额恰好等于平仓量，可解释。
+  let pos = { sizeBase: 0.0060, entryPrice: 71_249.6 };
   bot.ex = {
     getPosition: () => pos,
     closePosition: async () => {
       // 方向不符（另一个方向），窗口认领不到 → untracked +1
       bot._handleFill({ marketId: 1, orderId: 'other', side: 'buy', sizeBase: 0.0002, price: 70_500 });
       pos = null;
-      return { orderId: 'c2', side: 'sell', price: 70_458.7, sizeBase: 0.0056 };
+      return { orderId: 'c2', side: 'sell', price: 70_458.7, sizeBase: 0.0060 };
     },
   };
   await bot._closeWithConfirm(1);
   assert.equal(bot._untrackedFills.length, 0, '已对账的未识别成交不该继续拦启动');
   assert.equal(bot._untrackedResolved.length, 1, '证据保留在 resolved');
   assert.equal(bot._untrackedResolved[0].reason, 'close-confirmed');
+});
+
+test('重锚必须有凭据：差额解释不了就拒绝，且不改账本（对账 ≠ 抄账）', async () => {
+  const bot = mkBot();                       // 账本 0.0056
+  let pos = { sizeBase: 0.0056, entryPrice: 71_249.6 };
+  bot.ex = {
+    getPosition: () => pos,
+    closePosition: async () => {
+      // 账本里混进一笔交易所没有的成交：差额 ≠ 本次平仓量 → 无法解释
+      bot.posLedger.applyFill({ orderId: 'ghost', side: 'buy', sizeBase: 0.0003, price: 70_000, rawTs: 1 });
+      pos = null;
+      return { orderId: 'c3', side: 'sell', price: 70_458.7, sizeBase: 0.0056 };
+    },
+  };
+  await bot._closeWithConfirm(1);
+  assert.equal(bot.posLedger.value, 0.0059, '拒绝重锚时账本必须保持原值');
+  assert.equal(bot.posLedger.lastReconcile, null);
+  assert.equal(bot._ledgerReconcileRefused?.reason, 'delta-mismatch');
+  assert.match(bot._startBlocked || '', /账本重锚被拒绝/);
+});
+
+test('reconcile 白名单：含糊理由一律拒绝', () => {
+  const bot = mkBot();
+  const r = bot.posLedger.reconcile(0, { why: 'fix' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'why-not-allowed');
+  assert.equal(bot.posLedger.value, 0.0056, '被拒绝时不许改账');
 });

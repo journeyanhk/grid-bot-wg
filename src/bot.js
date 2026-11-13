@@ -200,6 +200,12 @@ export class GridBot {
     this._lastCloseClaim = null;     // { attemptId, claims, claimed, maxClaimLagMs }
     this._untrackedResolved = [];    // 已按交易所真值对账掉的「未跟踪成交」明细（证据不丢，只是不再拦启动）
     this.lastStopFill = null;        // 停机期间入账的成交（可审计）
+    this._duplicateFills = 0;        // 被 fillKey 挡住的重复成交（轮询回放）
+    this._reconcileEvents = [];      // 24h 内的账本对齐（>3 次/天 = 漏单还在发生）
+    this._ledgerReconcileRefused = null; // 最近一次被拒绝的重锚（BLOCKING 证据）
+    this._stallRunningMs = 0;        // 完成格零增长（只累计运行态）
+    this._stallTickAt = Date.now();
+    this._lastRungAt = null;         // 完成格最近增长（墙钟，仅历史展示）
     this._lastVanishAlertAt = 0;
     // Cancellation is safety-critical: require consecutive exchange snapshots
     // showing target orders gone before local state is cleared or trading moves on.
@@ -266,6 +272,11 @@ export class GridBot {
       untrackedFills: (this._untrackedFills || []).slice(0, 20),
       // 已按交易所真值对账掉的未识别成交：明细跨重启保留（证据），但不再计入闸门。
       untrackedResolved: (this._untrackedResolved || []).slice(0, 20),
+      duplicateFills: Number(this._duplicateFills) || 0,
+      reconcileEvents: (this._reconcileEvents || []).slice(0, 50),
+      ledgerReconcileRefused: this._ledgerReconcileRefused ?? null,
+      stallRunningMs: Number(this._stallRunningMs) || 0,
+      lastRungAt: this._lastRungAt ?? null,
       // 认领窗口的实测值要跨重启累积，否则 120s 这个数永远得不到标定（review P1-2）。
       lastCloseClaim: this._lastCloseClaim ?? null,
       lastStopFill: this.lastStopFill ?? null,
@@ -303,6 +314,12 @@ export class GridBot {
     this._untrackedResolved = Array.isArray(snap.untrackedResolved) ? snap.untrackedResolved : [];
     this._lastCloseClaim = snap.lastCloseClaim ?? null;
     this.lastStopFill = snap.lastStopFill ?? null;
+    this._duplicateFills = Number(snap.duplicateFills) || 0;
+    this._reconcileEvents = Array.isArray(snap.reconcileEvents) ? snap.reconcileEvents : [];
+    this._ledgerReconcileRefused = snap.ledgerReconcileRefused ?? null;
+    this._stallRunningMs = Number(snap.stallRunningMs) || 0;
+    this._lastRungAt = snap.lastRungAt ?? null;
+    this._stallTickAt = Date.now();
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
     this._lastStop = snap.lastStop ?? null;       // 停机原因跨重启保留
     this._startBlocked = snap.startBlocked ?? null; // 上一轮为什么没铺单（跨重启保留）
@@ -750,6 +767,11 @@ export class GridBot {
     const h0 = (this.config.recoverHystFrac ?? 0.5) * (this.grid?.spacing || 0);
     this.outOfRange = this.lastPrice < this.config.lower - h0 || this.lastPrice > this.config.upper + h0;
 
+    // 启动即重启计时基准：停机期间不算「零增长」，所以零增长从这一刻重新累计。
+    // （若不重置，停 12 小时后一启动就满足「完成格 12h 零增长」。）
+    this._stallRunningMs = 0;
+    this._stallTickAt = Date.now();
+
     this.ex.on('fill', this._onFill);
     this.ex.on('price', this._onPrice);
     if (typeof this.ex.start === 'function') this.ex.start();
@@ -1043,16 +1065,28 @@ export class GridBot {
     if (!this.grid || !this.config) return;
     const mid = (this.config.lower + this.config.upper) / 2;
     const notional = this.grid.count * this.config.sizeBase * mid;
+    // 「一个名字里带 Net 的字段，必须有一个测试证明它真的是 net」。
+    // 2026-11-13 实测：$0.0302 精确等于毛额 —— feeRate 读到了 0（0 同时表示「免费」和「还没加载」），
+    // 于是一个叫 perRungNet 的字段在重启后静默变回毛额，没人会去质疑一个叫「净」的字段。
+    // 现在三数并列，并且 feeRate 未知时 perRungNet=null（宁可没有数，也不给一个假净额）。
+    const grossPerRung = round8(this.grid.spacing * this.config.sizeBase);
+    const feeRate = Number(this.ex?.feeRate);
+    // feeRateKnown 明确为 false = 还没加载完费率表 → 不许把 0 当成「免费」。
+    // 没有这个标志的适配器沿用旧语义（0 即免费），以免把既有交易所的净额算空。
+    const feeKnown = this.ex?.feeRateKnown !== false && Number.isFinite(feeRate) && feeRate >= 0;
+    const feePerRung = feeKnown ? round8(2 * feeRate * this.config.sizeBase * mid) : null;
+    const perRungNet = feeKnown ? round8(grossPerRung - feePerRung) : null;
     this.risk = {
       leverage: this.config.leverage,
       notional: round2(notional),
       requiredMargin: round2(notional / this.config.leverage),
       perRungProfit: round2(this.grid.spacing * this.config.sizeBase),
-      // 扣双边 maker 费后的净利（$0.0111 这种量级，四舍五入到 4 位否则全是 0.01）
-      perRungNet: Number(netPerRungUsd({
-        spacing: this.grid.spacing, sizeBase: this.config.sizeBase, price: mid,
-        feeRate: Number(this.ex?.displayFeeRate ?? this.ex?.feeRate ?? 0),
-      })?.toFixed(4) ?? 0),
+      // 三数并列：毛 / 费 / 净。perRungNet 为 null 表示「费率未知」，不是「免费」。
+      grossPerRung,
+      feePerRung,
+      perRungNet,
+      feeRatePpm: feeKnown ? Math.round(feeRate * 1e6) : null,
+      feeRateKnown: feeKnown,
       sizeBase: this.config.sizeBase,
       spacingPct: round2((this.grid.spacing / mid) * 100),
     };
@@ -1742,6 +1776,41 @@ export class GridBot {
       })
       .catch(() => { /* 问不到就保持原样，绝不猜 */ })
       .finally(() => { this._priceRefreshInFlight = false; });
+  }
+
+  /**
+   * 完成格「零增长」计时：**只累计运行态**。
+   *
+   * 2026-11-13 review 必改 2：停机时这个钟也在走，于是停 12 小时后重启那一刻
+   * 「零增长=12h」立刻成立 —— 而 projected 一旦 ≥28 格，减仓判据当场触发。
+   * 停机时间不是「引擎停转」，是「引擎没开」；这两件事在判据里必须分开。
+   */
+  _rungStallTick() {
+    const now = Date.now();
+    const last = Number(this._stallTickAt) || now;
+    this._stallTickAt = now;
+    if (this.running) {
+      this._stallRunningMs = (Number(this._stallRunningMs) || 0) + Math.max(0, now - last);
+    }
+  }
+
+  /** 完成一格：运行态零增长清零（墙钟时刻只作历史展示，不参与判据）。 */
+  _noteRungCompleted() {
+    this._stallRunningMs = 0;
+    this._lastRungAt = Date.now();
+    this._stallTickAt = Date.now();
+  }
+
+  /**
+   * 记一次成功的账本对齐，并保留 24h 内的次数。
+   * 对齐本身不是事故，但「一天对了好几次」= 漏单还在发生（review 必改 4 的第 3 条）。
+   */
+  _noteReconcile(rec) {
+    const now = Date.now();
+    this._reconcileEvents = [
+      { at: now, why: rec.why || null, from: rec.from, to: rec.to },
+      ...(this._reconcileEvents || []),
+    ].filter((x) => now - x.at <= 24 * 3600_000).slice(0, 50);
   }
 
   /**
@@ -2484,17 +2553,29 @@ export class GridBot {
     const price = Number(f.price) || 0;
     if (!(size > 0)) return;
     const known = this._recentOrderMeta?.get?.(id) || null;
+    // 回放先去重：重复成交不入账、不重复留痕、更不许进「未识别」列表
+    // （进了就会拦住下次启动 —— 修好入账反而制造假熔断，review 必改 3）。
+    let dup = false;
+    try {
+      const r = this.posLedger.applyFill({
+        orderId: id, side: f.side, sizeBase: size, price, rawTs: f.rawTs, createdAt: f.createdAt,
+      });
+      dup = !!r?.duplicate;
+    } catch { /* 账本异常由一致性巡检兜底 */ }
+    if (dup) {
+      this._duplicateFills = (Number(this._duplicateFills) || 0) + 1;
+      this.lastStopFill = {
+        at: Date.now(), orderId: id, side: f.side, sizeBase: size, price, known: !!known, duplicate: true,
+      };
+      this._changed();
+      return;
+    }
     if (!known) {
       this._untrackedFills.unshift({
         t: Date.now(), orderId: id, side: f.side, sizeBase: size, price, whileStopped: true,
       });
       if (this._untrackedFills.length > 20) this._untrackedFills.length = 20;
     }
-    try {
-      this.posLedger.applyFill({
-        orderId: id, side: f.side, sizeBase: size, price, rawTs: f.rawTs, createdAt: f.createdAt,
-      });
-    } catch { /* 账本异常由一致性巡检兜底 */ }
     this.lastStopFill = {
       at: Date.now(), orderId: id, side: f.side, sizeBase: size, price, known: !!known,
       ledgerAfter: Number(this.posLedger?.value ?? NaN),
@@ -2566,6 +2647,22 @@ export class GridBot {
     const fillPrice = Number.isFinite(f.price) ? f.price : (actEff?.price ?? 0);
     const fillSize = Number.isFinite(f.sizeBase) ? f.sizeBase : this.config.sizeBase;
 
+    // 回放先去重（review 必改 3）：轮询游标重启后会重新对齐，可能把旧成交再推一遍。
+    // 幂等键由 PositionLedger.fillKey 提供（orderId+rawTs+side+size+price，跨重启持久化），
+    // 重复不入账、不统计、不补腿、不进未识别。
+    let dup = false;
+    try {
+      const led = this.posLedger.applyFill({
+        orderId: id, side: f.side, sizeBase: fillSize, price: fillPrice,
+        rawTs: f.rawTs, createdAt: f.createdAt,
+      });
+      dup = !!led?.duplicate;
+    } catch { /* 账本异常不能阻断交易主流程，由一致性巡检兜底 */ }
+    if (dup) {
+      this._duplicateFills = (Number(this._duplicateFills) || 0) + 1;
+      return;
+    }
+
     if (f.side === 'buy') this.stats.buys++; else this.stats.sells++;
     this.stats.volume = round2(this.stats.volume + fillPrice * fillSize);
     this.fills.unshift({ t: Date.now(), side: f.side, price: fillPrice, size: fillSize, level: levelIndex });
@@ -2582,17 +2679,12 @@ export class GridBot {
     if (continuation) {
       logger.info('bot', `同单续成交 ${f.side} ${fillSize} @ ${fillPrice}`, { level: levelIndex, market: this.config.displayName });
     }
-    // P0-2：真实成交推进本地预期仓位（幂等键去重，重复投递不会记两次）
-    try {
-      this.posLedger.applyFill({
-        orderId: id, side: f.side, sizeBase: fillSize, price: fillPrice,
-        rawTs: f.rawTs, createdAt: f.createdAt,
-      });
-    } catch { /* 账本异常不能阻断交易主流程，由一致性巡检兜底 */ }
+    // P0-2：账本已在函数开头推进（幂等键去重），这里不再重复 apply。
     this._runRiskCycle('fill');   // P0-1：成交后立即评估（库存/偏置/账本）
     if (this.fills[0]) this.fills[0].opening = !closing;   // 供风控的「成交偏置」判定
     if (closing && !isManual) {
       this.stats.completedRungs++;
+      this._noteRungCompleted();
       // Incremental accumulation with the ACTUAL fill size: adjustRange no longer
       // rewrites history (the old code recomputed rungs × CURRENT spacing), and
       // partial fills are credited with what really executed.
@@ -3161,9 +3253,19 @@ export class GridBot {
             // （平仓成交在 stop() 之后才到、或事件丢了），就地按真值对齐并留痕，
             // 不把「重启前先 new-epoch」写进操作规程。
             try {
-              const rec = this.posLedger?.reconcile?.(0, `close-confirmed#${attemptId}`);
-              if (rec?.changed) {
-                this._alert(`⚠️ 平仓后账本按交易所真值对齐：${rec.from} → ${rec.to}（未收到对应成交事件，已留痕 lastReconcile）`);
+              // 差额必须能被解释：账本差额应恰好等于「本次平掉的仓位」。
+              // 对不上就不是漏了一笔成交，而是我们对这笔仓位本身理解错了 ——
+              // 那种情况必须报 BLOCKING，绝不许「改成一致就算了」（review 必改 4）。
+              const rec = this.posLedger?.reconcile?.(0, {
+                why: 'close-confirmed', expectedDelta: -Number(pos0?.sizeBase || 0),
+              });
+              if (rec?.refused) {
+                this._startBlocked = `账本重锚被拒绝（${rec.reason}）：from=${rec.from} to=${rec.to} expectedDelta=${rec.expectedDelta} actualDelta=${rec.actualDelta}`;
+                this._alert(`⛔ 平仓确认归零但账本差额无法解释（${rec.reason}：账本 ${rec.from} → 交易所 ${rec.to}，应变动 ${rec.expectedDelta}，实际 ${rec.actualDelta}）：拒绝重锚，按 BLOCKING 处理`);
+                this._ledgerReconcileRefused = { at: Date.now(), ...rec };
+              } else if (rec?.changed) {
+                this._noteReconcile(rec);
+                this._alert(`⚠️ 平仓后账本按交易所真值对齐：${rec.from} → ${rec.to}（差额=本次平仓量，未收到对应成交事件，已留痕）`);
               }
             } catch { /* 账本异常不阻断平仓确认 */ }
             return true;
@@ -3187,7 +3289,8 @@ export class GridBot {
         // review P1-2：「发出告警」不能替代「处理」。仓位确认归零、账本又已对齐真值时，
         // 这几笔未认领成交已经没有判断价值；留在 untrackedFills 里只会拦住下次重启，
         // 把恢复重新推回「等人 new-epoch」。移入 resolved：证据保留，闸门放行。
-        const aligned = confirmedFlat && Math.abs(Number(this.posLedger?.value ?? NaN)) < 1e-9;
+        const refusedNow = Number(this._ledgerReconcileRefused?.at || 0) >= Number(ctx?.at || 0);
+        const aligned = confirmedFlat && !refusedNow && Math.abs(Number(this.posLedger?.value ?? NaN)) < 1e-9;
         if (aligned) {
           const moved = this._untrackedFills.splice(0, grew);
           this._untrackedResolved = [
@@ -3886,6 +3989,11 @@ export class GridBot {
 
   getState() {
     this._ensureStoppedPrice();
+    this._rungStallTick();
+    // 费率表是异步加载的：加载完成后再算一次单位经济，避免整段重启期都挂着 null。
+    if (this.grid && this.config && this.risk && this.risk.feeRateKnown === false && this.ex?.feeRateKnown === true) {
+      this._recomputeRisk();
+    }
     const pos = this.running || this.config ? this.ex.getPosition?.(this.config?.marketId) : null;
     // 风控状态必须对外可见：状态机在跑但外部看不见，等于没有（巡检/面板都读不到）。
     const guard = this.guard?.toJSON?.() || null;
@@ -4042,6 +4150,16 @@ export class GridBot {
       // 停机期间到达的成交（必须入账，不许因为 !running 丢掉）。
       lastStopFill: this.lastStopFill ?? null,
       ledgerLastReconcile: this.posLedger?.lastReconcile ?? null,
+      // 账本对齐次数（review 必改 4）：一天超过 3 次 = 漏单还在发生。
+      ledgerReconciles24h: (this._reconcileEvents || []).length,
+      ledgerReconcileLast: (this._reconcileEvents || [])[0] ?? null,
+      ledgerReconcileRefused: this._ledgerReconcileRefused ?? null,
+      // 重复成交（轮询回放被 fillKey 挡住）：计数可见，否则「账本没变」与「成交没到」长得一样。
+      duplicateFills: Number(this._duplicateFills) || 0,
+      // 零增长只算运行态（review 必改 2）；stoppedMs 单独给出，供人判断「没开」多久。
+      rungsStalledRunningMs: Number(this._stallRunningMs) || 0,
+      rungsLastIncreaseAt: this._lastRungAt ? new Date(this._lastRungAt).toISOString() : null,
+      stoppedMs: this.running ? 0 : (this._lastStop?.at ? Math.max(0, Date.now() - Number(this._lastStop.at)) : null),
       // 2026-11-13：原先报的是数组长度，而 drain 只补「5 分钟内」的腿 —— 于是一条
       // 早已过期的待铺腿会在 state 里永远显示 `deferredOpenings=1`，读起来像「重启后
       // 会补一张旧价买单」。过期的腿永远不会被铺出去，所以计数也必须按新鲜度派生。
@@ -4086,6 +4204,7 @@ export class GridBot {
 function labelMode(m) { return m === 'long' ? '做多网格' : m === 'short' ? '做空网格' : '中性网格'; }
 
 function round2(x) { return Math.round(x * 100) / 100; }
+function round8(x) { return Math.round(x * 1e8) / 1e8; }
 // 回收阶梯首档偏移的解析：'inf'/非有限 → Infinity（不挂阶梯）；有限且 ≥0 → 该值；
 // 其余（含重启后被 JSON 变成 null 的历史快照）→ 默认 2。永远不落到 0。
 function ladderOffsetGrids(v) {

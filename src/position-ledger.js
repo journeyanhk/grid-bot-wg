@@ -9,6 +9,9 @@
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const round8 = (v) => Math.round(v * 1e8) / 1e8;
 
+/** 允许的「重锚理由」白名单。含糊理由（fix/repair/…) 一律拒绝。 */
+export const RECONCILE_WHYS = new Set(['close-confirmed', 'manual-close', 'auto-reanchor']);
+
 /** 成交幂等键：同一笔成交即使被投递两次，也只会记一次账。 */
 export function fillKey(f = {}) {
   // rawTs 是微秒原始戳；毫秒版会把同毫秒的两笔部分成交压成同一笔。
@@ -31,6 +34,7 @@ export class PositionLedger {
     this.appliedAt = num(raw.appliedAt) || null;  // 最后一次记账时刻
     this.resetCount = num(raw.resetCount);        // 重锚次数（应极少，可审计）
     this.lastReconcile = raw.lastReconcile || null; // 最近一次「对齐真值」（非新一代，不动 startBase）
+    this.reconcileCount = num(raw.reconcileCount); // 累计对齐次数（>3/天 说明漏单还在发生）
     this._seen = new Map();
     this._order = Array.isArray(raw.seenOrder) ? raw.seenOrder.slice(-400) : [];
     for (const k of this._order) this._seen.set(k, true);
@@ -83,17 +87,38 @@ export class PositionLedger {
    * `_handleFill` 若因 `!running` 丢掉它，expected 就冻结在旧值；重启一致性检查
    * 会把它读成「账本不一致」并熔断，于是恢复只能靠人手 new-epoch ——
    * **数据缺陷被换成了操作规程，而规程会在凌晨三点被忘记。**
-   * 结论：真实成交没到，就用交易所真值对齐；对齐本身必须留痕（from/to/why）。
+   *
+   * 但「对账」和「抄账」的区别在于：前者要求差额能被解释，后者只要求差额消失。
+   * 所以这里设三道闸：
+   *   ① why 必须来自白名单（close-confirmed / manual-close / auto-reanchor）；
+   *   ② 传了 expectedDelta 就必须吻合（容差 1e-8），否则拒绝并交回调用方报 BLOCKING；
+   *   ③ 每次成功都要留痕（from/to/why/at），让「一天改了几次账」可见。
    */
-  reconcile(exchangeBase, why = '') {
+  reconcile(exchangeBase, opts = {}) {
+    const { why = '', expectedDelta = null, now = Date.now() } = opts || {};
+    const base = String(why).trim().split('#')[0];
+    if (!RECONCILE_WHYS.has(base)) {
+      return { ok: false, refused: true, reason: 'why-not-allowed', why: String(why).slice(0, 200) };
+    }
     const from = this.expected;
     const to = round8(num(exchangeBase));
-    if (from === to) return { ok: true, changed: false, from, to };
+    if (from === to) return { ok: true, changed: false, from, to, why: base };
+    if (expectedDelta != null) {
+      const want = round8(num(expectedDelta));
+      const got = round8(to - from);
+      if (Math.abs(got - want) > 1e-8) {
+        return {
+          ok: false, refused: true, reason: 'delta-mismatch',
+          from, to, expectedDelta: want, actualDelta: got, why: base,
+        };
+      }
+    }
     this.expected = to;
     this.version += 1;
-    this.appliedAt = Date.now();
-    this.lastReconcile = { at: this.appliedAt, from, to, why: String(why).slice(0, 200) };
-    return { ok: true, changed: true, from, to };
+    this.appliedAt = now;
+    this.lastReconcile = { at: this.appliedAt, from, to, why: base, expectedDelta: expectedDelta != null ? round8(num(expectedDelta)) : null };
+    this.reconcileCount = (this.reconcileCount || 0) + 1;
+    return { ok: true, changed: true, from, to, why: base };
   }
 
   get value() { return this.expected; }
@@ -107,6 +132,7 @@ export class PositionLedger {
       appliedAt: this.appliedAt,
       resetCount: this.resetCount,
       lastReconcile: this.lastReconcile || null,
+      reconcileCount: this.reconcileCount,
       seenOrder: this._order.slice(-400),
     };
   }
