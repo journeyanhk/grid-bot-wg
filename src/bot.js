@@ -264,6 +264,11 @@ export class GridBot {
       // 未跟踪成交（成交到了但本地没这张单）：跨重启保留，否则重启后传感器归零、
       // 「刚才那笔没人认领的成交」这件事就永远消失了。
       untrackedFills: (this._untrackedFills || []).slice(0, 20),
+      // 已按交易所真值对账掉的未识别成交：明细跨重启保留（证据），但不再计入闸门。
+      untrackedResolved: (this._untrackedResolved || []).slice(0, 20),
+      // 认领窗口的实测值要跨重启累积，否则 120s 这个数永远得不到标定（review P1-2）。
+      lastCloseClaim: this._lastCloseClaim ?? null,
+      lastStopFill: this.lastStopFill ?? null,
       // 「上一轮为什么没铺单」是事实，必须跨重启保留：只活在内存里的话，重启后
       // `running=true` 会被恢复、`startBlocked` 却消失，巡检看到的是一个「正常在跑的空机器人」。
       startBlocked: this._startBlocked ?? null,
@@ -295,6 +300,9 @@ export class GridBot {
     this._placementProgress = snap.placementProgress ?? null;
     this._retryQueue = Array.isArray(snap.retryQueue) ? snap.retryQueue : [];
     this._untrackedFills = Array.isArray(snap.untrackedFills) ? snap.untrackedFills : [];
+    this._untrackedResolved = Array.isArray(snap.untrackedResolved) ? snap.untrackedResolved : [];
+    this._lastCloseClaim = snap.lastCloseClaim ?? null;
+    this.lastStopFill = snap.lastStopFill ?? null;
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
     this._lastStop = snap.lastStop ?? null;       // 停机原因跨重启保留
     this._startBlocked = snap.startBlocked ?? null; // 上一轮为什么没铺单（跨重启保留）
