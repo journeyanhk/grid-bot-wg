@@ -3929,6 +3929,14 @@ export class GridBot {
       // 读报告的人要能一眼判断这个数「算不算现值」（review P0-2）。
       priceSource: this._priceSource ?? (this.running ? 'ws' : null),
       lastPriceAt: this._lastPriceAt ? new Date(this._lastPriceAt).toISOString() : null,
+      // 派生量 > 存量：停机时 _runRiskCycle 早退，`outOfRange` 会冻结在上一轮的值，
+      // 于是「价格已在下界之外」这件事在 state 里看不出来。live 版按当前价现算。
+      outOfRangeLive: (() => {
+        const p = Number(this.lastPrice), c = this.config;
+        if (!(p > 0) || !c) return this.outOfRange;
+        const h0 = (Number(c.spacing ?? this.grid?.spacing) || 0) / 2;
+        return p < c.lower - h0 || p > c.upper + h0;
+      })(),
       outOfRange: this.outOfRange,
       risk: this.risk,
       stats: this.stats,
