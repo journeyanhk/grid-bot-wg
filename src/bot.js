@@ -4376,6 +4376,8 @@ export class GridBot {
       applyFillErrors: Number(this._applyFillErrors) || 0,
       ledgerBlockReason: this._ledgerBlockReason ?? null,
       ledgerBlockAt: this._ledgerBlockAt ?? null,
+      ledgerBlockAgeMs: this._ledgerBlockAt ? Math.max(0, Date.now() - this._ledgerBlockAt) : null,
+      ledgerBlockOkStreak: Number(this._ledgerBlockOkStreak) || 0,
       ledgerBlockAutoCleared: this._ledgerBlockAutoCleared ?? null,
       stoppedMs: this.running ? 0
         : ((this._lastStop?.at ?? this._stoppedSince)
