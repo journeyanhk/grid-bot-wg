@@ -194,6 +194,7 @@ export class GridBot {
     // state 里只有化石 `startBlockedReason`（上一世代的「账本不一致」），
     // 而真正的原因「breakout」在这个字段里根本不存在。
     this._lastStop = null;           // { reason:'breakout'|'maxloss'|'manual', at }
+    this._stoppedSince = null;       // 停机起点（墙钟；跨重启保留，用于「停机时长」）
     // 2026-11-13 review：平仓认领窗口不能只用 marketId+side 当 key ——
     // 两次连续平仓尝试（部分成交后重试/两个入口同时触发）会互相串认领。
     this._closeSeq = 0;              // 平仓尝试序号（单调递增，进状态行）
@@ -285,6 +286,7 @@ export class GridBot {
       startBlocked: this._startBlocked ?? null,
       autoStopped: this._autoStopped,   // 动态网格：自动停机→冷静门重启状态
       lastStop: this._lastStop ?? null, // 停机原因（breakout/maxloss/manual）：跨重启保留，别让它变成谜
+      stoppedSince: this._stoppedSince ?? null,
       invBase: this._invBase ?? 0,      // 库存基线（审计用，跨重启保留）
       auditBuysBase: this._auditBuysBase ?? 0,  // 审计锚点：成交计数起点（与基线同刻）
       auditSellsBase: this._auditSellsBase ?? 0,
@@ -322,6 +324,7 @@ export class GridBot {
     this._stallTickAt = Date.now();
     this._autoStopped = snap.autoStopped ?? null; // 动态网格：恢复自动停机状态（重启监督用）
     this._lastStop = snap.lastStop ?? null;       // 停机原因跨重启保留
+    this._stoppedSince = snap.stoppedSince ?? (this._lastStop?.at ?? null);
     this._startBlocked = snap.startBlocked ?? null; // 上一轮为什么没铺单（跨重启保留）
     this._dynLog = Array.isArray(snap.dynLog) ? snap.dynLog.slice(-200) : []; // 动态动作记录（毕业评审）
     this._dynGateBlocked = (snap.dynGateBlocked && typeof snap.dynGateBlocked === 'object')
@@ -851,6 +854,7 @@ export class GridBot {
     if (!this._lastStop || Date.now() - Number(this._lastStop.at || 0) > 60_000) {
       this._lastStop = { reason: 'manual', at: Date.now() };
     }
+    if (wasRunning) this._stoppedSince = Date.now();
     this._pauseTradingRuntime();
     try {
       if (this.config) await this._cancelAllConfirmed(this.config.marketId, '停止网格时撤销挂单');
@@ -4159,7 +4163,9 @@ export class GridBot {
       // 零增长只算运行态（review 必改 2）；stoppedMs 单独给出，供人判断「没开」多久。
       rungsStalledRunningMs: Number(this._stallRunningMs) || 0,
       rungsLastIncreaseAt: this._lastRungAt ? new Date(this._lastRungAt).toISOString() : null,
-      stoppedMs: this.running ? 0 : (this._lastStop?.at ? Math.max(0, Date.now() - Number(this._lastStop.at)) : null),
+      stoppedMs: this.running ? 0
+        : ((this._lastStop?.at ?? this._stoppedSince)
+          ? Math.max(0, Date.now() - Number(this._lastStop?.at ?? this._stoppedSince)) : null),
       // 2026-11-13：原先报的是数组长度，而 drain 只补「5 分钟内」的腿 —— 于是一条
       // 早已过期的待铺腿会在 state 里永远显示 `deferredOpenings=1`，读起来像「重启后
       // 会补一张旧价买单」。过期的腿永远不会被铺出去，所以计数也必须按新鲜度派生。
