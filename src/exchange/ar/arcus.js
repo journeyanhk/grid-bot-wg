@@ -476,6 +476,19 @@ export class ArcusExchange extends EventEmitter {
     return p ?? this._market(mId).lastPrice;
   }
 
+  /**
+   * 强制问一次价（绕过缓存）。
+   * 用途：停机状态下价格订阅根本不存在，`lastPrice` 会是 null 或上一轮的陈旧值；
+   * 于是「现价 vs 门槛」这类判据在停机时永远不成立。停机进程完全可以自己问一次价——
+   * 用本市场的 bbo，而不是拿另一个市场（Coinbase 现货）的收盘价去回答 AR 的问题。
+   */
+  async refreshPrice(marketId) {
+    const mId = Number(marketId);
+    this._watch.add(mId);
+    this._watchTouch.set(mId, Date.now());
+    return this._fetchBbo(mId);
+  }
+
   async _fetchBbo(marketId) {
     const { bid, ask } = await this._fetchBook(marketId);
     const mid = (bid + ask) / 2;
@@ -502,7 +515,7 @@ export class ArcusExchange extends EventEmitter {
     // 与上一价差 ≥ 1 个 tick 才推送，避免刷爆 SSE
     const tick = Number(this.markets.get(mId)?.stepPrice) || 0;
     if (!Number.isFinite(prev) || Math.abs(price - prev) >= tick) {
-      this.emit('price', { marketId: mId, price });
+      this.emit('price', { marketId: mId, price, source: source || 'ws' });
     }
   }
 

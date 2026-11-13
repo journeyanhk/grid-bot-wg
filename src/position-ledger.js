@@ -30,6 +30,7 @@ export class PositionLedger {
     this.baseAt = num(raw.baseAt) || null;        // 基线锚定时刻
     this.appliedAt = num(raw.appliedAt) || null;  // 最后一次记账时刻
     this.resetCount = num(raw.resetCount);        // 重锚次数（应极少，可审计）
+    this.lastReconcile = raw.lastReconcile || null; // 最近一次「对齐真值」（非新一代，不动 startBase）
     this._seen = new Map();
     this._order = Array.isArray(raw.seenOrder) ? raw.seenOrder.slice(-400) : [];
     for (const k of this._order) this._seen.set(k, true);
@@ -75,6 +76,26 @@ export class PositionLedger {
     return round8(num(exchangeBase) - this.expected);
   }
 
+  /**
+   * 把 expected 对齐到交易所真值，**不动周期起点 startBase、不算新一代**。
+   *
+   * 2026-11-13 破界平仓拿到的一条教训：平仓成交可能在 `stop()` 之后才到达，
+   * `_handleFill` 若因 `!running` 丢掉它，expected 就冻结在旧值；重启一致性检查
+   * 会把它读成「账本不一致」并熔断，于是恢复只能靠人手 new-epoch ——
+   * **数据缺陷被换成了操作规程，而规程会在凌晨三点被忘记。**
+   * 结论：真实成交没到，就用交易所真值对齐；对齐本身必须留痕（from/to/why）。
+   */
+  reconcile(exchangeBase, why = '') {
+    const from = this.expected;
+    const to = round8(num(exchangeBase));
+    if (from === to) return { ok: true, changed: false, from, to };
+    this.expected = to;
+    this.version += 1;
+    this.appliedAt = Date.now();
+    this.lastReconcile = { at: this.appliedAt, from, to, why: String(why).slice(0, 200) };
+    return { ok: true, changed: true, from, to };
+  }
+
   get value() { return this.expected; }
 
   toJSON() {
@@ -85,6 +106,7 @@ export class PositionLedger {
       baseAt: this.baseAt,
       appliedAt: this.appliedAt,
       resetCount: this.resetCount,
+      lastReconcile: this.lastReconcile || null,
       seenOrder: this._order.slice(-400),
     };
   }

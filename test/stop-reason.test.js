@@ -94,3 +94,43 @@ test('重锚后 guardState 不许自相矛盾：state=RUNNING 时 blockOpening �
   assert.deepEqual(bot.guardState.reasons, [], '上一代 reasons 不许冒充现值');
   assert.equal(bot.posLedger.value, 0, '账本重锚到交易所真值');
 });
+
+test('_newEpochIssues：任何一个脏字段都要被点名（重锚不许自称干净）', () => {
+  const bot = mkBot();
+  bot.active = new Map();
+  bot._retryQueue = [];
+  bot._untrackedFills = [];
+  bot._deferredOpenings = [];
+  bot.posLedger = { value: 0 };
+  bot.guardState = bot._newGuardEpoch();
+  assert.deepEqual(bot._newEpochIssues(), [], '干净起点不该报问题');
+
+  bot.guardState.blockOpening = true;
+  bot._untrackedFills.push({ orderId: 'x' });
+  bot._retryQueue.push({});
+  bot._deferredOpenings.push({});
+  const issues = bot._newEpochIssues();
+  for (const k of ['blockOpening', 'untrackedFills', 'retryQueue', 'deferredOpenings']) {
+    assert.ok(issues.some((s) => s.includes(k)), `必须点名 ${k}，实际：${issues.join('|')}`);
+  }
+});
+
+test('_newGuardEpoch：整体替换而不是在旧对象上删字段', () => {
+  const bot = mkBot();
+  const old = { state: 'DEFENSIVE', reasons: ['a'], blockOpening: true, blockSide: 'buy', haltReason: 'x', metrics: { m: 1 }, 未来字段: '会漏' };
+  bot.guardState = old;
+  const fresh = bot._newGuardEpoch();
+  assert.equal(fresh.state, 'RUNNING');
+  assert.deepEqual(fresh.reasons, []);
+  assert.equal(fresh.blockOpening, false);
+  assert.equal(fresh.haltReason, null);
+  assert.equal('未来字段' in fresh, false, '替换后上一个世代的多余字段不该跟着进来');
+});
+
+test('_clearDeferredOpenings 必须计数（静默丢弃是第 5 类反复出事的家族）', () => {
+  const bot = mkBot();
+  bot._deferredOpenings = [{ levelIndex: 21 }, { levelIndex: 22 }];
+  assert.equal(bot._clearDeferredOpenings('start'), 2);
+  assert.equal(bot._deferredDropped, 2);
+  assert.equal(bot._deferredDroppedReason, 'start');
+});
