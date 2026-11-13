@@ -94,3 +94,15 @@ test('自愈：历时不足 90s 不解除（三次一致但太快）', () => {
   for (let i = 0; i < 5; i += 1) bot._maybeAutoClearLedgerBlock(ok);
   assert.equal(bot._ledgerBlockReason !== null, true, '90s 是规格的一部分，不是装饰');
 });
+
+test('过期：6h 未解 → 升级告警只报一次（不是只写日志）', () => {
+  const bot = mkHealBot();
+  bot._ledgerBlockAt = Date.now() - 6.5 * 3600_000;
+  bot._ledgerBlockReason = '账本重锚被拒绝（仓位不一致）';
+  bot._maybeAutoClearLedgerBlock({ ok: false, status: 'mismatch', issues: ['x'] });
+  const hits = bot._alerts.filter((m) => /未解/.test(m));
+  assert.equal(hits.length, 1);
+  assert.equal(bot._ledgerBlockEscalated, true);
+  bot._maybeAutoClearLedgerBlock({ ok: false, status: 'mismatch', issues: ['x'] });
+  assert.equal(bot._alerts.filter((m) => /未解/.test(m)).length, 1, '不许每轮刷屏');
+});

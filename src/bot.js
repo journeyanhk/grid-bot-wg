@@ -36,6 +36,7 @@ const MISMATCH_CONVERGE_MS = 90 * 1000;
 // 账本闸（_ledgerBlockReason）的自愈规格：与 mismatch 收敛窗口同规格 —— 3 次同样本一致、历时 ≥90s。
 // review 2026-11-13：「一个只会变红的闸，和一个永远解不开的锁，是同一种东西。」
 const LEDGER_BLOCK_CLEAR_MS = 90 * 1000;
+const LEDGER_BLOCK_ESCALATE_MS = 6 * 3600 * 1000;
 const LEDGER_BLOCK_CLEAR_STREAK = 3;
 const MISMATCH_ATTEMPT_GAP_MS = 30 * 1000;
 const MISMATCH_MAX_ATTEMPTS = 3;
@@ -1749,6 +1750,18 @@ export class GridBot {
    */
   _maybeAutoClearLedgerBlock(consistency) {
     if (!this._ledgerBlockReason) return false;
+    // 过期（review 要求 5）：6h 未解除 = 这扇门已经不能靠自愈打开了，必须升级到
+    // 独立通道（error 级告警 + 看守），而不是只在巡检里多一行字。只报一次。
+    const _heldMs = this._ledgerBlockAt ? Date.now() - this._ledgerBlockAt : 0;
+    if (_heldMs >= LEDGER_BLOCK_ESCALATE_MS && !this._ledgerBlockEscalated) {
+      this._ledgerBlockEscalated = true;
+      this._alert(
+        `⛔ 账本闸已持续 ${Math.round(_heldMs / 3600000)}h 未解（${this._ledgerBlockReason}）。`
+        + '自愈未成功：请核对账本与交易所持仓，必要时 new-epoch 人工解锁。',
+        { key: 'ledger-block-escalate', level: 'error' },
+      );
+      logger.error('bot', `账本闸 6h 未解升级：${this._ledgerBlockReason}`);
+    }
     if (!consistency?.ok) {
       this._ledgerBlockOkStreak = 0;
       this._ledgerBlockOkSince = 0;
@@ -1767,6 +1780,7 @@ export class GridBot {
     this._ledgerBlockAutoCleared = rec;
     this._ledgerBlockReason = null;
     this._ledgerBlockAt = null;
+    this._ledgerBlockEscalated = false;
     this._ledgerBlockOkStreak = 0;
     this._ledgerBlockOkSince = 0;
     this._alert(
@@ -2063,6 +2077,7 @@ export class GridBot {
     // 重锚被拒的粘滞闸随新一代一起解除：账本已按交易所真值重建，旧理由不再成立。
     this._ledgerBlockReason = null;
     this._ledgerBlockAt = null;
+    this._ledgerBlockEscalated = false;
     this._ledgerBlockOkStreak = 0;
     this._ledgerBlockOkSince = 0;
     this._ledgerReconcileRefused = null;
