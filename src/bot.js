@@ -1706,10 +1706,10 @@ export class GridBot {
   /** 把一份风控结果落到状态机与持久化熔断账本上（含状态迁移告警）。 */
   _applyGuardResult(r) {
     // 账本重锚被拒 → 无论风控怎么算，都不许再开新仓（粘滞，直到新一代）。
-    if (this._ledgerBlockReason && r && r.state !== STATES.HALTED) {
+    if (this._ledgerBlockReason && r) {
       r = {
         ...r,
-        state: STATES.DEFENSIVE,
+        state: r.state === STATES.HALTED ? STATES.HALTED : STATES.DEFENSIVE,
         blockOpening: true,
         blockSide: 'both',
         reasons: [this._ledgerBlockReason, ...(r.reasons || [])].slice(0, 5),
